@@ -12,6 +12,7 @@ pub mod search;
 use board::{Board, Piece, PieceType, PlayerColor, Coordinate};
 use game::{GameState, EnPassantState};
 use evaluation::calculate_initial_material;
+use crate::moves::set_world_bounds;
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
@@ -42,12 +43,40 @@ pub struct JsMove {
 struct JsFullGame {
     board: JsBoard,
     turn: String,
-    castling_rights: Vec<String>,
+    /// All special rights - includes castling (kings/rooks) AND pawn double-move rights
+    #[serde(default)]
+    special_rights: Vec<String>,
     en_passant: Option<JsEnPassant>,
     halfmove_clock: u32,
     fullmove_number: u32,
     #[serde(default)]
     move_history: Vec<JsMoveHistory>,
+    #[serde(default)]
+    game_rules: Option<JsGameRules>,
+    #[serde(default)]
+    world_bounds: Option<JsWorldBounds>,
+}
+
+#[derive(Deserialize, Default)]
+struct JsGameRules {
+    #[serde(default)]
+    promotion_ranks: Option<JsPromotionRanks>,
+    #[serde(default)]
+    promotions_allowed: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct JsPromotionRanks {
+    white: Vec<String>,  // String because BigInt serializes as string
+    black: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct JsWorldBounds {
+    left: String,
+    right: String,
+    bottom: String,
+    top: String,
 }
 
 #[derive(Deserialize)]
@@ -88,64 +117,48 @@ impl Engine {
     pub fn new(json_state: JsValue) -> Result<Engine, JsValue> {
         let js_game: JsFullGame = serde_wasm_bindgen::from_value(json_state)?;
 
-        // Build GameState with i64 coordinates directly (no normalization)
+        // Apply world bounds from playableRegion if provided
+        if let Some(wb) = &js_game.world_bounds {
+            let left = wb.left.parse::<i64>().unwrap_or(-1_000_000_000_000_000);
+            let right = wb.right.parse::<i64>().unwrap_or(1_000_000_000_000_000);
+            let bottom = wb.bottom.parse::<i64>().unwrap_or(-1_000_000_000_000_000);
+            let top = wb.top.parse::<i64>().unwrap_or(1_000_000_000_000_000);
+            set_world_bounds(left, right, bottom, top);
+        }
+
+        // Build starting GameState from JS board
         let mut board = Board::new();
         for p in &js_game.board.pieces {
             let x: i64 = p.x.parse().map_err(|_| JsValue::from_str("Invalid X coordinate"))?;
             let y: i64 = p.y.parse().map_err(|_| JsValue::from_str("Invalid Y coordinate"))?;
 
-            let piece_type = match p.piece_type.as_str() {
-                "p" => PieceType::Pawn,
-                "n" => PieceType::Knight,
-                "b" => PieceType::Bishop,
-                "r" => PieceType::Rook,
-                "q" => PieceType::Queen,
-                "k" => PieceType::King,
-                "g" => PieceType::Guard,
-                "h" => PieceType::Hawk,
-                "c" => PieceType::Chancellor,
-                "a" => PieceType::Archbishop,
-                "m" => PieceType::Amazon,
-                "l" => PieceType::Camel,
-                "i" => PieceType::Giraffe,
-                "z" => PieceType::Zebra,
-                "s" => PieceType::Knightrider,
-                "e" => PieceType::Centaur,
-                "d" => PieceType::RoyalCentaur,
-                "o" => PieceType::Rose,
-                "u" => PieceType::Huygen,
-                "y" => PieceType::RoyalQueen,
-                _ => PieceType::Pawn,
-            };
+            let piece_type = PieceType::from_str(&p.piece_type)
+                .unwrap_or(PieceType::Pawn);
 
-            let color = match p.player.as_str() {
-                "w" => PlayerColor::White,
-                "b" => PlayerColor::Black,
-                _ => PlayerColor::White,
-            };
+            let color = PlayerColor::from_str(&p.player)
+                .unwrap_or(PlayerColor::White);
 
             board.set_piece(x, y, Piece::new(piece_type, color));
         }
 
-        let turn = match js_game.turn.as_str() {
-            "w" => PlayerColor::White,
-            "b" => PlayerColor::Black,
-            _ => PlayerColor::White,
-        };
+        // Starting side (color that moved first) as reported by JS. The engine
+        // will reconstruct the current side-to-move by replaying move_history.
+        let js_turn = PlayerColor::from_str(&js_game.turn)
+            .unwrap_or(PlayerColor::White);
 
-        // Parse castling rights directly as i64
-        let mut castling_rights = HashSet::new();
-        for cr in js_game.castling_rights {
-            let parts: Vec<&str> = cr.split(',').collect();
+        // Parse initial special rights (castling + pawn double-move)
+        let mut special_rights = HashSet::new();
+        for sr in js_game.special_rights {
+            let parts: Vec<&str> = sr.split(',').collect();
             if parts.len() == 2 {
                 if let (Ok(x), Ok(y)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-                    castling_rights.insert(Coordinate::new(x, y));
+                    special_rights.insert(Coordinate::new(x, y));
                 }
             }
         }
 
-        // Parse en passant directly as i64
-        let en_passant = if let Some(ep) = js_game.en_passant {
+        // Parse en passant directly as i64 (used only when there is no move history)
+        let parsed_en_passant = if let Some(ep) = js_game.en_passant {
             let sq_parts: Vec<&str> = ep.square.split(',').collect();
             let pawn_parts: Vec<&str> = ep.pawn_square.split(',').collect();
             
@@ -170,30 +183,74 @@ impl Engine {
             None
         };
 
-        let actual_fullmove = if js_game.fullmove_number <= 1 && !js_game.move_history.is_empty() {
-            1 + (js_game.move_history.len() as u32 / 2)
+        // Parse game rules from JS
+        let game_rules = if let Some(js_rules) = js_game.game_rules {
+            use game::{GameRules, PromotionRanks};
+            
+            let promotion_ranks = js_rules.promotion_ranks.map(|pr| {
+                PromotionRanks {
+                    white: pr.white.iter().filter_map(|s| s.parse::<i64>().ok()).collect(),
+                    black: pr.black.iter().filter_map(|s| s.parse::<i64>().ok()).collect(),
+                }
+            });
+            
+            GameRules {
+                promotion_ranks,
+                promotions_allowed: js_rules.promotions_allowed,
+            }
         } else {
-            js_game.fullmove_number
+            game::GameRules::default()
         };
-        
+
+        // Initialize game with starting position; clocks and turn will be fixed below.
         let mut game = GameState {
             board,
-            turn,
-            castling_rights,
-            en_passant,
-            halfmove_clock: js_game.halfmove_clock,
-            fullmove_number: actual_fullmove,
+            // Seed with the starting side; this ensures that replaying move history
+            // produces the correct side-to-move even when Black (or another side)
+            // moved first.
+            turn: js_turn,
+            special_rights,
+            en_passant: None,
+            halfmove_clock: 0,
+            fullmove_number: 1,
             material_score: 0,
-            hash_stack: Vec::with_capacity(128),
+            game_rules,
+            hash_stack: Vec::with_capacity(js_game.move_history.len().saturating_add(8)),
             null_moves: 0,
+            white_piece_count: 0,
+            black_piece_count: 0,
         };
-        
+
         game.material_score = calculate_initial_material(&game.board);
         
-        // Pre-populate hash_stack for move history
-        for i in 0..js_game.move_history.len() {
-            let dummy_hash = 0xFFFF_FFFF_0000_0000u64 ^ ((i as u64) * 0x9E3779B97F4A7C15);
-            game.hash_stack.push(dummy_hash);
+        // Helper to parse "x,y" into (i64, i64)
+        fn parse_coords(coord_str: &str) -> Option<(i64, i64)> {
+            let parts: Vec<&str> = coord_str.split(',').collect();
+            if parts.len() != 2 { return None; }
+            let x = parts[0].parse::<i64>().ok()?;
+            let y = parts[1].parse::<i64>().ok()?;
+            Some((x, y))
+        }
+
+        if js_game.move_history.is_empty() {
+            // No history: trust JS clocks/turn/en-passant for this position
+            game.en_passant = parsed_en_passant;
+            game.turn = js_turn;
+            game.halfmove_clock = js_game.halfmove_clock;
+            game.fullmove_number = if js_game.fullmove_number == 0 { 1 } else { js_game.fullmove_number };
+        } else {
+            // Replay the full move history from the start position.
+            // Like UCI: just apply moves directly by coordinates, no legal move generation needed.
+            for hist in &js_game.move_history {
+                if let (Some((from_x, from_y)), Some((to_x, to_y))) = 
+                    (parse_coords(&hist.from), parse_coords(&hist.to)) 
+                {
+                    let promo = hist.promotion.as_ref().map(|s| s.as_str());
+                    game.make_move_coords(from_x, from_y, to_x, to_y, promo);
+                }
+            }
+            // After replay, GameState.turn, clocks, and en_passant have been
+            // updated naturally by make_move_coords.
         }
 
         Ok(Engine { game })

@@ -295,7 +295,7 @@ async function runTuning() {
     printHeader();
     
     // Ensure baseline exists
-    if (!fs.existsSync(path.join(CONFIG.baselineDir, 'hydrochess_wasm_v2_bg.wasm'))) {
+    if (!fs.existsSync(path.join(CONFIG.baselineDir, 'hydrochess_wasm_bg.wasm'))) {
         console.log(`${COLORS.yellow}No baseline found. Building and saving baseline...${COLORS.reset}`);
         if (!buildEngine() || !saveBaseline()) {
             console.error(`${COLORS.red}Failed to create baseline.${COLORS.reset}`);

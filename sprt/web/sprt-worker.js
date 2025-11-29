@@ -1,5 +1,5 @@
-import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm_v2.js';
-import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm_v2.js';
+import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
+import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
 
 let wasmReady = false;
 

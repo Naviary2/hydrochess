@@ -1,24 +1,33 @@
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
-use crate::game::EnPassantState;
+use crate::game::{EnPassantState, GameRules};
 use crate::utils::is_prime_i64;
 use serde::{Serialize, Deserialize};
 use std::collections::{HashSet, HashMap};
 
-/// Maximum coordinate value for infinite chess (i64 bounds with safety margin)
-/// Using i64::MAX / 2 to prevent overflow in arithmetic operations
-pub const COORD_MAX: i64 = i64::MAX / 2;
-pub const COORD_MIN: i64 = i64::MIN / 2;
+// World border for infinite chess. These are initialized to a very large box,
+// but can be overridden from JS via the playableRegion values.
+static mut COORD_MIN_X: i64 = -1_000_000_000_000_000; // default -1e15
+static mut COORD_MAX_X: i64 =  1_000_000_000_000_000; // default  1e15
+static mut COORD_MIN_Y: i64 = -1_000_000_000_000_000; // default -1e15
+static mut COORD_MAX_Y: i64 =  1_000_000_000_000_000; // default  1e15
 
-/// Check if a coordinate is within valid bounds
-#[inline]
-pub fn in_bounds(x: i64, y: i64) -> bool {
-    x >= COORD_MIN && x <= COORD_MAX && y >= COORD_MIN && y <= COORD_MAX
+/// Update world borders from JS playableRegion (left, right, bottom, top).
+/// Rounding errors from BigInt -> i64 conversion on the JS side are acceptable.
+pub fn set_world_bounds(left: i64, right: i64, bottom: i64, top: i64) {
+    unsafe {
+        COORD_MIN_X = left.min(right);
+        COORD_MAX_X = left.max(right);
+        COORD_MIN_Y = bottom.min(top);
+        COORD_MAX_Y = bottom.max(top);
+    }
 }
 
-/// Safely add to coordinate, clamping to bounds
+/// Check if a coordinate is within valid bounds (world border)
 #[inline]
-pub fn safe_add(base: i64, delta: i64) -> Option<i64> {
-    base.checked_add(delta).filter(|&v| v >= COORD_MIN && v <= COORD_MAX)
+pub fn in_bounds(x: i64, y: i64) -> bool {
+    unsafe {
+        x >= COORD_MIN_X && x <= COORD_MAX_X && y >= COORD_MIN_Y && y <= COORD_MAX_Y
+    }
 }
 
 pub struct SpatialIndices {
@@ -74,26 +83,35 @@ impl Move {
 }
 
 
-pub fn get_legal_moves(board: &Board, turn: PlayerColor, castling_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>) -> Vec<Move> {
+#[inline]
+fn is_enemy_piece(piece: &Piece, our_color: PlayerColor) -> bool {
+    piece.color != our_color && piece.piece_type != PieceType::Void
+}
+
+
+pub fn get_legal_moves(board: &Board, turn: PlayerColor, special_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>, game_rules: &GameRules) -> Vec<Move> {
     let indices = SpatialIndices::new(board);
     let mut moves = Vec::new();
 
     for ((x, y), piece) in &board.pieces {
-        if piece.color != turn {
+        // Skip neutral pieces and non-turn pieces
+        if piece.color != turn || piece.color == PlayerColor::Neutral {
             continue;
         }
 
         let from = Coordinate::new(*x, *y);
-        let piece_moves = get_pseudo_legal_moves_for_piece(board, piece, &from, castling_rights, en_passant, Some(&indices));
+        let piece_moves = get_pseudo_legal_moves_for_piece(board, piece, &from, special_rights, en_passant, Some(&indices), game_rules);
         moves.extend(piece_moves);
     }
 
     moves
 }
 
-pub fn get_pseudo_legal_moves_for_piece(board: &Board, piece: &Piece, from: &Coordinate, castling_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>, indices: Option<&SpatialIndices>) -> Vec<Move> {
+pub fn get_pseudo_legal_moves_for_piece(board: &Board, piece: &Piece, from: &Coordinate, special_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>, indices: Option<&SpatialIndices>, game_rules: &GameRules) -> Vec<Move> {
     match piece.piece_type {
-        PieceType::Pawn => generate_pawn_moves(board, from, piece, castling_rights, en_passant),
+        // Neutral/blocking pieces cannot move
+        PieceType::Void | PieceType::Obstacle => Vec::new(),
+        PieceType::Pawn => generate_pawn_moves(board, from, piece, special_rights, en_passant, game_rules),
         PieceType::Knight => generate_leaper_moves(board, from, piece, 1, 2),
         PieceType::Hawk => {
             let mut m = generate_compass_moves(board, from, piece, 2);
@@ -102,7 +120,7 @@ pub fn get_pseudo_legal_moves_for_piece(board: &Board, piece: &Piece, from: &Coo
         },
         PieceType::King => {
             let mut m = generate_compass_moves(board, from, piece, 1);
-            m.extend(generate_castling_moves(board, from, piece, castling_rights, indices));
+            m.extend(generate_castling_moves(board, from, piece, special_rights, indices));
             m
         },
         PieceType::Guard => generate_compass_moves(board, from, piece, 1),
@@ -141,7 +159,7 @@ pub fn get_pseudo_legal_moves_for_piece(board: &Board, piece: &Piece, from: &Coo
         PieceType::RoyalCentaur => {
             let mut m = generate_compass_moves(board, from, piece, 1);
             m.extend(generate_leaper_moves(board, from, piece, 1, 2));
-            m.extend(generate_castling_moves(board, from, piece, castling_rights, indices));
+            m.extend(generate_castling_moves(board, from, piece, special_rights, indices));
             m
         },
         PieceType::Huygen => generate_huygen_moves(board, from, piece, indices),
@@ -178,6 +196,7 @@ pub fn is_square_attacked(board: &Board, target: &Coordinate, attacker_color: Pl
     let pawn_dir = match attacker_color {
         PlayerColor::White => 1, // White pawns attack upwards (y+1), so they come from y-1
         PlayerColor::Black => -1, // Black pawns attack downwards (y-1), so they come from y+1
+        PlayerColor::Neutral => 0, // Neutral pawns don't attack
     };
     // Attackers are at target.y - dir
     let pawn_y = target.y - pawn_dir;
@@ -317,19 +336,9 @@ pub fn is_square_attacked(board: &Board, target: &Coordinate, attacker_color: Pl
     }
 
     // 6. Check Rose (Circular Knight)
-    // Hard to reverse efficiently without indices.
-    // But Rose is rare. Let's just iterate Roses if we can?
-    // Or just scan the circular path?
     // Max 8 directions * 7 steps = 56 squares.
     // We can scan outwards from target in reverse rose moves.
-    // Reverse rose move is same as forward rose move (symmetric).
     // So we generate rose moves from target and see if we hit a Rose.
-    // But we need to check if the path is clear?
-    // Rose jumps, but lands on empty squares.
-    // "Moves in a circular pattern of Knight jumps."
-    // It's a rider?
-    // "Rose: Moves in a circular pattern of Knight jumps."
-    // Usually it's a leaper-rider. It hops.
     // My generate_rose_moves checks `board.get_piece` and breaks if blocked.
     // So it is blocked by pieces.
     // So we can trace out from target.
@@ -345,48 +354,97 @@ pub fn is_square_attacked(board: &Board, target: &Coordinate, attacker_color: Pl
     false
 }
 
-fn generate_pawn_moves(board: &Board, from: &Coordinate, piece: &Piece, _castling_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>) -> Vec<Move> {
+fn generate_pawn_moves(board: &Board, from: &Coordinate, piece: &Piece, special_rights: &HashSet<Coordinate>, en_passant: &Option<EnPassantState>, game_rules: &GameRules) -> Vec<Move> {
     let mut moves = Vec::new();
     let direction = match piece.color {
         PlayerColor::White => 1,
         PlayerColor::Black => -1,
+        PlayerColor::Neutral => return moves, // Neutral pawns can't move
     };
+
+    // Get promotion ranks for this color (default to 8 for white, 1 for black if not specified)
+    let promotion_ranks: Vec<i64> = if let Some(ref ranks) = game_rules.promotion_ranks {
+        match piece.color {
+            PlayerColor::White => ranks.white.clone(),
+            PlayerColor::Black => ranks.black.clone(),
+            PlayerColor::Neutral => vec![],
+        }
+    } else {
+        // Default promotion ranks for standard chess
+        match piece.color {
+            PlayerColor::White => vec![8],
+            PlayerColor::Black => vec![1],
+            PlayerColor::Neutral => vec![],
+        }
+    };
+
+    // Get allowed promotion pieces (default to Q, R, B, N)
+    let promotion_pieces: Vec<&str> = if let Some(ref allowed) = game_rules.promotions_allowed {
+        allowed.iter().map(|s| s.as_str()).collect()
+    } else {
+        vec!["q", "r", "b", "n"] // Default promotions
+    };
+
+    // Helper function to add pawn move with promotion handling
+    fn add_pawn_move_inner(
+        moves: &mut Vec<Move>,
+        from: &Coordinate,
+        to_x: i64,
+        to_y: i64,
+        piece: &Piece,
+        promotion_ranks: &[i64],
+        promotion_pieces: &[&str],
+    ) {
+        if promotion_ranks.contains(&to_y) {
+            // Generate a move for each possible promotion piece
+            for promo in promotion_pieces {
+                let mut m = Move::new(from.clone(), Coordinate::new(to_x, to_y), piece.clone());
+                m.promotion = Some(promo.to_string());
+                moves.push(m);
+            }
+        } else {
+            moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y), piece.clone()));
+        }
+    }
 
     // Move forward 1
     let to_y = from.y + direction;
     let to_x = from.x;
-    if board.get_piece(&to_x, &to_y).is_none() {
-        moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y), piece.clone()));
+    
+    // Check if square is blocked
+    let forward_blocked = board.get_piece(&to_x, &to_y).is_some();
+    
+    if !forward_blocked {
+        add_pawn_move_inner(&mut moves, from, to_x, to_y, piece, &promotion_ranks, &promotion_pieces);
         
-        // Move forward 2 if on starting rank
-        let start_rank = match piece.color {
-            PlayerColor::White => 2,
-            PlayerColor::Black => 7,
-        };
-
-        if from.y == start_rank {
-             let to_y_2 = from.y + (direction * 2);
-             if board.get_piece(&to_x, &to_y_2).is_none() {
-                 moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y_2), piece.clone()));
-             }
+        // Move forward 2 if pawn has special rights (double-move available)
+        // This is now dynamic - based on special_rights set, not hardcoded starting rank
+        // Note: double-move cannot result in promotion, so no need to check
+        if special_rights.contains(from) {
+            let to_y_2 = from.y + (direction * 2);
+            // Must also check that the target square isn't blocked
+            if board.get_piece(&to_x, &to_y_2).is_none() {
+                moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y_2), piece.clone()));
+            }
         }
     }
 
-    // Captures
-    for dx in [-1, 1] {
+    // Captures (including neutral pieces - they can be captured)
+    for dx in [-1i64, 1] {
         let capture_x = from.x + dx;
         let capture_y = from.y + direction;
-        {
-            if let Some(target) = board.get_piece(&capture_x, &capture_y) {
-                if target.color != piece.color {
+        
+        if let Some(target) = board.get_piece(&capture_x, &capture_y) {
+            // Can capture any piece that's not the same color as us
+            // This includes neutral pieces (obstacles can be captured)
+            if is_enemy_piece(target, piece.color) {
+                add_pawn_move_inner(&mut moves, from, capture_x, capture_y, piece, &promotion_ranks, &promotion_pieces);
+            }
+        } else {
+            // En Passant - cannot result in promotion so no promotion check needed
+            if let Some(ep) = en_passant {
+                if ep.square.x == capture_x && ep.square.y == capture_y {
                     moves.push(Move::new(from.clone(), Coordinate::new(capture_x, capture_y), piece.clone()));
-                }
-            } else {
-                // En Passant
-                if let Some(ep) = en_passant {
-                    if ep.square.x == capture_x && ep.square.y == capture_y {
-                         moves.push(Move::new(from.clone(), Coordinate::new(capture_x, capture_y), piece.clone()));
-                    }
                 }
             }
         }
@@ -395,12 +453,21 @@ fn generate_pawn_moves(board: &Board, from: &Coordinate, piece: &Piece, _castlin
     moves
 }
 
-fn generate_castling_moves(board: &Board, from: &Coordinate, piece: &Piece, castling_rights: &HashSet<Coordinate>, indices: Option<&SpatialIndices>) -> Vec<Move> {
+fn generate_castling_moves(board: &Board, from: &Coordinate, piece: &Piece, special_rights: &HashSet<Coordinate>, indices: Option<&SpatialIndices>) -> Vec<Move> {
     let mut moves = Vec::new();
     
-    for coord in castling_rights.iter() {
+    // King must have special rights to castle
+    if !special_rights.contains(from) {
+        return moves;
+    }
+    
+    // Find all pieces with special rights that could be castling partners
+    for coord in special_rights.iter() {
         if let Some(target_piece) = board.get_piece(&coord.x, &coord.y) {
-            if target_piece.color == piece.color {
+            // Must be same color and a valid castling partner (rook-like piece, not pawn)
+            if target_piece.color == piece.color && 
+               target_piece.piece_type != PieceType::Pawn &&
+               !target_piece.piece_type.is_royal() {
                 let dx = coord.x - from.x;
                 let dy = coord.y - from.y;
                 
@@ -418,10 +485,7 @@ fn generate_castling_moves(board: &Board, from: &Coordinate, piece: &Piece, cast
                     }
 
                     if clear {
-                        let opponent = match piece.color {
-                            PlayerColor::White => PlayerColor::Black,
-                            PlayerColor::Black => PlayerColor::White,
-                        };
+                        let opponent = piece.color.opponent();
 
                         let path_1 = from.x + dir;
                         let path_2 = from.x + (dir * 2);
@@ -458,18 +522,14 @@ fn generate_compass_moves(board: &Board, from: &Coordinate, piece: &Piece, dista
     ];
 
     for (dx, dy) in offsets {
-        // Bounds check for compass moves
-        let to_x = match safe_add(from.x, dx) {
-            Some(x) => x,
-            None => continue,
-        };
-        let to_y = match safe_add(from.y, dy) {
-            Some(y) => y,
-            None => continue,
-        };
+        let to_x = from.x + dx;
+        let to_y = from.y + dy;
+        
+        // Skip if outside world border
+        if !in_bounds(to_x, to_y) { continue; }
         
         if let Some(target) = board.get_piece(&to_x, &to_y) {
-            if target.color != piece.color {
+            if is_enemy_piece(target, piece.color) {
                 moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y), piece.clone()));
             }
         } else {
@@ -488,18 +548,14 @@ fn generate_leaper_moves(board: &Board, from: &Coordinate, piece: &Piece, m: i64
     ];
 
     for (dx, dy) in offsets {
-        // Bounds check for leaper moves
-        let to_x = match safe_add(from.x, dx) {
-            Some(x) => x,
-            None => continue, // Skip this move if out of bounds
-        };
-        let to_y = match safe_add(from.y, dy) {
-            Some(y) => y,
-            None => continue, // Skip this move if out of bounds
-        };
+        let to_x = from.x + dx;
+        let to_y = from.y + dy;
+        
+        // Skip if outside world border
+        if !in_bounds(to_x, to_y) { continue; }
         
         if let Some(target) = board.get_piece(&to_x, &to_y) {
-            if target.color != piece.color {
+            if is_enemy_piece(target, piece.color) {
                 moves.push(Move::new(from.clone(), Coordinate::new(to_x, to_y), piece.clone()));
             }
         } else {
@@ -521,7 +577,7 @@ fn generate_sliding_moves(board: &Board, from: &Coordinate, piece: &Piece, direc
     
     for ((px, py), p) in &board.pieces {
         all_positions.push((*px, *py));
-        if p.color != piece.color {
+        if is_enemy_piece(p, piece.color) {
             enemy_positions.push((*px, *py));
         }
     }
@@ -650,15 +706,11 @@ fn generate_sliding_moves(board: &Board, from: &Coordinate, piece: &Piece, direc
 
             // Generate moves along this ray
             for d in 1..=effective_max {
-                // Bounds check: ensure coordinates stay within i64 safe range
-                let sq_x = match safe_add(from.x, dir_x * d) {
-                    Some(x) => x,
-                    None => break, // Hit coordinate bounds, stop sliding
-                };
-                let sq_y = match safe_add(from.y, dir_y * d) {
-                    Some(y) => y,
-                    None => break, // Hit coordinate bounds, stop sliding
-                };
+                let sq_x = from.x + dir_x * d;
+                let sq_y = from.y + dir_y * d;
+                
+                // Check world border bounds
+                if !in_bounds(sq_x, sq_y) { break; }
 
                 // Can only land on the closest piece if it's an enemy
                 let at_blocker = Some(d) == closest_dist;
@@ -800,7 +852,10 @@ fn generate_huygen_moves(board: &Board, from: &Coordinate, piece: &Piece, indice
                                  if is_prime_i64(dist) {
                                      closest_prime_dist = Some(dist);
                                      let (tx, ty) = if dx_raw == 0 { (from.x, next_val) } else { (next_val, from.y) };
-                                     if let Some(p) = board.get_piece(&tx, &ty) { closest_piece_color = Some(p.color); }
+                                     if let Some(p) = board.get_piece(&tx, &ty) {
+                                         // Treat Void as friendly for capture purposes
+                                         closest_piece_color = Some(if p.piece_type == PieceType::Void { piece.color } else { p.color });
+                                     }
                                      break;
                                  }
                              }
@@ -811,7 +866,10 @@ fn generate_huygen_moves(board: &Board, from: &Coordinate, piece: &Piece, indice
                                  if is_prime_i64(dist) {
                                      closest_prime_dist = Some(dist);
                                      let (tx, ty) = if dx_raw == 0 { (from.x, prev_val) } else { (prev_val, from.y) };
-                                     if let Some(p) = board.get_piece(&tx, &ty) { closest_piece_color = Some(p.color); }
+                                     if let Some(p) = board.get_piece(&tx, &ty) {
+                                         // Treat Void as friendly for capture purposes
+                                         closest_piece_color = Some(if p.piece_type == PieceType::Void { piece.color } else { p.color });
+                                     }
                                      break;
                                  }
                              }
@@ -832,7 +890,8 @@ fn generate_huygen_moves(board: &Board, from: &Coordinate, piece: &Piece, indice
                             if is_prime_i64(dist) {
                                 if closest_prime_dist.as_ref().map_or(true, |d| dist < *d) {
                                     closest_prime_dist = Some(dist);
-                                    closest_piece_color = Some(target_piece.color);
+                                    // Treat Void as friendly for capture purposes
+                                    closest_piece_color = Some(if target_piece.piece_type == PieceType::Void { piece.color } else { target_piece.color });
                                 }
                             }
                         }
@@ -885,7 +944,7 @@ fn generate_rose_moves(board: &Board, from: &Coordinate, piece: &Piece) -> Vec<M
                 current_y += dy;
 
                 if let Some(target) = board.get_piece(&current_x, &current_y) {
-                    if target.color != piece.color {
+                    if is_enemy_piece(target, piece.color) {
                         moves.push(Move::new(from.clone(), Coordinate::new(current_x, current_y), piece.clone()));
                     }
                     break; 

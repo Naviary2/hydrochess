@@ -54,7 +54,7 @@ wasm-pack build --target web
 
 Output in `pkg/` - use with bundlers (esbuild, webpack, etc.)
 
-### Node.js Target (for SPRT testing)
+### Node.js Target
 
 ```bash
 wasm-pack build --target nodejs --out-dir pkg-node
@@ -62,41 +62,63 @@ wasm-pack build --target nodejs --out-dir pkg-node
 
 Output in `pkg-node/` - use with Node.js directly
 
+**NOTE: The Node.js target has been seen to be unstable and is not recommended for use. The engine might occasionally hang indefinitely regardless of the thinking time given.**
+
 ## Usage in JavaScript
 
+### Engine Protocol
+
+The engine uses a simplified UCI-like protocol:
+
+1. **Initial state**: Send the starting position and move history (no dynamic state)
+2. **Move format**: Engine returns moves in coordinate notation with promotion letter
+3. **Special moves**: Client reconstructs special flags (en passant, castling) from the move
+
 ```javascript
-import init, { Engine } from './pkg/hydrochess_wasm_v2.js';
-
-await init();
-
-// Game state in coordinate format
+// Game state format for Engine constructor
 const gameState = {
     board: {
         pieces: [
             { x: "1", y: "1", piece_type: "r", player: "w" },
             { x: "5", y: "1", piece_type: "k", player: "w" },
-            // ... more pieces
+            // ... all pieces from STARTING position
         ]
     },
-    turn: "w",
-    castling_rights: ["1,1", "5,1", "8,1"],  // Rook/King positions with rights
-    en_passant: null,  // or { square: "x,y", pawn_square: "x,y" }
+    turn: "w",  // side to move at start of game
+    special_rights: ["1,1", "5,1", "8,1"],  // Initial castling/pawn rights only
+    en_passant: null,  // Initial en passant only (usually null)
     halfmove_clock: 0,
     fullmove_number: 1,
-    move_history: []
+    move_history: [
+        { from: "5,2", to: "5,4", promotion: null },
+        { from: "7,7", to: "7,5", promotion: null },
+        // ... all moves played so far
+    ],
+    game_rules: {
+        promotion_ranks: {
+            white: ["8"],
+            black: ["1"]
+        },
+        promotions_allowed: ["q", "r", "b", "n"]  // Piece letters
+    },
+    world_bounds: null  // Optional playable region
 };
 
 const engine = new Engine(gameState);
 const bestMove = engine.get_best_move();
-// Returns: { from: "5,2", to: "5,4", promotion: null }
+// Returns: { from: "5,4", to: "5,5", promotion: "q" }
 ```
+
+### Move Conversion
+
+The engine returns moves in a minimal format without special move flags. The client can reconstruct special flags (en passant, castling, etc.) using the game's legal move utilities if needed.
 
 ## SPRT Testing
 
 The engine includes a comprehensive SPRT (Sequential Probability Ratio Test) tool, exposed through a
 **web-based UI** that compares an old vs new WASM build directly in the browser.
 
-# Start the web SPRT helper (builds web WASM + starts dev server)
+### Start the web SPRT helper (builds web WASM + starts dev server)
 
 ```bash
 cd sprt
@@ -141,9 +163,11 @@ hydrochess-wasm/
 │   ├── board.rs        # Board representation and piece types
 │   ├── game.rs         # GameState and move making/unmaking
 │   ├── moves.rs        # Move generation for all piece types
-│   ├── search.rs       # Search algorithm (iterative deepening, alpha-beta)
+│   ├── search.rs       # Search entry points and main search logic
+│   ├── search/         # Search internals (TT, move ordering, helpers)
+│   │   ├── tt.rs       # Transposition table implementation
+│   │   └── ordering.rs # Move ordering heuristics
 │   ├── evaluation.rs   # Position evaluation
-│   ├── normalization.rs # Coordinate normalization for infinite boards
 │   └── utils.rs        # Utilities and panic hook
 ├── sprt/               # SPRT testing helper + web UI
 │   ├── sprt.js         # Web helper: builds web WASM & serves sprt/web
@@ -166,3 +190,4 @@ hydrochess-wasm/
 | `l` | Camel | `o` | Rose |
 | `i` | Giraffe | `u` | Huygen |
 | `z` | Zebra | `y` | Royal Queen |
+

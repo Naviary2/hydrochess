@@ -5,6 +5,10 @@ use crate::game::GameState;
 
 pub fn get_piece_value(piece_type: PieceType) -> i32 {
     match piece_type {
+        // neutral/blocking pieces - no material value
+        PieceType::Void => 0,
+        PieceType::Obstacle => 0,
+        
         // orthodox
         PieceType::Pawn => 100,
         PieceType::Knight => 280,
@@ -54,9 +58,9 @@ const KNIGHT_CENTRALITY_BONUS: i32 = 10;      // Knight near center
 const BISHOP_PAIR_BONUS: i32 = 30;            // Having both bishops
 const ROOK_OPEN_FILE_BONUS: i32 = 25;         // Rook on file with no own pawns
 const ROOK_SEMI_OPEN_BONUS: i32 = 15;         // Rook on file with only enemy pawns
-const PASSED_PAWN_BONUS: i32 = 20;            // Passed pawn base bonus
-const DOUBLED_PAWN_PENALTY: i32 = 15;         // Penalty for doubled pawns
-const ISOLATED_PAWN_PENALTY: i32 = 10;        // Penalty for isolated pawns
+const PASSED_PAWN_BONUS: i32 = 8;             // Passed pawn base bonus (reduced for infinite chess)
+const DOUBLED_PAWN_PENALTY: i32 = 3;          // Penalty for doubled pawns (minimal in infinite chess)
+const ISOLATED_PAWN_PENALTY: i32 = 2;         // Penalty for isolated pawns (minimal in infinite chess)
 #[allow(dead_code)]
 const DEVELOPMENT_BONUS: i32 = 5;             // Piece moved from starting rank (future use)
 const KING_TROPISM_BONUS: i32 = 3;            // Bonus per square closer to enemy king
@@ -459,47 +463,184 @@ fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
     true
 }
 
-/// Endgame evaluation when opponent only has a king
-/// Rewards: pieces close to enemy king, kings close together, constraining enemy king
+/// Endgame evaluation when opponent only has a lone king
+/// Key strategy: build "walls" with sliding pieces to box in the king,
+/// then bring our king closer when needed for the final mate.
 fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_king: &Coordinate, winning_color: PlayerColor) -> i32 {
     let mut bonus: i32 = 0;
-    
-    // 1. Reward our pieces being close to enemy king (strong tropism)
-    for ((x, y), piece) in &game.board.pieces {
-        if piece.color == winning_color && piece.piece_type != PieceType::King {
-            let dist = (x - enemy_king.x).abs() + (y - enemy_king.y).abs();
-            // Closer is better - bonus decreases with distance
-            let proximity_bonus = (20 - dist.min(20)) as i32 * 8;
-            bonus += proximity_bonus;
-        }
-    }
-    
-    // 2. Reward our king being close to enemy king (helps in mating nets)
-    let king_dist = (our_king.x - enemy_king.x).abs() + (our_king.y - enemy_king.y).abs();
-    bonus += (14 - king_dist.min(14)) as i32 * 4;
-    
-    // 3. Reward constraining enemy king (pieces on same or adjacent rank/file)
-    for ((x, y), piece) in &game.board.pieces {
-        if piece.color == winning_color {
-            let dx = (*x - enemy_king.x).abs();
-            let dy = (*y - enemy_king.y).abs();
 
-            // Same file or adjacent file on enemy king's rank (build "walls" above/below king)
-            if dx == 0 && dy <= 1 {
-                bonus += 10;
+    // Determine if we need our king to help with the mate
+    let king_needed = needs_king_for_mate(&game.board, winning_color);
+
+    // Count major sliders for pattern recognition
+    let mut rooks = 0;
+    let mut queens = 0;
+
+    // 1. Sliding pieces: prioritize building fences (walls) around the enemy king
+    //    rather than just chasing it.
+    for ((x, y), piece) in &game.board.pieces {
+        if piece.color != winning_color || piece.piece_type.is_royal() {
+            continue;
+        }
+
+        let dx_abs = (*x - enemy_king.x).abs();
+        let dy_abs = (*y - enemy_king.y).abs();
+        let manhattan = dx_abs + dy_abs;
+
+        match piece.piece_type {
+            PieceType::Rook | PieceType::Chancellor | PieceType::Queen | PieceType::Amazon => {
+                if matches!(piece.piece_type, PieceType::Rook | PieceType::Chancellor) {
+                    rooks += 1;
+                }
+                if matches!(piece.piece_type, PieceType::Queen | PieceType::Amazon) {
+                    queens += 1;
+                }
+
+                let on_same_file = *x == enemy_king.x;
+                let on_same_rank = *y == enemy_king.y;
+
+                // We want fences a few squares away from the king, not right next to it.
+                // Target distance ~3 squares; farther or closer is less ideal.
+                if on_same_file {
+                    let d = dy_abs.max(1).min(8);
+                    let target = 3i64;
+                    let fence_score = 70 - ((d - target).abs() as i32) * 12;
+                    if fence_score > 0 {
+                        bonus += fence_score;
+                    }
+                }
+                if on_same_rank {
+                    let d = dx_abs.max(1).min(8);
+                    let target = 3i64;
+                    let fence_score = 70 - ((d - target).abs() as i32) * 12;
+                    if fence_score > 0 {
+                        bonus += fence_score;
+                    }
+                }
+
+                // Small generic proximity bonus so sliders still move towards the king
+                // when no good fence is available yet.
+                if !((*x == enemy_king.x) || (*y == enemy_king.y)) {
+                    let prox = (12 - manhattan.min(12)) as i32;
+                    if prox > 0 {
+                        bonus += prox * 2;
+                    }
+                }
             }
-            // Same rank or adjacent rank on enemy king's file (build "walls" left/right of king)
-            if dy == 0 && dx <= 1 {
-                bonus += 10;
+            PieceType::Bishop | PieceType::Archbishop => {
+                // Diagonal fences for bishops/archbishops at a few squares distance.
+                let dx = dx_abs;
+                let dy = dy_abs;
+                if dx == dy && dx > 0 {
+                    let d = dx.min(8);
+                    let target = 3i64;
+                    let fence_score = 45 - ((d - target).abs() as i32) * 10;
+                    if fence_score > 0 {
+                        bonus += fence_score;
+                    }
+                } else {
+                    // Otherwise, mild proximity bonus only.
+                    let prox = (10 - manhattan.min(10)) as i32;
+                    if prox > 0 {
+                        bonus += prox * 2;
+                    }
+                }
             }
-            // On or very near diagonals with enemy king (for bishops/queens)
-            if dx == dy && dx <= 2 {
-                bonus += 5;
+            _ => {
+                // Knights, guards, etc.: very small proximity encouragement so they
+                // don't dominate behaviour.
+                let prox = (8 - manhattan.min(8)) as i32;
+                if prox > 0 {
+                    bonus += prox;
+                }
             }
         }
     }
-    
+
+    // 2. King proximity - much lower weight, only strong when king is actually needed.
+    let king_dist = (our_king.x - enemy_king.x).abs() + (our_king.y - enemy_king.y).abs();
+    if king_needed {
+        // King should come closer, but not at the expense of good fences.
+        let prox = (16 - king_dist.min(16)) as i32;
+        if prox > 0 {
+            bonus += prox * 6; // up to ~96
+        }
+
+        // Extra bonus for opposition (two squares apart horizontally or vertically).
+        let dx = (our_king.x - enemy_king.x).abs();
+        let dy = (our_king.y - enemy_king.y).abs();
+        if (dx == 2 && dy == 0) || (dx == 0 && dy == 2) {
+            bonus += 40;
+        }
+    } else {
+        // When king isn't strictly required for mate, proximity is just a tiebreak.
+        let prox = (10 - king_dist.min(10)) as i32;
+        if prox > 0 {
+            bonus += prox; // very small
+        }
+    }
+
+    // 3. Bonus for having two or more major sliders for perpendicular fences
+    if rooks + queens >= 2 {
+        bonus += 80;
+    }
+
     bonus
+}
+
+/// Determine if king is needed for mate based on material
+/// Based on the spreadsheet: "Forced Mate with King?" column
+fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
+    let mut queens = 0;
+    let mut rooks = 0;
+    let mut bishops = 0;
+    let mut knights = 0;
+    let mut chancellors = 0;
+    let mut archbishops = 0;
+    let mut amazons = 0;
+    let mut hawks = 0;
+    let mut guards = 0;
+    
+    for (_, piece) in &board.pieces {
+        if piece.color != color { continue; }
+        match piece.piece_type {
+            PieceType::Queen | PieceType::RoyalQueen => queens += 1,
+            PieceType::Rook => rooks += 1,
+            PieceType::Bishop => bishops += 1,
+            PieceType::Knight => knights += 1,
+            PieceType::Chancellor => chancellors += 1,
+            PieceType::Archbishop => archbishops += 1,
+            PieceType::Amazon => amazons += 1,
+            PieceType::Hawk => hawks += 1,
+            PieceType::Guard => guards += 1,
+            _ => {}
+        }
+    }
+    
+    // Cases where king is NOT needed (can mate without king)
+    // 3+ Rooks, 2+ Chancellors, 2+ Queens, Amazon, etc.
+    if rooks >= 3 { return false; }
+    if chancellors >= 2 { return false; }
+    if queens >= 2 { return false; }
+    if amazons >= 1 { return false; }
+    if archbishops >= 3 { return false; }
+    if hawks >= 4 { return false; }
+    if bishops >= 6 { return false; }
+    
+    // Strong combinations that don't need king
+    if queens >= 1 && chancellors >= 1 { return false; }
+    if queens >= 1 && bishops >= 2 { return false; }
+    if queens >= 1 && knights >= 2 { return false; }
+    if queens >= 1 && guards >= 2 { return false; }
+    if queens >= 1 && rooks >= 1 && (bishops >= 1 || knights >= 1) { return false; }
+    if chancellors >= 1 && bishops >= 2 { return false; }
+    if rooks >= 2 && (bishops >= 2 || knights >= 2 || guards >= 1) { return false; }
+    if rooks >= 1 && bishops >= 3 { return false; }
+    if rooks >= 1 && knights >= 4 { return false; }
+    if rooks >= 1 && guards >= 2 { return false; }
+    
+    // Default: king is needed
+    true
 }
 
 fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
@@ -520,29 +661,31 @@ fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32,
 }
 
 /// Check if a side has sufficient material to force checkmate in infinite chess.
-/// In infinite chess without board edges, many piece combos that work in normal chess don't force mate.
+/// Based on the official insufficientmaterial.ts from infinitechess.org
 /// Returns true if the side CAN potentially force checkmate.
-pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_enemy_king: bool) -> bool {
+pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our_king: bool) -> bool {
     let mut queens = 0;
     let mut rooks = 0;
     let mut bishops = 0;
     let mut knights = 0;
-    let mut chancellors = 0; // Rook + Knight
-    let mut archbishops = 0; // Bishop + Knight
+    let mut chancellors = 0;
+    let mut archbishops = 0;
     let mut hawks = 0;
     let mut guards = 0;
     let mut pawns = 0;
+    let mut amazons = 0;
+    let mut knightriders = 0;
+    let mut huygens = 0;
     let mut light_bishops = 0;
     let mut dark_bishops = 0;
     
     for ((x, y), piece) in &board.pieces {
         if piece.color != color { continue; }
         match piece.piece_type {
-            PieceType::Queen => queens += 1,
+            PieceType::Queen | PieceType::RoyalQueen => queens += 1,
             PieceType::Rook => rooks += 1,
             PieceType::Bishop => {
                 bishops += 1;
-                // Check bishop color (light/dark square)
                 if (x + y) % 2 == 0 {
                     light_bishops += 1;
                 } else {
@@ -555,77 +698,122 @@ pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_ene
             PieceType::Hawk => hawks += 1,
             PieceType::Guard => guards += 1,
             PieceType::Pawn => pawns += 1,
-            PieceType::Amazon => return true, // Amazon can always mate
+            PieceType::Amazon => amazons += 1,
+            PieceType::Knightrider => knightriders += 1,
+            PieceType::Huygen => huygens += 1,
             _ => {}
         }
     }
     
-    // Based on infinite chess mating patterns (need to force mate WITH king help):
+    // Amazon can always mate (with king help)
+    if amazons >= 1 { return true; }
     
-    // 2+ queens can force mate
+    // Based on the official insuffmat scenarios from infinitechess.org
+    // These are the scenarios that CANNOT mate (insufficient)
+    
+    // With our king helping (1K vs 1k scenarios that are INSUFFICIENT):
+    if has_our_king {
+        // Single queen - insufficient with king
+        if queens == 1 && rooks == 0 && bishops == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // Single chancellor - insufficient  
+        if chancellors == 1 && queens == 0 && rooks == 0 && bishops == 0 && knights == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // Single guard - insufficient
+        if guards == 1 && queens == 0 && rooks == 0 && bishops == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 { return false; }
+        
+        // Up to 3 knights - insufficient
+        if knights <= 3 && queens == 0 && rooks == 0 && bishops == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // 2 hawks - insufficient
+        if hawks == 2 && queens == 0 && rooks == 0 && bishops == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && guards == 0 { return false; }
+        
+        // Up to 3 pawns - insufficient
+        if pawns <= 3 && queens == 0 && rooks == 0 && bishops == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // 2 knightriders - insufficient
+        if knightriders == 2 && queens == 0 && rooks == 0 && bishops == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // Bishops only on same color - insufficient
+        if bishops > 0 && (light_bishops == 0 || dark_bishops == 0) && queens == 0 && rooks == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // Rook + Knight or Rook + Bishop alone - insufficient
+        if rooks == 1 && (knights == 1 || (bishops == 1 && knights == 0)) && queens == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 {
+            if knights + bishops == 1 { return false; }
+        }
+        
+        // Archbishop + Bishop or Archbishop + Knight alone - insufficient
+        if archbishops == 1 && (bishops == 1 || knights == 1) && queens == 0 && rooks == 0 && chancellors == 0 && pawns == 0 && hawks == 0 && guards == 0 {
+            if bishops + knights == 1 { return false; }
+        }
+        
+        // 1-2 knights with bishops on one color - insufficient  
+        if knights <= 2 && bishops > 0 && (light_bishops == 0 || dark_bishops == 0) && queens == 0 && rooks == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && hawks == 0 && guards == 0 { return false; }
+        
+        // Hawk + single color bishop - insufficient
+        if hawks == 1 && bishops == 1 && queens == 0 && rooks == 0 && knights == 0 && chancellors == 0 && archbishops == 0 && pawns == 0 && guards == 0 { return false; }
+        
+        // Everything else with king - sufficient
+        return true;
+    }
+    
+    // Without our king (0K vs 1k scenarios) - need more material
+    // Queen + Rook, Queen + Knight, Queen + Bishop, Queen + Pawn are all sufficient
+    if queens >= 1 && (rooks >= 1 || knights >= 1 || bishops >= 1 || pawns >= 1) { return true; }
+    
+    // 2+ Queens sufficient
     if queens >= 2 { return true; }
     
-    // 2+ Rooks can force mate
-    if rooks >= 2 { return true; }
+    // 2+ Rooks with some extra material
+    if rooks >= 2 && (bishops >= 1 || knights >= 1 || pawns >= 1 || guards >= 1) { return true; }
     
-    // 2+ Chancellors can force mate
-    if chancellors >= 2 { return true; }
-    
-    // 2+ Archbishops can force mate
+    // 2 Archbishops sufficient
     if archbishops >= 2 { return true; }
     
-    // Archbishop + Rook can mate
-    if archbishops >= 1 && rooks >= 1 { return true; }
+    // Chancellor combinations
+    if chancellors >= 1 && (guards >= 1 || knights >= 1 || rooks >= 1) { return true; }
     
-    // Chancellor + Bishop can mate
-    if chancellors >= 1 && bishops >= 1 { return true; }
-    
-    // Chancellor + Archbishop can mate
-    if chancellors >= 1 && archbishops >= 1 { return true; }
-    
-    // Rook + 2 minor pieces (bishop/knight)
-    if rooks >= 1 && (bishops + knights) >= 2 { return true; }
-    
-    // Rook + 2+ Guards can mate
-    if rooks >= 1 && guards >= 2 { return true; }
-    
-    // 4+ Bishops with both colors can mate
-    if bishops >= 4 && light_bishops >= 2 && dark_bishops >= 2 { return true; }
-    
-    // 3 Bishops + Knight can mate
-    if bishops >= 3 && knights >= 1 { return true; }
-    
-    // 2 Bishops + 2 Knights can mate
-    if bishops >= 2 && knights >= 2 { return true; }
-    
-    // 2 Bishops + Guard can mate
-    if bishops >= 2 && guards >= 1 { return true; }
-    
-    // 4+ Knights can mate
+    // 4+ Knights sufficient
     if knights >= 4 { return true; }
     
-    // 3+ Hawks can mate
+    // Bishops with both colors + knights
+    if light_bishops >= 1 && dark_bishops >= 1 && bishops >= 2 && (knights >= 2 || bishops >= 4) { return true; }
+    
+    // 3 Hawks sufficient
     if hawks >= 3 { return true; }
     
-    // 3+ Guards can mate
-    if guards >= 3 { return true; }
+    // Rook + guard
+    if rooks >= 1 && guards >= 1 { return true; }
     
-    // Any major piece + pawn(s) that could promote
-    if pawns >= 1 && (rooks >= 1 || chancellors >= 1 || archbishops >= 1) { return true; }
+    // Rook + 2+ knights
+    if rooks >= 1 && knights >= 2 { return true; }
     
-    // Multiple pawns that could promote to sufficient material
-    if pawns >= 2 { return true; }
+    // 3 Knightriders
+    if knightriders >= 3 { return true; }
+    
+    // 6+ Pawns
+    if pawns >= 6 { return true; }
+    
+    // 4 Huygens
+    if huygens >= 4 { return true; }
+    
+    // 2 Guards
+    if guards >= 2 { return true; }
     
     false
 }
 
 /// Check if the game is a draw due to insufficient material
 pub fn is_insufficient_material(board: &Board) -> bool {
-    let white_has_king = board.pieces.iter().any(|(_, p)| p.piece_type == PieceType::King && p.color == PlayerColor::White);
-    let black_has_king = board.pieces.iter().any(|(_, p)| p.piece_type == PieceType::King && p.color == PlayerColor::Black);
+    // Count pieces quickly - if too many pieces, definitely not insufficient
+    let total_pieces = board.pieces.len();
+    if total_pieces >= 10 { return false; } // Fast exit for complex positions
     
-    let white_can_mate = has_sufficient_mating_material(board, PlayerColor::White, black_has_king);
-    let black_can_mate = has_sufficient_mating_material(board, PlayerColor::Black, white_has_king);
+    let white_has_king = board.pieces.iter().any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::White);
+    let black_has_king = board.pieces.iter().any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::Black);
+    
+    let white_can_mate = has_sufficient_mating_material(board, PlayerColor::White, white_has_king);
+    let black_can_mate = has_sufficient_mating_material(board, PlayerColor::Black, black_has_king);
     
     // Draw if neither side can mate
     !white_can_mate && !black_can_mate

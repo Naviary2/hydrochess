@@ -17,10 +17,15 @@ npm run dev
 
 This will:
 
-- Copy the existing `pkg` directory at the engine root as the **OLD** reference build
-- Build a new **web** WASM into `pkg-new` using `wasm-pack build --target web --out-dir pkg-new`
-- Copy both into `sprt/web/pkg-old` and `sprt/web/pkg-new`
+- Copy the existing `pkg-old` directory at the engine root into `sprt/web/pkg-old` as the **OLD** reference build
+- Build a new **web** WASM directly into `sprt/web/pkg-new` using `wasm-pack build --target web --out-dir sprt/web/pkg-new`
 - Start `npx serve .` in `sprt/web` on port 3000
+
+Before running this, build your OLD reference engine once from the project root:
+
+```bash
+wasm-pack build --target web --out-dir pkg-old
+```
 
 Then open in your browser:
 
@@ -113,8 +118,8 @@ the website tools.
 
 The web SPRT UI compares two **web-target** WASM builds:
 
-- **Old engine**: whatever is currently in the root `pkg` directory
-- **New engine**: freshly built into `pkg-new` by `wasm-pack build --target web`
+- **Old engine**: whatever is currently in the root `pkg-old` directory (copied into `sprt/web/pkg-old`)
+- **New engine**: freshly built into `sprt/web/pkg-new` by `wasm-pack build --target web --out-dir sprt/web/pkg-new`
 
 For each game:
 
@@ -131,17 +136,9 @@ This ensures each opening is played once with each engine taking White, which re
 
 Instead of using an external opening book, the web SPRT UI:
 
-1. Starts from the standard classical initial position (coordinate-based).
-2. Chooses a **random legal first move for White** from the 20 legal possibilities:
-   - 16 pawn moves (one or two squares forward)
-   - 4 knight moves (Nb1 / Ng1 moves)
+1. Starts from the standard infinite chess position (coordinate-based).
+2. Chooses a **random legal first move for White**
 3. Applies this as a fixed opening for a **pair of games**.
-4. The opening move is:
-   - Applied to the game state passed into the WASM engine
-   - Recorded in the internal move history for the engine
-   - Logged in the worker log (`W: e2,e4>e2,e4`-style)
-   - Visible in the SPRT Test logs via `[from>to]` on each game line
-   - Present as the first move in the ICN download.
 
 ### SPRT Termination and Even Game Counts
 
@@ -157,7 +154,7 @@ This guarantees that the test never stops halfway through a color‑reversed pai
 
 ## Bounds Presets and Modes
 
-The same presets from the original CLI SPRT are still available via the dropdowns:
+Presets are available via the dropdowns:
 
 | Preset           | Gainer Bounds | Non-reg Bounds | Usage                        |
 |------------------|---------------|----------------|------------------------------|

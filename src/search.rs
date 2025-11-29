@@ -1,8 +1,7 @@
 use crate::board::PieceType;
-use crate::evaluation::{evaluate, get_piece_value};
+use crate::evaluation::evaluate;
 use crate::game::GameState;
 use crate::moves::Move;
-use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -47,171 +46,11 @@ const FUTILITY_MARGIN: [i32; 4] = [0, 100, 200, 300];
 const IID_MIN_DEPTH: usize = 4;
 const IID_REDUCTION: usize = 2;
 
-// TT Entry flags
-#[derive(Clone, Copy, PartialEq)]
-pub enum TTFlag {
-    Exact,
-    LowerBound, // Failed low (score is at most this)
-    UpperBound, // Failed high (score is at least this)
-}
+mod tt;
+pub use tt::{TTEntry, TTFlag, TranspositionTable};
 
-/// Transposition Table entry for infinite chess
-#[derive(Clone)]
-pub struct TTEntry {
-    pub hash: u64,
-    pub depth: u8,
-    pub flag: TTFlag,
-    pub score: i32,
-    pub best_move: Option<Move>,
-    pub age: u8,
-}
-
-/// Transposition Table adapted for infinite chess (coordinate-based hashing)
-pub struct TranspositionTable {
-    pub table: HashMap<u64, TTEntry>,
-    pub size: usize,
-    pub age: u8,
-}
-
-impl TranspositionTable {
-    pub fn new(size_mb: usize) -> Self {
-        // Rough estimate: each entry ~100 bytes
-        let size = (size_mb * 1024 * 1024) / 100;
-        TranspositionTable {
-            table: HashMap::with_capacity(size),
-            size,
-            age: 0,
-        }
-    }
-    
-    /// Generate a hash for the current board position (infinite chess adapted)
-    pub fn generate_hash(game: &GameState) -> u64 {
-        let mut hash: u64 = 0;
-        
-        for ((x, y), piece) in &game.board.pieces {
-            // Normalize coordinates for hashing (handle large coords)
-            let norm_x = normalize_coord(*x);
-            let norm_y = normalize_coord(*y);
-            
-            // Combine coordinates
-            let coord_hash = (norm_x as u64) ^ ((norm_y as u64) << 16);
-            
-            // Mix with piece type and color
-            let piece_val = (piece.piece_type as u64) | ((piece.color as u64) << 8);
-            let mixed = mix_bits(coord_hash ^ piece_val);
-            
-            hash ^= mixed;
-        }
-        
-        // Mix in the turn
-        hash ^= (game.turn as u64) * 0x9E3779B97F4A7C15;
-        
-        mix_bits(hash)
-    }
-    
-    /// Probe the TT for a position
-    pub fn probe(&self, hash: u64, alpha: i32, beta: i32, depth: usize, ply: usize) -> Option<(i32, Option<Move>)> {
-        if let Some(entry) = self.table.get(&hash) {
-            if entry.hash == hash {
-                // Always return the best move for move ordering
-                let best_move = entry.best_move.clone();
-                
-                // Only use score if depth is sufficient
-                if entry.depth as usize >= depth {
-                    let mut score = entry.score;
-                    
-                    // Adjust mate scores for current ply
-                    if score > MATE_SCORE {
-                        score -= ply as i32;
-                    } else if score < -MATE_SCORE {
-                        score += ply as i32;
-                    }
-                    
-                    match entry.flag {
-                        TTFlag::Exact => return Some((score, best_move)),
-                        TTFlag::LowerBound if score >= beta => return Some((beta, best_move)),
-                        TTFlag::UpperBound if score <= alpha => return Some((alpha, best_move)),
-                        _ => return Some((INFINITY + 1, best_move)), // Signal: use move but not score
-                    }
-                }
-                
-                return Some((INFINITY + 1, best_move)); // Return move for ordering
-            }
-        }
-        None
-    }
-    
-    /// Store an entry in the TT
-    pub fn store(&mut self, hash: u64, depth: usize, flag: TTFlag, score: i32, best_move: Option<Move>, ply: usize) {
-        // Adjust mate scores for storage
-        let mut adjusted_score = score;
-        if score > MATE_SCORE {
-            adjusted_score += ply as i32;
-        } else if score < -MATE_SCORE {
-            adjusted_score -= ply as i32;
-        }
-        
-        // Replacement strategy: replace if deeper, same position, or older
-        let should_replace = if let Some(existing) = self.table.get(&hash) {
-            existing.hash != hash || // Different position (collision)
-            depth >= existing.depth as usize || // Deeper search
-            self.age != existing.age || // Older entry
-            flag == TTFlag::Exact // Exact scores are valuable
-        } else {
-            true
-        };
-        
-        if should_replace {
-            self.table.insert(hash, TTEntry {
-                hash,
-                depth: depth as u8,
-                flag,
-                score: adjusted_score,
-                best_move,
-                age: self.age,
-            });
-        }
-        
-        // Cleanup if table is too large
-        if self.table.len() > self.size {
-            self.cleanup_old_entries();
-        }
-    }
-    
-    pub fn increment_age(&mut self) {
-        self.age = self.age.wrapping_add(1);
-    }
-    
-    fn cleanup_old_entries(&mut self) {
-        let current_age = self.age;
-        self.table.retain(|_, entry| {
-            current_age.wrapping_sub(entry.age) < 3
-        });
-    }
-}
-
-/// Normalize coordinate for hashing (handle infinite board)
-#[inline]
-fn normalize_coord(coord: i64) -> i32 {
-    const BOUND: i64 = 150;
-    const BUCKETS: i64 = 8;
-    
-    if coord.abs() <= BOUND {
-        coord as i32
-    } else {
-        let sign = coord.signum();
-        let delta = (coord - sign * BOUND) % BUCKETS;
-        (sign * BOUND + delta) as i32
-    }
-}
-
-/// Bit mixing function for better hash distribution
-#[inline]
-fn mix_bits(mut n: u64) -> u64 {
-    n = (n ^ (n >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
-    n ^ (n >> 31)
-}
+mod ordering;
+use ordering::{hash_move_dest, sort_captures, sort_moves, sort_moves_root};
 
 /// Timer abstraction to handle platform differences
 #[derive(Clone)]
@@ -430,6 +269,9 @@ impl Searcher {
 
 /// Main entry point - iterative deepening search with aspiration windows
 pub fn get_best_move(game: &mut GameState, max_depth: usize) -> Option<Move> {
+    // Ensure fast per-color piece counts are in sync with the board
+    game.recompute_piece_counts();
+
     let mut searcher = Searcher::new(THINK_TIME_MS);
     
     let moves = game.get_legal_moves();
@@ -529,6 +371,9 @@ pub fn get_best_move(game: &mut GameState, max_depth: usize) -> Option<Move> {
 
 /// Time-limited search entry point
 pub fn get_best_move_timed(game: &mut GameState, max_depth: usize, time_limit_ms: u128, silent: bool) -> Option<Move> {
+    // Ensure fast per-color piece counts are in sync with the board
+    game.recompute_piece_counts();
+
     let mut searcher = Searcher::new(time_limit_ms);
     searcher.silent = silent;
     
@@ -639,6 +484,18 @@ pub fn get_best_move_timed(game: &mut GameState, max_depth: usize, time_limit_ms
     best_move
 }
 
+pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
+    // Ensure fast per-color piece counts are in sync with the board
+    game.recompute_piece_counts();
+
+    let mut searcher = Searcher::new(u128::MAX);
+    searcher.reset_for_iteration();
+    searcher.decay_history();
+    searcher.tt.clear();
+    let _ = negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY);
+    searcher.nodes
+}
+
 /// Root negamax - special handling for root node
 fn negamax_root(searcher: &mut Searcher, game: &mut GameState, depth: usize, mut alpha: i32, beta: i32) -> i32 {
     searcher.pv_length[0] = 0;
@@ -719,9 +576,10 @@ fn negamax_root(searcher: &mut Searcher, game: &mut GameState, depth: usize, mut
         }
     }
     
-    // Checkmate or stalemate
+    // Checkmate or stalemate (or loss by capture-all-pieces variants)
     if legal_moves == 0 {
-        return if in_check { -MATE_VALUE } else { 0 };
+        let no_pieces = !game.has_pieces(game.turn);
+        return if in_check || no_pieces { -MATE_VALUE } else { 0 };
     }
     
     // Store in TT
@@ -961,9 +819,10 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
         }
     }
     
-    // Checkmate or stalemate detection
+    // Checkmate or stalemate detection (also treat no-pieces as loss)
     if legal_moves == 0 {
-        if in_check {
+        let no_pieces = !game.has_pieces(game.turn);
+        if in_check || no_pieces {
             return -MATE_VALUE + ply as i32;
         } else {
             return 0; // Stalemate
@@ -1060,61 +919,12 @@ fn quiescence(searcher: &mut Searcher, game: &mut GameState, ply: usize, mut alp
         }
     }
     
-    if in_check && legal_moves == 0 {
-        return -MATE_VALUE + ply as i32;
+    if legal_moves == 0 {
+        let no_pieces = !game.has_pieces(game.turn);
+        if in_check || no_pieces {
+            return -MATE_VALUE + ply as i32;
+        }
     }
     
     best_score
-}
-
-// Move ordering helpers
-fn sort_moves(searcher: &Searcher, game: &GameState, moves: &mut Vec<Move>, ply: usize, tt_move: &Option<Move>) {
-    moves.sort_by_cached_key(|m| {
-        let mut score = 0;
-        
-        // TT move gets highest priority
-        if let Some(ttm) = tt_move {
-            if m.from == ttm.from && m.to == ttm.to {
-                return -20000;
-            }
-        }
-        
-        // Captures (MVV-LVA)
-        if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
-            score -= get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
-        }
-        
-        // Killer moves
-        if searcher.killers[ply][0].as_ref().map_or(false, |k| m.from == k.from && m.to == k.to) {
-            score -= 9000;
-        } else if searcher.killers[ply][1].as_ref().map_or(false, |k| m.from == k.from && m.to == k.to) {
-            score -= 8000;
-        }
-        
-        // History heuristic
-        let idx = hash_move_dest(m);
-        let history_score = searcher.history[m.piece.piece_type as usize][idx];
-        score -= history_score;
-        
-        score
-    });
-}
-
-fn sort_moves_root(searcher: &Searcher, game: &GameState, moves: &mut Vec<Move>, tt_move: &Option<Move>) {
-    sort_moves(searcher, game, moves, 0, tt_move);
-}
-
-fn sort_captures(game: &GameState, moves: &mut Vec<Move>) {
-    moves.sort_by_cached_key(|m| {
-        let mut score = 0;
-        if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {
-            score -= get_piece_value(target.piece_type) * 10 - get_piece_value(m.piece.piece_type);
-        }
-        score
-    });
-}
-
-#[inline]
-fn hash_move_dest(m: &Move) -> usize {
-    ((m.to.x ^ m.to.y) & 0xFF) as usize
 }

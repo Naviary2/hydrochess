@@ -16,8 +16,7 @@ const SPRT_DIR = __dirname;
 const PROJECT_ROOT = path.join(SPRT_DIR, '..');
 
 // Root-level packages
-const ROOT_PKG_OLD = path.join(PROJECT_ROOT, 'pkg');      // existing old snapshot
-const ROOT_PKG_NEW = path.join(PROJECT_ROOT, 'pkg-new');  // new web build
+const ROOT_PKG_OLD = path.join(PROJECT_ROOT, 'pkg-old');  // existing old snapshot
 
 // Web UI directories
 const WEB_DIR = path.join(SPRT_DIR, 'web');
@@ -51,8 +50,8 @@ function rmDirIfExists(dir) {
 
 function snapshotOldFromRoot() {
     if (!fs.existsSync(ROOT_PKG_OLD)) {
-        console.error('[web-sprt] Error: expected OLD pkg directory at', ROOT_PKG_OLD);
-        console.error('[web-sprt] Build your old reference version with: wasm-pack build --target web --out-dir pkg');
+        console.error('[web-sprt] Error: expected OLD pkg-old directory at', ROOT_PKG_OLD);
+        console.error('[web-sprt] Build your old reference version with: wasm-pack build --target web --out-dir pkg-old');
         process.exit(1);
     }
 
@@ -60,15 +59,16 @@ function snapshotOldFromRoot() {
         fs.mkdirSync(WEB_DIR, { recursive: true });
     }
 
-    console.log('[web-sprt] Copying OLD pkg (root/pkg) to sprt/web/pkg-old');
+    console.log('[web-sprt] Copying OLD pkg (root/pkg-old) to sprt/web/pkg-old');
     rmDirIfExists(WEB_PKG_OLD_DIR);
     copyDirectory(ROOT_PKG_OLD, WEB_PKG_OLD_DIR);
 }
 
 function buildNewWebPkg() {
-    console.log('\n[web-sprt] Building NEW WASM (target=web -> pkg-new)...');
+    console.log('\n[web-sprt] Building NEW WASM (target=web -> sprt/web/pkg-new)...');
     try {
-        execSync('wasm-pack build --target web --out-dir pkg-new', {
+        rmDirIfExists(WEB_PKG_NEW_DIR);
+        execSync('wasm-pack build --target web --out-dir sprt/web/pkg-new', {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
         });
@@ -76,20 +76,10 @@ function buildNewWebPkg() {
         console.error('[web-sprt] wasm-pack build failed:', e.message);
         process.exit(1);
     }
-    if (!fs.existsSync(ROOT_PKG_NEW)) {
-        console.error('[web-sprt] Build finished but pkg-new is missing:', ROOT_PKG_NEW);
+    if (!fs.existsSync(WEB_PKG_NEW_DIR)) {
+        console.error('[web-sprt] Build finished but pkg-new is missing:', WEB_PKG_NEW_DIR);
         process.exit(1);
     }
-}
-
-function syncNewToWeb() {
-    if (!fs.existsSync(WEB_DIR)) {
-        fs.mkdirSync(WEB_DIR, { recursive: true });
-    }
-
-    console.log('[web-sprt] Copying NEW pkg (root/pkg-new) to sprt/web/pkg-new');
-    rmDirIfExists(WEB_PKG_NEW_DIR);
-    copyDirectory(ROOT_PKG_NEW, WEB_PKG_NEW_DIR);
 }
 
 function startServer() {
@@ -111,7 +101,6 @@ function startServer() {
     try {
         snapshotOldFromRoot();
         buildNewWebPkg();
-        syncNewToWeb();
         startServer();
     } catch (e) {
         console.error('[web-sprt] Fatal error:', e.message);
