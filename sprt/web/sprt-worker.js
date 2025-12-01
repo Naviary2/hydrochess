@@ -171,6 +171,7 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
     const newColor = newPlaysWhite ? 'w' : 'b';
     const moveLines = [];
     const moveHistory = [];
+    const texelSamples = [];
 
     const initialBase = typeof baseTimeMs === 'number' && baseTimeMs > 0 ? baseTimeMs : 0;
     const increment = typeof incrementMs === 'number' && incrementMs > 0 ? incrementMs : 0;
@@ -215,20 +216,24 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
         const sideToMove = position.turn;
         const isWhiteTurn = sideToMove === 'w';
 
-        if (haveClocks) {
-            const currentClock = isWhiteTurn ? whiteClock : blackClock;
-            if (currentClock <= 0) {
-                const loserEngine = isWhiteTurn
-                    ? (newPlaysWhite ? 'new' : 'old')
-                    : (newPlaysWhite ? 'old' : 'new');
-                moveLines.push('# Time forfeit before move: ' + (isWhiteTurn ? 'White' : 'Black') + ' has no time remaining.');
-                const result = loserEngine === 'new' ? 'loss' : 'win';
-                return { result, log: moveLines.join('\n'), reason: 'time_forfeit' };
-            }
+        // Sample positions for Texel-style tuning. We record a subset of
+        // midgame positions (by ply index) together with the current
+        // move_history and side to move. Final game result is attached
+        // when the game finishes.
+        const ply = moveHistory.length; // number of moves already played
+        const pieceCount = position.board.pieces.length;
+        if (ply >= 12 && ply <= 120 && ply % 4 === 0 && pieceCount > 4 && texelSamples.length < 32) {
+            texelSamples.push({
+                move_history: moveHistory.slice(),
+                side_to_move: sideToMove,
+                ply_index: ply,
+                piece_count: pieceCount,
+                // Capture the full board state at this ply so that downstream
+                // tooling can reconstruct the exact position for inspection.
+                position: clonePosition(position),
+            });
         }
 
-        // Smart adjudication: if both engines' most recent SEARCH evaluations
-        // (taken from their normal timed move searches) clearly agree on a
         // winner, stop early and award the game. Only start checking after at
         // least 20 plies, and only if both engines have provided evals.
         if (moveHistory.length >= 20 && lastEvalNew !== null && lastEvalOld !== null) {
@@ -257,7 +262,11 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
                     const winnerStr = winningColor === 'w' ? 'White' : 'Black';
                     moveLines.push('# Game adjudicated by material: ~' + (evalCp > 0 ? '+' : '') + evalCp + ' cp for ' + winnerStr + ' (threshold ' + threshold + ' cp, both engines agree; search eval from main search)');
                     moveLines.push('# Engines: new=' + (newColor === 'w' ? 'White' : 'Black') + ', old=' + (newColor === 'w' ? 'Black' : 'White'));
-                    return { result, log: moveLines.join('\n'), reason: 'material_adjudication', materialThreshold: threshold };
+                    const result_token = winningColor === 'w' ? '1-0' : '0-1';
+                    for (const s of texelSamples) {
+                        s.result_token = result_token;
+                    }
+                    return { result, log: moveLines.join('\n'), reason: 'material_adjudication', materialThreshold: threshold, samples: texelSamples };
                 }
             }
         }
@@ -313,7 +322,11 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
         if (haveClocks && flaggedOnTime) {
             moveLines.push('# Time forfeit: ' + (isWhiteTurn ? 'White' : 'Black') + ' flagged on time.');
             const result = engineName === 'new' ? 'loss' : 'win';
-            return { result, log: moveLines.join('\n'), reason: 'time_forfeit' };
+            const result_token = result === 'win' ? '1-0' : '0-1';
+            for (const s of texelSamples) {
+                s.result_token = result_token;
+            }
+            return { result, log: moveLines.join('\n'), reason: 'time_forfeit', samples: texelSamples };
         }
 
         if (!move || !move.from || !move.to) {
@@ -321,7 +334,11 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
             moveLines.push('# Engine ' + (engineName === 'new' ? 'HydroChess New' : 'HydroChess Old') +
                 ' failed to return a move.');
             const result = engineName === 'new' ? 'loss' : 'win';
-            return { result, log: moveLines.join('\n') };
+            const result_token = result === 'win' ? '1-0' : '0-1';
+            for (const s of texelSamples) {
+                s.result_token = result_token;
+            }
+            return { result, log: moveLines.join('\n'), samples: texelSamples };
         }
 
         // Record this engine's last search evaluation (from White's POV) if
@@ -363,7 +380,11 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
                 ': ' + (move && move.from && move.to ? (move.from + '>' + move.to) : 'null') +
                 ' (' + (e && e.message ? e.message : String(e)) + ')');
             const result = engineName === 'new' ? 'loss' : 'win';
-            return { result, log: moveLines.join('\n'), reason: 'illegal_move' };
+            const result_token = result === 'win' ? '1-0' : '0-1';
+            for (const s of texelSamples) {
+                s.result_token = result_token;
+            }
+            return { result, log: moveLines.join('\n'), reason: 'illegal_move', samples: texelSamples };
         }
 
         // Only after a successful apply do we log and record the move.
@@ -387,24 +408,40 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
 
         const repCount = recordRepetition();
         if (repCount >= 3) {
-            return { result: 'draw', log: moveLines.join('\n'), reason: 'threefold' };
+            for (const s of texelSamples) {
+                s.result_token = '1/2-1/2';
+            }
+            return { result: 'draw', log: moveLines.join('\n'), reason: 'threefold', samples: texelSamples };
         }
 
         if (halfmoveClock >= 100) {
-            return { result: 'draw', log: moveLines.join('\n'), reason: 'fifty_move' };
+            for (const s of texelSamples) {
+                s.result_token = '1/2-1/2';
+            }
+            return { result: 'draw', log: moveLines.join('\n'), reason: 'fifty_move', samples: texelSamples };
         }
 
         const gameState = isGameOver(position);
         if (gameState.over) {
             if (gameState.reason === 'draw') {
-                return { result: 'draw', log: moveLines.join('\n'), reason: 'insufficient_material' };
+                for (const s of texelSamples) {
+                    s.result_token = '1/2-1/2';
+                }
+                return { result: 'draw', log: moveLines.join('\n'), reason: 'insufficient_material', samples: texelSamples };
             }
             const result = sideToMove === newColor ? 'win' : 'loss';
-            return { result, log: moveLines.join('\n'), reason: gameState.reason || 'checkmate' };
+            const result_token = result === 'win' ? '1-0' : '0-1';
+            for (const s of texelSamples) {
+                s.result_token = result_token;
+            }
+            return { result, log: moveLines.join('\n'), reason: gameState.reason || 'checkmate', samples: texelSamples };
         }
     }
 
-    return { result: 'draw', log: moveLines.join('\n') };
+    for (const s of texelSamples) {
+        s.result_token = '1/2-1/2';
+    }
+    return { result: 'draw', log: moveLines.join('\n'), samples: texelSamples };
 }
 
 self.onmessage = async (e) => {
@@ -412,7 +449,7 @@ self.onmessage = async (e) => {
     if (msg.type === 'runGame') {
         try {
             await ensureInit();
-            const { result, log, reason, materialThreshold } = await playSingleGame(
+            const { result, log, reason, materialThreshold, samples } = await playSingleGame(
                 msg.timePerMove,
                 msg.maxMoves,
                 msg.newPlaysWhite,
@@ -431,6 +468,7 @@ self.onmessage = async (e) => {
                 reason: reason || null,
                 materialThreshold: materialThreshold ?? msg.materialThreshold ?? null,
                 timeControl: msg.timeControl || null,
+                samples: samples || [],
             });
         } catch (err) {
             self.postMessage({

@@ -41,7 +41,7 @@ impl TranspositionTable {
     /// Create a new TT with approximately `size_mb` megabytes of storage.
     pub fn new(size_mb: usize) -> Self {
         // Convert megabytes to bytes and estimate how many TTEntry values fit.
-        let bytes = size_mb.max(1) as usize * 1024 * 1024;
+        let bytes = size_mb.max(128) as usize * 1024 * 1024;
         let entry_size = std::mem::size_of::<TTEntry>().max(1);
         let capacity = (bytes / entry_size).max(1);
 

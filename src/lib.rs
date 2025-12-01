@@ -1,18 +1,18 @@
-use wasm_bindgen::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use wasm_bindgen::prelude::*;
 
 pub mod board;
+pub mod evaluation;
 pub mod game;
 pub mod moves;
-mod utils;
-pub mod evaluation;
 pub mod search;
+mod utils;
 
-use board::{Board, Piece, PieceType, PlayerColor, Coordinate};
-use game::{GameState, EnPassantState};
-use evaluation::calculate_initial_material;
 use crate::moves::{set_world_bounds, SpatialIndices};
+use board::{Board, Coordinate, Piece, PieceType, PlayerColor};
+use evaluation::calculate_initial_material;
+use game::{EnPassantState, GameState};
 
 #[wasm_bindgen]
 extern "C" {
@@ -38,7 +38,7 @@ pub struct JsMoveWithEval {
     pub from: String, // "x,y"
     pub to: String,   // "x,y"
     pub promotion: Option<String>,
-    pub eval: i32,    // centipawn score from side-to-move's perspective
+    pub eval: i32, // centipawn score from side-to-move's perspective
 }
 
 #[derive(Deserialize)]
@@ -69,7 +69,7 @@ struct JsGameRules {
 
 #[derive(Deserialize)]
 struct JsPromotionRanks {
-    white: Vec<String>,  // String because BigInt serializes as string
+    white: Vec<String>, // String because BigInt serializes as string
     black: Vec<String>,
 }
 
@@ -83,8 +83,8 @@ struct JsWorldBounds {
 
 #[derive(Deserialize)]
 struct JsMoveHistory {
-    from: String,       // "x,y"
-    to: String,         // "x,y"
+    from: String, // "x,y"
+    to: String,   // "x,y"
     #[serde(default)]
     promotion: Option<String>,
 }
@@ -106,6 +106,13 @@ struct JsPiece {
 struct JsEnPassant {
     square: String,      // "x,y"
     pawn_square: String, // "x,y"
+}
+
+#[cfg(feature = "eval_tuning")]
+#[derive(Serialize)]
+struct JsEvalWithFeatures {
+    eval: i32,
+    features: crate::evaluation::EvalFeatures,
 }
 
 #[wasm_bindgen]
@@ -131,22 +138,23 @@ impl Engine {
         // Build starting GameState from JS board
         let mut board = Board::new();
         for p in &js_game.board.pieces {
-            let x: i64 = p.x.parse().map_err(|_| JsValue::from_str("Invalid X coordinate"))?;
-            let y: i64 = p.y.parse().map_err(|_| JsValue::from_str("Invalid Y coordinate"))?;
+            let x: i64 =
+                p.x.parse()
+                    .map_err(|_| JsValue::from_str("Invalid X coordinate"))?;
+            let y: i64 =
+                p.y.parse()
+                    .map_err(|_| JsValue::from_str("Invalid Y coordinate"))?;
 
-            let piece_type = PieceType::from_str(&p.piece_type)
-                .unwrap_or(PieceType::Pawn);
+            let piece_type = PieceType::from_str(&p.piece_type).unwrap_or(PieceType::Pawn);
 
-            let color = PlayerColor::from_str(&p.player)
-                .unwrap_or(PlayerColor::White);
+            let color = PlayerColor::from_str(&p.player).unwrap_or(PlayerColor::White);
 
             board.set_piece(x, y, Piece::new(piece_type, color));
         }
 
         // Starting side (color that moved first) as reported by JS. The engine
         // will reconstruct the current side-to-move by replaying move_history.
-        let js_turn = PlayerColor::from_str(&js_game.turn)
-            .unwrap_or(PlayerColor::White);
+        let js_turn = PlayerColor::from_str(&js_game.turn).unwrap_or(PlayerColor::White);
 
         // Parse initial special rights (castling + pawn double-move)
         let mut special_rights = HashSet::new();
@@ -163,7 +171,7 @@ impl Engine {
         let parsed_en_passant = if let Some(ep) = js_game.en_passant {
             let sq_parts: Vec<&str> = ep.square.split(',').collect();
             let pawn_parts: Vec<&str> = ep.pawn_square.split(',').collect();
-            
+
             if sq_parts.len() == 2 && pawn_parts.len() == 2 {
                 if let (Ok(sq_x), Ok(sq_y), Ok(pawn_x), Ok(pawn_y)) = (
                     sq_parts[0].parse::<i64>(),
@@ -188,14 +196,20 @@ impl Engine {
         // Parse game rules from JS
         let game_rules = if let Some(js_rules) = js_game.game_rules {
             use game::{GameRules, PromotionRanks};
-            
-            let promotion_ranks = js_rules.promotion_ranks.map(|pr| {
-                PromotionRanks {
-                    white: pr.white.iter().filter_map(|s| s.parse::<i64>().ok()).collect(),
-                    black: pr.black.iter().filter_map(|s| s.parse::<i64>().ok()).collect(),
-                }
+
+            let promotion_ranks = js_rules.promotion_ranks.map(|pr| PromotionRanks {
+                white: pr
+                    .white
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
+                black: pr
+                    .black
+                    .iter()
+                    .filter_map(|s| s.parse::<i64>().ok())
+                    .collect(),
             });
-            
+
             let mut rules = GameRules {
                 promotion_ranks,
                 promotion_types: None,
@@ -237,7 +251,9 @@ impl Engine {
         // Helper to parse "x,y" into (i64, i64)
         fn parse_coords(coord_str: &str) -> Option<(i64, i64)> {
             let parts: Vec<&str> = coord_str.split(',').collect();
-            if parts.len() != 2 { return None; }
+            if parts.len() != 2 {
+                return None;
+            }
             let x = parts[0].parse::<i64>().ok()?;
             let y = parts[1].parse::<i64>().ok()?;
             Some((x, y))
@@ -248,13 +264,17 @@ impl Engine {
             game.en_passant = parsed_en_passant;
             game.turn = js_turn;
             game.halfmove_clock = js_game.halfmove_clock;
-            game.fullmove_number = if js_game.fullmove_number == 0 { 1 } else { js_game.fullmove_number };
+            game.fullmove_number = if js_game.fullmove_number == 0 {
+                1
+            } else {
+                js_game.fullmove_number
+            };
         } else {
             // Replay the full move history from the start position.
             // Like UCI: just apply moves directly by coordinates, no legal move generation needed.
             for hist in &js_game.move_history {
-                if let (Some((from_x, from_y)), Some((to_x, to_y))) = 
-                    (parse_coords(&hist.from), parse_coords(&hist.to)) 
+                if let (Some((from_x, from_y)), Some((to_x, to_y))) =
+                    (parse_coords(&hist.from), parse_coords(&hist.to))
                 {
                     let promo = hist.promotion.as_ref().map(|s| s.as_str());
                     game.make_move_coords(from_x, from_y, to_x, to_y, promo);
@@ -279,13 +299,7 @@ impl Engine {
             };
             let line = format!(
                 "{}{}: ({},{}) -> ({},{}){}",
-                color_code,
-                piece_code,
-                m.from.x,
-                m.from.y,
-                m.to.x,
-                m.to.y,
-                promo_part,
+                color_code, piece_code, m.from.x, m.from.y, m.to.x, m.to.y, promo_part,
             );
             web_sys::console::debug_1(&JsValue::from(line));
         }
@@ -301,6 +315,15 @@ impl Engine {
         }
     }
 
+    #[cfg(feature = "eval_tuning")]
+    #[wasm_bindgen]
+    pub fn evaluate_with_features(&mut self) -> JsValue {
+        crate::evaluation::reset_eval_features();
+        let eval = crate::evaluation::evaluate(&self.game);
+        let features = crate::evaluation::snapshot_eval_features();
+        serde_wasm_bindgen::to_value(&JsEvalWithFeatures { eval, features }).unwrap()
+    }
+
     /// Return the engine's static evaluation of the current position in centipawns,
     /// from the side-to-move's perspective (positive = advantage for side to move).
     pub fn evaluate_position(&mut self) -> i32 {
@@ -310,12 +333,9 @@ impl Engine {
     /// Timed search. This also exposes the search evaluation as an `eval` field alongside the move,
     /// so callers can reuse the same search for adjudication.
     pub fn get_best_move_with_time(&mut self, time_limit_ms: u32) -> JsValue {
-        if let Some((best_move, eval)) = search::get_best_move_timed_with_eval(
-            &mut self.game,
-            50,
-            time_limit_ms as u128,
-            true,
-        ) {
+        if let Some((best_move, eval)) =
+            search::get_best_move_timed_with_eval(&mut self.game, 50, time_limit_ms as u128, true)
+        {
             let js_move = JsMoveWithEval {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),
@@ -331,7 +351,7 @@ impl Engine {
     pub fn perft(&mut self, depth: usize) -> u64 {
         self.game.perft(depth)
     }
-    
+
     pub fn setup_standard_chess(&mut self) {
         self.game.setup_standard_chess();
     }

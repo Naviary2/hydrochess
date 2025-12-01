@@ -15,10 +15,9 @@ A Rust-based chess engine compiled to WebAssembly for infinite chess variants.
 - **Killer moves** and **history heuristic** for move ordering
 - **Quiescence search** for tactical accuracy
 - **Static Exchange Evaluation (SEE)** for accurate capture pruning and move ordering
-- **Coordinate normalization** for infinite board positions
 - **Gravity-style history heuristic** with bonuses/maluses and **history leaf pruning** in non-PV nodes
 - **Per-ply move buffer reuse** to avoid repeated allocations in the search tree
-- **Incremental spatial indices** and **incremental Zobrist hashing** for faster move generation and hashing
+- **Incremental spatial indices** and **Zobrist hashing** for faster move generation and hashing
 
 ### WASM Interface
 

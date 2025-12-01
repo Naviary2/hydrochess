@@ -5,7 +5,13 @@
   "main": "sprt.js",
   "type": "commonjs",
   "scripts": {
-    "dev": "node sprt.js"
+    "dev": "node sprt.js",
+    "gen-dataset": "node gen_dataset.js",
+    "tune": "node texel_tuner.js",
+    "apply-tune": "node apply_tuned_params.js"
   },
-  "keywords": ["chess", "engine", "sprt", "testing"]
+  "keywords": ["chess", "engine", "sprt", "testing"],
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
 }

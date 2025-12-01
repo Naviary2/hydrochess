@@ -68,7 +68,10 @@ function buildNewWebPkg() {
     console.log('\n[web-sprt] Building NEW WASM (target=web -> sprt/web/pkg-new)...');
     try {
         rmDirIfExists(WEB_PKG_NEW_DIR);
-        execSync('wasm-pack build --target web --out-dir sprt/web/pkg-new', {
+        const extraFeatures = (process.env.EVAL_TUNING === '1' || process.env.EVAL_TUNING === 'true')
+            ? ' --features eval_tuning'
+            : '';
+        execSync('wasm-pack build --target web --out-dir sprt/web/pkg-new' + extraFeatures, {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
         });
@@ -88,7 +91,9 @@ function startServer() {
 
     const child = spawn('npx', ['serve', '.'], {
         cwd: WEB_DIR,
-        stdio: 'inherit',
+        // Silence verbose HTTP 2xx/304 access logs on stdout while keeping
+        // error output visible on stderr.
+        stdio: ['ignore', 'ignore', 'inherit'],
         shell: true, // avoid EINVAL on Windows by using shell resolution for npx
     });
 

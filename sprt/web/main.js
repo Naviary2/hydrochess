@@ -35,6 +35,8 @@ let stopRequested = false;
 // Holds ICN strings for each completed game
 let gameLogs = [];
 let activeSprtWorkers = [];
+// Texel-style samples aggregated from workers for offline tuning
+let texelSamples = [];
 // Last known stats snapshot (for final/partial result blocks)
 let lastWins = 0;
 let lastLosses = 0;
@@ -488,7 +490,7 @@ async function runSprt() {
     applyBoundsPreset();
     const tc = parseTimeControl(CONFIG.timeControl);
     if (!tc) {
-        log('Invalid time control: ' + CONFIG.timeControl + ' (expected base+inc in seconds, e.g. 10+0.1)', 'error');
+        log('Invalid time control: ' + CONFIG.timeControl + ' (expected base+inc in seconds)', 'error');
         sprtRunning = false;
         runSprtBtn.disabled = false;
         stopSprtBtn.disabled = true;
@@ -577,6 +579,9 @@ async function runSprt() {
                     const msg = e.data;
                     if (msg.type === 'result') {
                         const result = msg.result;
+                        if (Array.isArray(msg.samples) && msg.samples.length) {
+                            texelSamples.push(...msg.samples);
+                        }
                         const icnLog = generateICNFromWorkerLog(
                             msg.log,
                             msg.gameIndex,
@@ -786,6 +791,76 @@ stopSprtBtn.addEventListener('click', stopSprt);
 copyLogBtn.addEventListener('click', copyLog);
 downloadLogsBtn.addEventListener('click', downloadLogs);
 downloadGamesBtn.addEventListener('click', downloadGames);
+
+// Minimal hooks for headless tuning via Puppeteer. These do not change
+// UI behavior but allow a Node script to inspect results and readiness.
+window.__sprt_export_games = () => gameLogs.slice();
+window.__sprt_export_samples = (offset = 0) => {
+    const start = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+    return texelSamples.slice(start);
+};
+window.__sprt_is_ready = () => wasmReady;
+window.__sprt_status = () => ({
+	running: sprtRunning,
+	wins: lastWins,
+	losses: lastLosses,
+	draws: lastDraws,
+});
+
+window.__sprt_compute_features = async (rawSamples) => {
+    const samples = Array.isArray(rawSamples) ? rawSamples : [];
+    const results = [];
+    for (const s of samples) {
+        if (!s || !Array.isArray(s.move_history) || !s.result_token || !s.side_to_move) {
+            continue;
+        }
+        const side = s.side_to_move === 'b' ? 'b' : 'w';
+        let result = 0.5;
+        if (s.result_token === '1/2-1/2') {
+            result = 0.5;
+        } else if (s.result_token === '1-0') {
+            result = side === 'w' ? 1.0 : 0.0;
+        } else if (s.result_token === '0-1') {
+            result = side === 'w' ? 0.0 : 1.0;
+        }
+
+        const base = getStandardPosition();
+        base.move_history = s.move_history.map((m) => ({
+            from: m.from,
+            to: m.to,
+            promotion: m.promotion || null,
+        }));
+
+        let evalWithFeatures;
+        try {
+            const engine = new EngineNew(base);
+            evalWithFeatures = engine.evaluate_with_features();
+            engine.free();
+        } catch (e) {
+            continue;
+        }
+
+        if (!evalWithFeatures || typeof evalWithFeatures.eval !== 'number' || !evalWithFeatures.features) {
+            continue;
+        }
+
+        const positionSnapshot = s.position || null;
+
+        results.push({
+            result,
+            side_to_move: side,
+            ply_index: typeof s.ply_index === 'number' ? s.ply_index : null,
+            piece_count: typeof s.piece_count === 'number' ? s.piece_count : null,
+            eval: evalWithFeatures.eval,
+            features: evalWithFeatures.features,
+            // Optional debugging/analysis fields: exact sampled position and
+            // the move history used to reach it.
+            position: positionSnapshot,
+            move_history: Array.isArray(s.move_history) ? s.move_history : null,
+        });
+    }
+    return results;
+};
 
 initWasm();
 // Initially hide & disable games download until we have results

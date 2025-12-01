@@ -1,7 +1,7 @@
 use crate::board::PieceType;
 use crate::evaluation::evaluate;
 use crate::game::GameState;
-use crate::moves::{Move, get_quiescence_captures};
+use crate::moves::{get_quiescence_captures, Move};
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -34,10 +34,10 @@ const LMR_MIN_MOVES: usize = 4;
 
 // History Leaf Pruning (Fruit-style) parameters
 // Only active in non-PV, shallow nodes to keep it conservative but effective.
-const HLP_MAX_DEPTH: usize = 3;        // only apply at depth <= 3
-const HLP_MIN_MOVES: usize = 5;        // played_nb >= 5
-const HLP_HISTORY_REDUCE: i32 = 300;   // history < this gets extra reduction
-const HLP_HISTORY_LEAF: i32 = 0;       // and if depth<=0 and history < this, prune move
+const HLP_MAX_DEPTH: usize = 3; // only apply at depth <= 3
+const HLP_MIN_MOVES: usize = 5; // played_nb >= 5
+const HLP_HISTORY_REDUCE: i32 = 300; // history < this gets extra reduction
+const HLP_HISTORY_LEAF: i32 = 0; // and if depth<=0 and history < this, prune move
 
 // Late Move Pruning thresholds per depth (skip quiet moves after this many moves searched)
 // Index is depth (0=unused, 1=depth1, etc). At depth d, skip after LMP_THRESHOLD[d] quiet moves.
@@ -63,7 +63,7 @@ mod see;
 pub(crate) use see::static_exchange_eval_impl as static_exchange_eval;
 
 pub mod zobrist;
-pub use zobrist::{piece_key, special_right_key, en_passant_key, SIDE_KEY};
+pub use zobrist::{en_passant_key, piece_key, special_right_key, SIDE_KEY};
 
 /// Timer abstraction to handle platform differences
 #[derive(Clone)]
@@ -82,7 +82,9 @@ impl Timer {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Self { start: Instant::now() }
+            Self {
+                start: Instant::now(),
+            }
         }
     }
 
@@ -113,39 +115,39 @@ impl Timer {
 pub struct Searcher {
     pub nodes: u64,
     pub qnodes: u64,
-    
+
     pub timer: Timer,
     pub time_limit_ms: u128,
     pub stopped: bool,
     pub seldepth: usize,
-    
+
     // Transposition table
     pub tt: TranspositionTable,
-    
+
     // PV tracking
     pub pv_table: Vec<Vec<Option<Move>>>,
     pub pv_length: Vec<usize>,
-    
+
     // Killer moves (2 per ply)
     pub killers: Vec<[Option<Move>; 2]>,
-    
+
     // History heuristic [piece_type][to_square_hash]
     pub history: [[i32; 256]; 32],
-    
+
     // Capture history [moving_piece_type][captured_piece_type]
     // Used to improve capture ordering beyond pure MVV-LVA
     pub capture_history: [[i32; 32]; 32],
-    
+
     // Static eval stack for "improving" heuristic
     // Stores eval at each ply to detect if position is improving
     pub eval_stack: Vec<i32>,
-    
+
     // Best move from previous iteration
     pub best_move_root: Option<Move>,
-    
+
     // Previous iteration score for aspiration windows
     pub prev_score: i32,
-    
+
     // Silent mode - no info output
     pub silent: bool,
 
@@ -163,7 +165,7 @@ impl Searcher {
             }
             pv_table.push(row);
         }
-        
+
         let mut killers = Vec::with_capacity(MAX_PLY);
         for _ in 0..MAX_PLY {
             killers.push([None, None]);
@@ -173,7 +175,7 @@ impl Searcher {
         for _ in 0..MAX_PLY {
             move_buffers.push(Vec::with_capacity(64));
         }
-        
+
         Searcher {
             nodes: 0,
             qnodes: 0,
@@ -181,7 +183,7 @@ impl Searcher {
             time_limit_ms,
             stopped: false,
             seldepth: 0,
-            tt: TranspositionTable::new(32), // 32 MB TT
+            tt: TranspositionTable::new(64),
             pv_table,
             pv_length: vec![0; MAX_PLY],
             killers,
@@ -194,14 +196,14 @@ impl Searcher {
             move_buffers,
         }
     }
-    
+
     pub fn reset_for_iteration(&mut self) {
         // Note: DO NOT reset timer here - we want global time limit across all iterations
         self.nodes = 0;
         self.qnodes = 0;
         self.stopped = false;
         self.seldepth = 0;
-        
+
         // Reset PV table
         for i in 0..MAX_PLY {
             self.pv_length[i] = 0;
@@ -210,7 +212,7 @@ impl Searcher {
             }
         }
     }
-    
+
     /// Decay history scores at the start of each iteration
     pub fn decay_history(&mut self) {
         for row in &mut self.history {
@@ -224,13 +226,17 @@ impl Searcher {
     #[inline]
     pub fn update_history(&mut self, piece: PieceType, idx: usize, bonus: i32) {
         let mut clamped = bonus;
-        if clamped > MAX_HISTORY { clamped = MAX_HISTORY; }
-        if clamped < -MAX_HISTORY { clamped = -MAX_HISTORY; }
+        if clamped > MAX_HISTORY {
+            clamped = MAX_HISTORY;
+        }
+        if clamped < -MAX_HISTORY {
+            clamped = -MAX_HISTORY;
+        }
 
         let entry = &mut self.history[piece as usize][idx];
         *entry += clamped - *entry * clamped.abs() / MAX_HISTORY;
     }
-    
+
     #[inline]
     pub fn check_time(&mut self) -> bool {
         // Fast-path: no time limit (used by offline test/perft helpers).
@@ -252,7 +258,7 @@ impl Searcher {
         }
         self.stopped
     }
-    
+
     /// Format PV line as string
     pub fn format_pv(&self) -> String {
         let mut pv_str = String::new();
@@ -266,13 +272,17 @@ impl Searcher {
         }
         pv_str
     }
-    
+
     /// Print UCI-style info string
     pub fn print_info(&self, depth: usize, score: i32) {
         let time_ms = self.timer.elapsed_ms();
-        let nps = if time_ms > 0 { (self.nodes as u128 * 1000) / time_ms } else { 0 };
+        let nps = if time_ms > 0 {
+            (self.nodes as u128 * 1000) / time_ms
+        } else {
+            0
+        };
         let tt_fill = self.tt.fill_permille();
-        
+
         // Proper mate score display
         let score_str = if score > MATE_SCORE {
             // Positive mate score = we are mating
@@ -285,13 +295,13 @@ impl Searcher {
         } else {
             format!("cp {}", score)
         };
-        
+
         let pv = self.format_pv();
-        
+
         #[cfg(target_arch = "wasm32")]
         {
-             use crate::log;
-             log(&format!(
+            use crate::log;
+            log(&format!(
                 "info depth {} seldepth {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
                 depth,
                 self.seldepth,
@@ -326,8 +336,7 @@ impl Searcher {
 /// Uses the default THINK_TIME_MS and returns only the best move; the
 /// underlying implementation is shared with the timed-with-eval helper.
 pub fn get_best_move(game: &mut GameState, max_depth: usize) -> Option<Move> {
-    get_best_move_timed_with_eval(game, max_depth, THINK_TIME_MS, false)
-        .map(|(m, _)| m)
+    get_best_move_timed_with_eval(game, max_depth, THINK_TIME_MS, false).map(|(m, _)| m)
 }
 
 /// Time-limited search that also returns the final root score (cp from side-to-move's perspective).
@@ -342,45 +351,48 @@ pub fn get_best_move_timed_with_eval(
 
     let mut searcher = Searcher::new(time_limit_ms);
     searcher.silent = silent;
-    
+
     let moves = game.get_legal_moves();
     if moves.is_empty() {
         return None;
     }
-    
+
     // If only one move, return immediately with a simple static eval as score
     if moves.len() == 1 {
         let single = moves[0].clone();
         let score = evaluate(game);
         return Some((single, score));
     }
-    
+
     // Find first legal move as ultimate fallback (with time check)
-    let fallback_move = moves.iter().find(|m| {
-        // Time check during legal move validation
-        if searcher.timer.elapsed_ms() >= searcher.time_limit_ms {
-            return true; // Just accept this move
-        }
-        let undo = game.make_move(m);
-        let legal = !game.is_move_illegal();
-        game.undo_move(m, undo);
-        legal
-    }).cloned();
-    
+    let fallback_move = moves
+        .iter()
+        .find(|m| {
+            // Time check during legal move validation
+            if searcher.timer.elapsed_ms() >= searcher.time_limit_ms {
+                return true; // Just accept this move
+            }
+            let undo = game.make_move(m);
+            let legal = !game.is_move_illegal();
+            game.undo_move(m, undo);
+            legal
+        })
+        .cloned();
+
     let mut best_move: Option<Move> = fallback_move.clone();
     let mut best_score = -INFINITY;
-    
+
     // Iterative deepening with aspiration windows
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
         searcher.decay_history();
-        
+
         // Immediate time check at start of each iteration
         if searcher.timer.elapsed_ms() >= searcher.time_limit_ms {
             searcher.stopped = true;
             break;
         }
-        
+
         let score = if depth == 1 {
             // First iteration: full window
             negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY)
@@ -391,15 +403,15 @@ pub fn get_best_move_timed_with_eval(
             let mut window_size = ASPIRATION_WINDOW;
             let mut result;
             let mut retries = 0;
-            
+
             loop {
                 result = negamax_root(&mut searcher, game, depth, alpha, beta);
                 retries += 1;
-                
+
                 if searcher.stopped {
                     break;
                 }
-                
+
                 if result <= alpha {
                     // Failed low - widen alpha
                     window_size *= 4;
@@ -412,7 +424,7 @@ pub fn get_best_move_timed_with_eval(
                     // Score within window
                     break;
                 }
-                
+
                 // Fallback to full window if window gets too large or too many retries
                 if window_size > 1000 || retries >= 4 {
                     result = negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY);
@@ -421,7 +433,7 @@ pub fn get_best_move_timed_with_eval(
             }
             result
         };
-        
+
         // Update best move - even if stopped, use best from this iteration if found
         if let Some(pv_move) = &searcher.pv_table[0][0] {
             best_move = Some(pv_move.clone());
@@ -429,26 +441,26 @@ pub fn get_best_move_timed_with_eval(
             searcher.best_move_root = Some(pv_move.clone());
             searcher.prev_score = score;
         }
-        
+
         // Print info after each depth (even if stopped, for debugging)
         if !searcher.stopped && !searcher.silent {
             searcher.print_info(depth, score);
         }
-        
+
         // Check if we found mate or time is up
         if searcher.stopped || best_score.abs() > MATE_SCORE {
             break;
         }
-        
+
         // If we've used more than 80% of time, don't start another iteration
         if searcher.timer.elapsed_ms() > searcher.time_limit_ms * 8 / 10 {
             break;
         }
     }
-    
+
     // Increment TT age for next search
     searcher.tt.increment_age();
-    
+
     if let Some(m) = best_move {
         Some((m, best_score))
     } else {
@@ -464,8 +476,7 @@ pub fn get_best_move_timed(
     time_limit_ms: u128,
     silent: bool,
 ) -> Option<Move> {
-    get_best_move_timed_with_eval(game, max_depth, time_limit_ms, silent)
-        .map(|(m, _)| m)
+    get_best_move_timed_with_eval(game, max_depth, time_limit_ms, silent).map(|(m, _)| m)
 }
 
 pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
@@ -481,48 +492,54 @@ pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
 }
 
 /// Root negamax - special handling for root node
-fn negamax_root(searcher: &mut Searcher, game: &mut GameState, depth: usize, mut alpha: i32, beta: i32) -> i32 {
+fn negamax_root(
+    searcher: &mut Searcher,
+    game: &mut GameState,
+    depth: usize,
+    mut alpha: i32,
+    beta: i32,
+) -> i32 {
     searcher.pv_length[0] = 0;
-    
+
     let hash = TranspositionTable::generate_hash(game);
     let mut tt_move: Option<Move> = None;
-    
+
     // Probe TT for best move from previous search
     if let Some((_, best)) = searcher.tt.probe(hash, alpha, beta, depth, 0) {
         tt_move = best;
     }
-    
+
     let in_check = game.is_in_check();
 
     // Reuse per-ply move buffer at root (ply 0)
     let mut moves = Vec::new();
     std::mem::swap(&mut moves, &mut searcher.move_buffers[0]);
     game.get_legal_moves_into(&mut moves);
-    
+
     // Sort moves at root (TT move first, then by score)
     sort_moves_root(searcher, game, &mut moves, &tt_move);
-    
+
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut fallback_move: Option<Move> = None; // First legal move as fallback
     let mut legal_moves = 0;
-    
+
     for m in &moves {
         let undo = game.make_move(m);
-        
+
         // Check if move is illegal (leaves our king in check)
         if game.is_move_illegal() {
             game.undo_move(m, undo);
             continue;
         }
-        
+
         legal_moves += 1;
-        
+
         // Save first legal move as fallback
         if fallback_move.is_none() {
             fallback_move = Some(m.clone());
         }
-        
+
         let score;
         if legal_moves == 1 {
             // Full window search for first legal move
@@ -535,44 +552,48 @@ fn negamax_root(searcher: &mut Searcher, game: &mut GameState, depth: usize, mut
             }
             score = s;
         }
-        
+
         game.undo_move(m, undo);
-        
+
         if searcher.stopped {
             return best_score;
         }
-        
+
         if score > best_score {
             best_score = score;
             best_move = Some(m.clone());
-            
+
             if score > alpha {
                 alpha = score;
-                
+
                 // Update PV
                 searcher.pv_table[0][0] = Some(m.clone());
                 searcher.pv_length[0] = searcher.pv_length[1] + 1;
-                
+
                 for j in 0..searcher.pv_length[1] {
                     searcher.pv_table[0][j + 1] = searcher.pv_table[1][j].clone();
                 }
             }
         }
-        
+
         if alpha >= beta {
             break;
         }
     }
-    
+
     // Checkmate or stalemate (or loss by capture-all-pieces variants)
     if legal_moves == 0 {
         let no_pieces = !game.has_pieces(game.turn);
-        return if in_check || no_pieces { -MATE_VALUE } else { 0 };
+        return if in_check || no_pieces {
+            -MATE_VALUE
+        } else {
+            0
+        };
     }
-    
+
     // Swap back move buffer for reuse in future searches
     std::mem::swap(&mut searcher.move_buffers[0], &mut moves);
-    
+
     // Store in TT
     let flag = if best_score >= beta {
         TTFlag::LowerBound
@@ -581,27 +602,36 @@ fn negamax_root(searcher: &mut Searcher, game: &mut GameState, depth: usize, mut
     } else {
         TTFlag::Exact
     };
-    searcher.tt.store(hash, depth, flag, best_score, best_move, 0);
-    
+    searcher
+        .tt
+        .store(hash, depth, flag, best_score, best_move, 0);
+
     best_score
 }
 
 /// Main negamax with alpha-beta pruning, NMP, LMR, and TT
-fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usize, 
-           mut alpha: i32, mut beta: i32, allow_null: bool) -> i32 {
+fn negamax(
+    searcher: &mut Searcher,
+    game: &mut GameState,
+    depth: usize,
+    ply: usize,
+    mut alpha: i32,
+    mut beta: i32,
+    allow_null: bool,
+) -> i32 {
     searcher.nodes += 1;
     searcher.pv_length[ply] = ply;
-    
+
     // Update seldepth
     if ply > searcher.seldepth {
         searcher.seldepth = ply;
     }
-    
+
     // Time check
     if searcher.check_time() {
         return 0;
     }
-    
+
     // Check for max ply
     if ply >= MAX_PLY - 1 {
         return evaluate(game);
@@ -611,51 +641,65 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
     if game.is_fifty() {
         return 0;
     }
-    
+
     // Generate hash for TT
     let hash = TranspositionTable::generate_hash(game);
-    
+
     // Threefold repetition detection (uses hash_stack built during make_move/undo_move)
     if ply > 0 && game.is_threefold() {
         return 0; // Draw by repetition
     }
-    
+
     // Mate distance pruning (not at root)
     if ply > 0 {
         let mate_score = MATE_VALUE - ply as i32;
-        if alpha < -mate_score { alpha = -mate_score; }
-        if beta > mate_score - 1 { beta = mate_score - 1; }
-        if alpha >= beta { return alpha; }
+        if alpha < -mate_score {
+            alpha = -mate_score;
+        }
+        if beta > mate_score - 1 {
+            beta = mate_score - 1;
+        }
+        if alpha >= beta {
+            return alpha;
+        }
     }
-    
+
     let in_check = game.is_in_check();
     let is_pv = beta > alpha + 1;
-    
+
     // Base case: quiescence search at leaf nodes
     if depth == 0 {
         return quiescence(searcher, game, ply, alpha, beta);
     }
-    
+
     // Check extension (limited to avoid infinite recursion)
     // Only extend if we're not too deep already
-    let depth = if in_check && ply < MAX_PLY / 2 { depth + 1 } else { depth };
+    let depth = if in_check && ply < MAX_PLY / 2 {
+        depth + 1
+    } else {
+        depth
+    };
     let mut tt_move: Option<Move> = None;
-    
+
     if let Some((score, best)) = searcher.tt.probe(hash, alpha, beta, depth, ply) {
         tt_move = best;
-        
+
         // Use TT cutoff in non-PV nodes
         if !is_pv && score != INFINITY + 1 {
             return score;
         }
     }
-    
+
     // Static evaluation for pruning decisions
-    let static_eval = if in_check { -MATE_VALUE + ply as i32 } else { evaluate(game) };
-    
+    let static_eval = if in_check {
+        -MATE_VALUE + ply as i32
+    } else {
+        evaluate(game)
+    };
+
     // Store eval for "improving" heuristic
     searcher.eval_stack[ply] = static_eval;
-    
+
     // Check if position is improving (eval better than 2 plies ago)
     // This is used to adjust pruning aggressiveness
     let improving = if ply >= 2 && !in_check {
@@ -663,72 +707,84 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
     } else {
         true // Assume improving at root or when in check
     };
-    
+
     // Internal Iterative Deepening - search with reduced depth if no TT move
     if tt_move.is_none() && depth >= IID_MIN_DEPTH && is_pv {
-        negamax(searcher, game, depth - IID_REDUCTION, ply, alpha, beta, false);
+        negamax(
+            searcher,
+            game,
+            depth - IID_REDUCTION,
+            ply,
+            alpha,
+            beta,
+            false,
+        );
         if let Some((_, best)) = searcher.tt.probe(hash, alpha, beta, depth, ply) {
             tt_move = best;
         }
     }
-    
+
     // Pruning techniques (not in check, not PV node)
     if !in_check && !is_pv {
         // Reverse Futility Pruning (Static Null Move Pruning)
         if depth < 3 && static_eval - 120 * depth as i32 >= beta {
             return static_eval;
         }
-        
+
         // Null Move Pruning
         if allow_null && depth >= NMP_MIN_DEPTH && static_eval >= beta {
             // Check if we have non-pawn material (avoid zugzwang)
             let has_pieces = game.board.pieces.iter().any(|(_, p)| {
-                p.color == game.turn && 
-                p.piece_type != PieceType::Pawn && 
-                p.piece_type != PieceType::King
+                p.color == game.turn
+                    && p.piece_type != PieceType::Pawn
+                    && p.piece_type != PieceType::King
             });
-            
+
             if has_pieces {
                 // Make null move (proper tracking for repetition detection)
                 let saved_ep = game.en_passant.clone();
                 game.make_null_move();
-                
+
                 let r = NMP_REDUCTION + depth / 6;
                 let null_score = -negamax(
-                    searcher, game, 
-                    depth.saturating_sub(1 + r), 
-                    ply + 1, -beta, -beta + 1, false
+                    searcher,
+                    game,
+                    depth.saturating_sub(1 + r),
+                    ply + 1,
+                    -beta,
+                    -beta + 1,
+                    false,
                 );
-                
+
                 game.unmake_null_move();
                 game.en_passant = saved_ep;
-                
+
                 if searcher.stopped {
                     return 0;
                 }
-                
+
                 if null_score >= beta {
                     return beta;
                 }
             }
         }
     }
-    
+
     // Reuse per-ply move buffer for this node
     let mut moves = Vec::new();
     std::mem::swap(&mut moves, &mut searcher.move_buffers[ply]);
     game.get_legal_moves_into(&mut moves);
-    
+
     // Sort moves for better pruning
     sort_moves(searcher, game, &mut moves, ply, &tt_move);
-    
+
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut legal_moves = 0;
     let mut hash_flag = TTFlag::UpperBound;
     // Track quiet moves searched at this node for history maluses
     let mut quiets_searched: Vec<(PieceType, usize)> = Vec::new();
-    
+
     // Futility pruning flag
     let futility_pruning = !in_check && !is_pv && depth <= 3;
     let futility_base = if futility_pruning {
@@ -736,20 +792,20 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
     } else {
         0
     };
-    
+
     for m in &moves {
         let captured_piece = game.board.get_piece(&m.to.x, &m.to.y);
         let is_capture = captured_piece.is_some();
         let captured_type = captured_piece.map(|p| p.piece_type);
         let is_promotion = m.promotion.is_some();
-        
+
         // Futility pruning - skip quiet moves that can't raise alpha
         if futility_pruning && legal_moves > 0 && !is_capture && !is_promotion {
             if futility_base <= alpha {
                 continue;
             }
         }
-        
+
         // Late Move Pruning (LMP) - skip quiet moves late in the move list at shallow depths
         // Only prune after we have at least one legal move (best_score != -INFINITY)
         if !in_check && !is_pv && depth <= 4 && depth > 0 && !is_capture && !is_promotion {
@@ -758,9 +814,9 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
                 continue;
             }
         }
-        
+
         let undo = game.make_move(m);
-        
+
         // Check if move is illegal (leaves our king in check)
         if game.is_move_illegal() {
             game.undo_move(m, undo);
@@ -774,7 +830,7 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
         }
 
         legal_moves += 1;
-        
+
         let score;
         if legal_moves == 1 {
             // Full window search for first legal move
@@ -783,13 +839,14 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
             // Late Move Reductions
             let mut reduction = 0;
             if depth >= LMR_MIN_DEPTH && legal_moves >= LMR_MIN_MOVES && !in_check && !is_capture {
-                reduction = 1 + (legal_moves as f32).ln() as usize * (depth as f32).ln() as usize / 3;
-                
+                reduction =
+                    1 + (legal_moves as f32).ln() as usize * (depth as f32).ln() as usize / 3;
+
                 // Reduce more when position is not improving
                 if !improving {
                     reduction += 1;
                 }
-                
+
                 reduction = reduction.min(depth - 2);
             }
 
@@ -798,9 +855,13 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
 
             // History Leaf Pruning (Fruit-style)
             // Only in non-PV, quiet, shallow nodes and after enough moves
-            if !in_check && !is_pv && !is_capture && !is_promotion &&
-               depth <= HLP_MAX_DEPTH && legal_moves >= HLP_MIN_MOVES &&
-               best_score > -MATE_SCORE
+            if !in_check
+                && !is_pv
+                && !is_capture
+                && !is_promotion
+                && depth <= HLP_MAX_DEPTH
+                && legal_moves >= HLP_MIN_MOVES
+                && best_score > -MATE_SCORE
             {
                 let idx = hash_move_dest(m);
                 let value = searcher.history[m.piece.piece_type as usize][idx];
@@ -822,49 +883,57 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
             // transition to quiescence (depth == 0) instead of being
             // artificially clamped to 1, which can cause very deep
             // "depth 1" trees and huge node counts.
-            let search_depth = if new_depth <= 0 { 0 } else { new_depth as usize };
+            let search_depth = if new_depth <= 0 {
+                0
+            } else {
+                new_depth as usize
+            };
 
             // Null window search with possible reduction
             let mut s = -negamax(
-                searcher, game,
+                searcher,
+                game,
                 search_depth,
-                ply + 1, -alpha - 1, -alpha, true
+                ply + 1,
+                -alpha - 1,
+                -alpha,
+                true,
             );
-            
+
             // Re-search at full depth if it looks promising
             if s > alpha && (reduction > 0 || s < beta) {
                 s = -negamax(searcher, game, depth - 1, ply + 1, -beta, -alpha, true);
             }
             score = s;
         }
-        
+
         game.undo_move(m, undo);
-        
+
         if searcher.stopped {
             return best_score;
         }
-        
+
         if score > best_score {
             best_score = score;
             best_move = Some(m.clone());
-            
+
             if score > alpha {
                 alpha = score;
                 hash_flag = TTFlag::Exact;
-                
+
                 // Update PV
                 searcher.pv_table[ply][ply] = Some(m.clone());
                 searcher.pv_length[ply] = searcher.pv_length[ply + 1];
-                
+
                 for j in (ply + 1)..searcher.pv_length[ply + 1] {
                     searcher.pv_table[ply][j] = searcher.pv_table[ply + 1][j].clone();
                 }
             }
         }
-        
+
         if alpha >= beta {
             hash_flag = TTFlag::LowerBound;
-            
+
             if !is_capture {
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
                 let idx = hash_move_dest(m);
@@ -889,7 +958,7 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
             break;
         }
     }
-    
+
     // Swap back move buffer for this ply before returning
     std::mem::swap(&mut searcher.move_buffers[ply], &mut moves);
 
@@ -902,46 +971,54 @@ fn negamax(searcher: &mut Searcher, game: &mut GameState, depth: usize, ply: usi
             return 0; // Stalemate
         }
     }
-    
+
     // Store in TT
-    searcher.tt.store(hash, depth, hash_flag, best_score, best_move, ply);
-    
+    searcher
+        .tt
+        .store(hash, depth, hash_flag, best_score, best_move, ply);
+
     best_score
 }
 
 /// Quiescence search - only search captures to avoid horizon effect
-fn quiescence(searcher: &mut Searcher, game: &mut GameState, ply: usize, mut alpha: i32, beta: i32) -> i32 {
+fn quiescence(
+    searcher: &mut Searcher,
+    game: &mut GameState,
+    ply: usize,
+    mut alpha: i32,
+    beta: i32,
+) -> i32 {
     searcher.nodes += 1;
     searcher.qnodes += 1;
-    
+
     // Update seldepth
     if ply > searcher.seldepth {
         searcher.seldepth = ply;
     }
-    
+
     if searcher.check_time() {
         return 0;
     }
-    
+
     let in_check = game.is_in_check();
-    
+
     // Stand pat (not when in check)
     let stand_pat = if in_check {
         -MATE_VALUE + ply as i32
     } else {
         evaluate(game)
     };
-    
+
     if !in_check {
         if stand_pat >= beta {
             return beta;
         }
-        
+
         if alpha < stand_pat {
             alpha = stand_pat;
         }
     }
-    
+
     if ply >= MAX_PLY - 1 {
         return stand_pat;
     }
@@ -966,16 +1043,16 @@ fn quiescence(searcher: &mut Searcher, game: &mut GameState, ply: usize, mut alp
             &mut tactical_moves,
         );
     }
-    
+
     // Sort captures by MVV-LVA
     sort_captures(game, &mut tactical_moves);
-    
+
     let mut best_score = stand_pat;
     let mut legal_moves = 0;
-    
+
     // Delta pruning margin (safety buffer for positional factors)
     const DELTA_MARGIN: i32 = 200;
-    
+
     for m in &tactical_moves {
         // SEE-based pruning and delta pruning for captures when not in check.
         // static_exchange_eval returns 0 for non-captures or special cases
@@ -994,39 +1071,39 @@ fn quiescence(searcher: &mut Searcher, game: &mut GameState, ply: usize, mut alp
                 continue;
             }
         }
-        
+
         let undo = game.make_move(m);
-        
+
         if game.is_move_illegal() {
             game.undo_move(m, undo);
             continue;
         }
-        
+
         legal_moves += 1;
-        
+
         let score = -quiescence(searcher, game, ply + 1, -beta, -alpha);
-        
+
         game.undo_move(m, undo);
-        
+
         if searcher.stopped {
             // Swap back move buffer before returning early
             std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
             return best_score;
         }
-        
+
         if score > best_score {
             best_score = score;
-            
+
             if score > alpha {
                 alpha = score;
             }
         }
-        
+
         if alpha >= beta {
             break;
         }
     }
-    
+
     if legal_moves == 0 {
         let no_pieces = !game.has_pieces(game.turn);
         if in_check || no_pieces {
@@ -1035,7 +1112,7 @@ fn quiescence(searcher: &mut Searcher, game: &mut GameState, ply: usize, mut alp
             return -MATE_VALUE + ply as i32;
         }
     }
-    
+
     // Swap back move buffer for this ply before returning
     std::mem::swap(&mut searcher.move_buffers[ply], &mut tactical_moves);
 

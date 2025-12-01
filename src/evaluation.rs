@@ -1,5 +1,85 @@
-use crate::board::{PieceType, PlayerColor, Board, Coordinate};
+use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
+#[cfg(feature = "eval_tuning")]
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "eval_tuning")]
+use std::sync::RwLock;
+
+#[cfg(feature = "eval_tuning")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct EvalFeatures {
+    // King safety
+    pub king_ring_pawn_bonus: i32,
+    pub king_ring_missing_penalty: i32,
+    pub king_open_ray_penalty: i32,
+    pub king_enemy_slider_penalty: i32,
+    pub knight_near_king_bonus: i32,
+    pub king_front_shield_bonus: i32,
+    pub king_knight_shield_bonus: i32,
+
+    // "Behind king" / tropism tuning
+    pub rook_behind_king_bonus: i32,
+    pub queen_behind_king_bonus: i32,
+    pub bishop_behind_king_bonus: i32,
+    pub king_tropism_bonus: i32,
+
+    // Development & piece order
+    pub dev_queen_back_rank_penalty: i32,
+    pub dev_rook_back_rank_penalty: i32,
+    pub dev_minor_back_rank_penalty: i32,
+
+    // Rook activity
+    pub rook_open_file_bonus: i32,
+    pub rook_semi_open_bonus: i32,
+    pub rook_far_attack_bonus: i32,
+    pub rook_idle_penalty: i32,
+    pub rook_near_enemy_file_bonus: i32,
+
+    // Slider mobility
+    pub slider_mobility_bonus: i32,
+    pub bishop_mobility_bonus: i32,
+
+    // Pawn structure
+    pub passed_pawn_bonus: i32,
+    pub doubled_pawn_penalty: i32,
+    pub isolated_pawn_penalty: i32,
+
+    // Bishop pair & queen heuristics
+    pub bishop_pair_bonus: i32,
+    pub queen_too_close_to_king_penalty: i32,
+    pub queen_fork_zone_bonus: i32,
+}
+
+#[cfg(feature = "eval_tuning")]
+static EVAL_FEATURES: Lazy<RwLock<EvalFeatures>> =
+    Lazy::new(|| RwLock::new(EvalFeatures::default()));
+
+#[cfg(feature = "eval_tuning")]
+pub fn reset_eval_features() {
+    if let Ok(mut guard) = EVAL_FEATURES.write() {
+        *guard = EvalFeatures::default();
+    }
+}
+
+#[cfg(feature = "eval_tuning")]
+pub fn snapshot_eval_features() -> EvalFeatures {
+    EVAL_FEATURES.read().map(|g| g.clone()).unwrap_or_default()
+}
+
+#[cfg(feature = "eval_tuning")]
+macro_rules! bump_feat {
+    ($field:ident, $amount:expr) => {{
+        if let Ok(mut f) = $crate::evaluation::EVAL_FEATURES.write() {
+            f.$field += $amount;
+        }
+    }};
+}
+
+#[cfg(not(feature = "eval_tuning"))]
+macro_rules! bump_feat {
+    ($($tt:tt)*) => {};
+}
 
 // ==================== Piece Values ====================
 
@@ -8,12 +88,12 @@ pub fn get_piece_value(piece_type: PieceType) -> i32 {
         // neutral/blocking pieces - no material value
         PieceType::Void => 0,
         PieceType::Obstacle => 0,
-        
+
         // orthodox - adjusted for infinite chess where sliders dominate
         PieceType::Pawn => 100,
-        PieceType::Knight => 250,   // Weak in infinite chess - limited range
-        PieceType::Bishop => 450,   // Strong slider - worth knight + 1.5 pawns
-        PieceType::Rook => 650,     // Very strong in infinite chess
+        PieceType::Knight => 250, // Weak in infinite chess - limited range
+        PieceType::Bishop => 450, // Strong slider - worth knight + 1.5 pawns
+        PieceType::Rook => 650,   // Very strong in infinite chess
         PieceType::Queen | PieceType::RoyalQueen => 1350, // > 2 rooks
         PieceType::King | PieceType::Guard => 220,
 
@@ -39,25 +119,47 @@ pub fn get_piece_value(piece_type: PieceType) -> i32 {
     }
 }
 
-
 // ==================== Evaluation Constants ====================
 
-// Bonuses/Penalties for infinite chess
-const BEHIND_KING_BONUS: i32 = 40;            // Major piece past enemy king's rank/file
-const PAWN_SHIELD_BONUS: i32 = 20;            // Pawn adjacent to king
-const KNIGHT_NEAR_KING_BONUS: i32 = 15;       // Knight protecting own king
-const BISHOP_PAIR_BONUS: i32 = 50;            // Having both bishops (strong in infinite chess)
-const ROOK_OPEN_FILE_BONUS: i32 = 25;         // Rook on file with no own pawns
-const ROOK_SEMI_OPEN_BONUS: i32 = 15;         // Rook on file with only enemy pawns
-const PASSED_PAWN_BONUS: i32 = 8;             // Passed pawn base bonus (reduced for infinite chess)
-const DOUBLED_PAWN_PENALTY: i32 = 3;          // Penalty for doubled pawns (minimal in infinite chess)
-const ISOLATED_PAWN_PENALTY: i32 = 2;         // Penalty for isolated pawns (minimal in infinite chess)
-const KING_TROPISM_BONUS: i32 = 4;            // Bonus per square closer to enemy king
-
+// King safety (should be one of the largest positional terms)
 // Starting squares for pieces (standard chess layout)
-// White back rank is y=1, Black back rank is y=8
 const WHITE_BACK_RANK: i64 = 1;
 const BLACK_BACK_RANK: i64 = 8;
+
+const KING_RING_PAWN_BONUS: i32 = 30;
+const KING_RING_MISSING_PENALTY: i32 = 50;
+const KING_OPEN_RAY_PENALTY: i32 = 10;
+const KING_ENEMY_SLIDER_PENALTY: i32 = 35;
+const KNIGHT_NEAR_KING_BONUS: i32 = 16;
+const KING_FRONT_SHIELD_BONUS: i32 = 18;
+const KING_KNIGHT_SHIELD_BONUS: i32 = 14;
+
+const ROOK_BEHIND_KING_BONUS: i32 = 22;
+const QUEEN_BEHIND_KING_BONUS: i32 = 30;
+const BISHOP_BEHIND_KING_BONUS: i32 = 14;
+const KING_TROPISM_BONUS: i32 = 5;
+
+const DEV_QUEEN_BACK_RANK_PENALTY: i32 = 40;
+const DEV_ROOK_BACK_RANK_PENALTY: i32 = 18;
+const DEV_MINOR_BACK_RANK_PENALTY: i32 = 10;
+
+const ROOK_OPEN_FILE_BONUS: i32 = 30;
+const ROOK_SEMI_OPEN_BONUS: i32 = 20;
+const ROOK_FAR_ATTACK_BONUS: i32 = 8;
+const ROOK_IDLE_PENALTY: i32 = 12;
+const ROOK_NEAR_ENEMY_FILE_BONUS: i32 = 8;
+
+const SLIDER_MOBILITY_BONUS: i32 = 3;
+const BISHOP_MOBILITY_BONUS: i32 = 3;
+
+const PASSED_PAWN_BONUS: i32 = 10;
+const DOUBLED_PAWN_PENALTY: i32 = 8;
+const ISOLATED_PAWN_PENALTY: i32 = 6;
+
+const BISHOP_PAIR_BONUS: i32 = 60;
+const QUEEN_TOO_CLOSE_TO_KING_PENALTY: i32 = 40;
+const QUEEN_FORK_ZONE_BONUS: i32 = 18;
+const QUEEN_IDEAL_LINE_DIST: i32 = 4;
 
 // ==================== Main Evaluation ====================
 
@@ -66,39 +168,47 @@ pub fn evaluate(game: &GameState) -> i32 {
     if is_insufficient_material(&game.board) {
         return 0;
     }
-    
+
     // Start with material score
     let mut score = game.material_score;
-    
+
     // Find king positions
     let (white_king, black_king) = find_kings(&game.board);
-    
+
     // Check for endgame with lone king
     let white_only_king = is_lone_king(&game.board, PlayerColor::White);
     let black_only_king = is_lone_king(&game.board, PlayerColor::Black);
-    
+
     // Handle lone king endgames - also works when one side has no king (practice positions)
     if black_only_king && black_king.is_some() {
-        // White is winning (or has winning material) - add endgame bonus to help mate
-        // Use white_king if available, otherwise use a dummy position for tropism
-        let our_king = white_king.as_ref().cloned().unwrap_or_else(|| {
-            // No white king - use center as reference for piece coordination
-            Coordinate { x: 4, y: 4 }
-        });
-        score += evaluate_lone_king_endgame(game, &our_king, black_king.as_ref().unwrap(), PlayerColor::White);
+        let our_king = white_king
+            .as_ref()
+            .cloned()
+            .unwrap_or(Coordinate { x: 4, y: 4 });
+        score += evaluate_lone_king_endgame(
+            game,
+            &our_king,
+            black_king.as_ref().unwrap(),
+            PlayerColor::White,
+        );
     } else if white_only_king && white_king.is_some() {
-        // Black is winning - add endgame bonus (negative for black advantage)
-        let our_king = black_king.as_ref().cloned().unwrap_or_else(|| {
-            Coordinate { x: 4, y: 4 }
-        });
-        score -= evaluate_lone_king_endgame(game, &our_king, white_king.as_ref().unwrap(), PlayerColor::Black);
+        let our_king = black_king
+            .as_ref()
+            .cloned()
+            .unwrap_or(Coordinate { x: 4, y: 4 });
+        score -= evaluate_lone_king_endgame(
+            game,
+            &our_king,
+            white_king.as_ref().unwrap(),
+            PlayerColor::Black,
+        );
     } else {
         // Normal game - use standard positional evaluation
         score += evaluate_pieces(game, &white_king, &black_king);
         score += evaluate_king_safety(game, &white_king, &black_king);
         score += evaluate_pawn_structure(game);
     }
-    
+
     // Return from current player's perspective
     if game.turn == PlayerColor::Black {
         -score
@@ -111,7 +221,7 @@ pub fn evaluate(game: &GameState) -> i32 {
 #[allow(dead_code)]
 pub fn evaluate_fast(game: &GameState) -> i32 {
     let score = game.material_score;
-    
+
     if game.turn == PlayerColor::Black {
         -score
     } else {
@@ -121,263 +231,554 @@ pub fn evaluate_fast(game: &GameState) -> i32 {
 
 // ==================== Piece Evaluation ====================
 
-fn evaluate_pieces(game: &GameState, white_king: &Option<Coordinate>, black_king: &Option<Coordinate>) -> i32 {
+fn evaluate_pieces(
+    game: &GameState,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+) -> i32 {
     let mut score: i32 = 0;
-    
+
     let mut white_bishops = 0;
     let mut black_bishops = 0;
     let mut white_bishop_colors: (bool, bool) = (false, false); // (light, dark)
     let mut black_bishop_colors: (bool, bool) = (false, false);
-    
+
     for ((x, y), piece) in &game.board.pieces {
         let mut piece_score = match piece.piece_type {
             PieceType::Rook => evaluate_rook(game, *x, *y, piece.color, white_king, black_king),
-            PieceType::Queen => evaluate_queen(*x, *y, piece.color, white_king, black_king),
+            PieceType::Queen => evaluate_queen(game, *x, *y, piece.color, white_king, black_king),
             PieceType::Knight => evaluate_knight(*x, *y, piece.color, black_king, white_king),
             PieceType::Bishop => {
                 if piece.color == PlayerColor::White {
                     white_bishops += 1;
-                    if (*x + *y) % 2 == 0 { white_bishop_colors.0 = true; } 
-                    else { white_bishop_colors.1 = true; }
+                    if (*x + *y) % 2 == 0 {
+                        white_bishop_colors.0 = true;
+                    } else {
+                        white_bishop_colors.1 = true;
+                    }
                 } else {
                     black_bishops += 1;
-                    if (*x + *y) % 2 == 0 { black_bishop_colors.0 = true; } 
-                    else { black_bishop_colors.1 = true; }
+                    if (*x + *y) % 2 == 0 {
+                        black_bishop_colors.0 = true;
+                    } else {
+                        black_bishop_colors.1 = true;
+                    }
                 }
-                evaluate_bishop(*x, *y, piece.color, white_king, black_king)
-            },
+                evaluate_bishop(game, *x, *y, piece.color, white_king, black_king)
+            }
             PieceType::Pawn => evaluate_pawn_position(*x, *y, piece.color),
             _ => 0,
         };
-        
-        // Development penalty: major pieces on starting rank
-        let back_rank = if piece.color == PlayerColor::White { WHITE_BACK_RANK } else { BLACK_BACK_RANK };
+
+        // Development penalty: encourage higher-value pieces to leave back rank first.
+        let back_rank = if piece.color == PlayerColor::White {
+            WHITE_BACK_RANK
+        } else {
+            BLACK_BACK_RANK
+        };
+
         if *y == back_rank {
             let penalty = match piece.piece_type {
-                PieceType::Queen => 25,  // Queen should develop early
-                PieceType::Rook => 15,   // Rooks should activate
-                PieceType::Bishop => 12, // Bishops should develop
-                PieceType::Knight => 5,  // Knights less important
+                PieceType::Queen | PieceType::RoyalQueen => {
+                    bump_feat!(dev_queen_back_rank_penalty, 1);
+                    DEV_QUEEN_BACK_RANK_PENALTY
+                }
+                PieceType::Rook | PieceType::Chancellor | PieceType::Amazon => {
+                    bump_feat!(dev_rook_back_rank_penalty, 1);
+                    DEV_ROOK_BACK_RANK_PENALTY
+                }
+                PieceType::Bishop
+                | PieceType::Knight
+                | PieceType::Archbishop
+                | PieceType::Centaur => {
+                    bump_feat!(dev_minor_back_rank_penalty, 1);
+                    DEV_MINOR_BACK_RANK_PENALTY
+                }
                 _ => 0,
             };
             piece_score -= penalty;
         }
-        
+
         if piece.color == PlayerColor::White {
             score += piece_score;
         } else {
             score -= piece_score;
         }
     }
-    
+
     // Bishop pair bonus - even stronger if opposite colors
     if white_bishops >= 2 {
         score += BISHOP_PAIR_BONUS;
+        bump_feat!(bishop_pair_bonus, 1);
         if white_bishop_colors.0 && white_bishop_colors.1 {
             score += 20; // Extra bonus for opposite colored bishops
         }
     }
     if black_bishops >= 2 {
         score -= BISHOP_PAIR_BONUS;
+        bump_feat!(bishop_pair_bonus, -1);
         if black_bishop_colors.0 && black_bishop_colors.1 {
             score -= 20;
         }
     }
-    
+
     score
 }
 
-fn evaluate_rook(game: &GameState, x: i64, y: i64, color: PlayerColor, 
-                 white_king: &Option<Coordinate>, black_king: &Option<Coordinate>) -> i32 {
+fn evaluate_rook(
+    game: &GameState,
+    x: i64,
+    y: i64,
+    color: PlayerColor,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+) -> i32 {
     let mut bonus: i32 = 0;
-    
-    // Behind enemy king bonus - rook past the enemy king's rank/file for attack
-    let enemy_king = if color == PlayerColor::White { black_king } else { white_king };
+
+    // Aggressive rook: reward clear lines towards the enemy king from a distance.
+    let enemy_king = if color == PlayerColor::White {
+        black_king
+    } else {
+        white_king
+    };
+    let mut aligned_with_king = false;
     if let Some(ek) = enemy_king {
-        // Behind enemy king on Y axis (rank)
-        if color == PlayerColor::White && y > ek.y {
-            bonus += BEHIND_KING_BONUS;
-        } else if color == PlayerColor::Black && y < ek.y {
-            bonus += BEHIND_KING_BONUS;
+        let same_file = x == ek.x;
+        let same_rank = y == ek.y;
+        aligned_with_king = same_file || same_rank;
+
+        if aligned_with_king {
+            let from = Coordinate { x, y };
+            // Only reward if the line between rook and king is not blocked.
+            if is_clear_line_between(&game.board, &from, ek) {
+                // Base line-attack bonus towards enemy king.
+                bonus += ROOK_OPEN_FILE_BONUS;
+                bump_feat!(rook_open_file_bonus, 1);
+
+                // Distance factor: rooks like working from a distance on open lines.
+                let lin_dist = if same_file {
+                    (y - ek.y).abs()
+                } else {
+                    (x - ek.x).abs()
+                } as i32;
+                let capped = lin_dist.min(24);
+                let far_coeff = ROOK_FAR_ATTACK_BONUS.max(1);
+                bonus += capped * far_coeff;
+                bump_feat!(rook_far_attack_bonus, capped);
+
+                // Additional "behind king" encouragement if we are past the king's rank.
+                if (color == PlayerColor::White && y > ek.y)
+                    || (color == PlayerColor::Black && y < ek.y)
+                {
+                    bonus += ROOK_BEHIND_KING_BONUS;
+                    bump_feat!(rook_behind_king_bonus, 1);
+                }
+            }
+        } else {
+            // Non-aligned rooks get a modest tropism bonus so they aim towards the enemy king.
+            let dist = (x - ek.x).abs() + (y - ek.y).abs();
+            let trop = ((20 - dist.min(20)) as i32) / 4;
+            bonus += trop * KING_TROPISM_BONUS;
+            bump_feat!(king_tropism_bonus, trop);
         }
-        // On same file as enemy king or adjacent - attack potential
-        if (x - ek.x).abs() <= 1 {
-            bonus += 15;
+
+        // Prefer files close to the enemy king's file even when not perfectly aligned.
+        let file_dist = (x - ek.x).abs() as i32;
+        if file_dist <= 2 {
+            let weight = 3 - file_dist;
+            bonus += ROOK_NEAR_ENEMY_FILE_BONUS * weight;
+            bump_feat!(rook_near_enemy_file_bonus, weight);
         }
-        // King tropism
-        let dist = (x - ek.x).abs() + (y - ek.y).abs();
-        bonus += ((20 - dist.min(20)) as i32) * KING_TROPISM_BONUS / 2;
     }
-    
-    // Open/semi-open file bonus
+
+    // Classic rook behaviour: open/semi-open files still matter.
     let (own_pawns_on_file, enemy_pawns_on_file) = count_pawns_on_file(game, x, color);
     if own_pawns_on_file == 0 {
         if enemy_pawns_on_file == 0 {
             bonus += ROOK_OPEN_FILE_BONUS;
+            bump_feat!(rook_open_file_bonus, 1);
         } else {
             bonus += ROOK_SEMI_OPEN_BONUS;
+            bump_feat!(rook_semi_open_bonus, 1);
         }
     }
-    
+
+    // General rook mobility: rooks should control many squares from afar.
+    let rook_dirs: &[(i64, i64)] = &[(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let mobility = slider_mobility(&game.board, x, y, rook_dirs, 12);
+    bonus += mobility * SLIDER_MOBILITY_BONUS;
+    bump_feat!(slider_mobility_bonus, mobility);
+
+    // Penalize completely idle rooks stuck behind both own and enemy pawns
+    // on their file and not meaningfully aligned with the enemy king.
+    if own_pawns_on_file > 0 && enemy_pawns_on_file > 0 && !aligned_with_king {
+        bonus -= ROOK_IDLE_PENALTY;
+        bump_feat!(rook_idle_penalty, -1);
+    }
+
     bonus
 }
 
-fn evaluate_queen(x: i64, y: i64, color: PlayerColor,
-                  white_king: &Option<Coordinate>, black_king: &Option<Coordinate>) -> i32 {
+fn evaluate_queen(
+    game: &GameState,
+    x: i64,
+    y: i64,
+    color: PlayerColor,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+) -> i32 {
     let mut bonus: i32 = 0;
-    
-    // Behind enemy king bonus - queen past the enemy king for attack/mate threats
-    let enemy_king = if color == PlayerColor::White { black_king } else { white_king };
+
+    // Queen should aggressively aim at the enemy king from a safe distance.
+    let enemy_king = if color == PlayerColor::White {
+        black_king
+    } else {
+        white_king
+    };
     if let Some(ek) = enemy_king {
-        // Behind enemy king on Y axis
-        if color == PlayerColor::White && y > ek.y {
-            bonus += BEHIND_KING_BONUS + 10; // Queen gets extra bonus
-        } else if color == PlayerColor::Black && y < ek.y {
-            bonus += BEHIND_KING_BONUS + 10;
+        let dx = ek.x - x;
+        let dy = ek.y - y;
+        let same_file = dx == 0;
+        let same_rank = dy == 0;
+        let same_diag = dx.abs() == dy.abs();
+
+        let from = Coordinate { x, y };
+
+        if same_file || same_rank || same_diag {
+            // Reward only if the line is clear between queen and king (direct pressure).
+            if is_clear_line_between(&game.board, &from, ek) {
+                // Base line-attack bonus for directly targeting the king.
+                let mut line_bonus: i32 = QUEEN_BEHIND_KING_BONUS;
+                bump_feat!(queen_behind_king_bonus, 1);
+
+                // Distance sweet spot along the checking line: prefer being around
+                // QUEEN_IDEAL_LINE_DIST squares away from the king rather than too close.
+                let lin_dist = dx.abs().max(dy.abs()) as i32;
+                let max_lin: i32 = 20;
+                let clamped = lin_dist.min(max_lin);
+                let diff = (clamped - QUEEN_IDEAL_LINE_DIST).abs();
+                let base = (max_lin - diff * 2).max(0); // sharp peak around the ideal distance
+                let distance_score = base * KING_TROPISM_BONUS.max(1);
+                bump_feat!(king_tropism_bonus, base);
+
+                line_bonus += distance_score;
+                bonus += line_bonus;
+
+                // Extra reward for being "behind" the king relative to color, encouraging deep raids.
+                if (color == PlayerColor::White && y > ek.y)
+                    || (color == PlayerColor::Black && y < ek.y)
+                {
+                    bonus += QUEEN_BEHIND_KING_BONUS;
+                    bump_feat!(queen_behind_king_bonus, 1);
+                }
+            }
         }
-        // King tropism - queen very strong near enemy king
+
+        // Penalize being too close to the enemy king (easy to attack, no room to fork),
+        // then give a strong fork-zone bonus centered around QUEEN_IDEAL_LINE_DIST.
+        let chebyshev = dx.abs().max(dy.abs());
+        if chebyshev <= 1 {
+            bonus -= QUEEN_TOO_CLOSE_TO_KING_PENALTY;
+            bump_feat!(queen_too_close_to_king_penalty, -1);
+        } else if chebyshev >= 3 && chebyshev <= 10 {
+            let diff = (chebyshev as i32 - QUEEN_IDEAL_LINE_DIST).abs();
+            let scale = (10 - diff).max(1);
+            bonus += QUEEN_FORK_ZONE_BONUS * scale;
+            bump_feat!(queen_fork_zone_bonus, scale);
+        }
+
+        // General king tropism even when not perfectly aligned:
+        // slightly prefer being closer, but with lower weight so the line-distance
+        // and fork-zone heuristics dominate.
         let dist = (x - ek.x).abs() + (y - ek.y).abs();
-        bonus += ((15 - dist.min(15)) as i32) * KING_TROPISM_BONUS;
+        let manhattan_score = (20 - dist.min(20)) as i32;
+        let manhattan_weight = (KING_TROPISM_BONUS / 2).max(1);
+        bonus += manhattan_score * manhattan_weight;
+        bump_feat!(king_tropism_bonus, manhattan_score / 2);
     }
-    
+
+    // Queen mobility: prefers long-range control in all directions.
+    let queen_dirs: &[(i64, i64)] = &[
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    let mobility = slider_mobility(&game.board, x, y, queen_dirs, 12);
+    bonus += mobility * SLIDER_MOBILITY_BONUS;
+    bump_feat!(slider_mobility_bonus, mobility);
+
     bonus
 }
 
-fn evaluate_knight(x: i64, y: i64, color: PlayerColor,
-                   black_king: &Option<Coordinate>, white_king: &Option<Coordinate>) -> i32 {
+fn evaluate_knight(
+    x: i64,
+    y: i64,
+    color: PlayerColor,
+    black_king: &Option<Coordinate>,
+    white_king: &Option<Coordinate>,
+) -> i32 {
     let mut bonus: i32 = 0;
-    
+
     // Knights are weak in infinite chess - minimal positional bonus
     // Small bonus for being near friendly king (defensive)
-    let own_king = if color == PlayerColor::White { white_king } else { black_king };
+    let own_king = if color == PlayerColor::White {
+        white_king
+    } else {
+        black_king
+    };
     if let Some(ok) = own_king {
         let dist = (x - ok.x).abs() + (y - ok.y).abs();
         if dist <= 3 {
             bonus += KNIGHT_NEAR_KING_BONUS; // Knight protecting king
+            bump_feat!(knight_near_king_bonus, 1);
         } else if dist <= 5 {
             bonus += KNIGHT_NEAR_KING_BONUS / 2;
+            bump_feat!(knight_near_king_bonus, 1);
         }
     }
-    
+
     // Small bonus for being near enemy king (fork potential)
-    let enemy_king = if color == PlayerColor::White { black_king } else { white_king };
+    let enemy_king = if color == PlayerColor::White {
+        black_king
+    } else {
+        white_king
+    };
     if let Some(ek) = enemy_king {
         let dist = (x - ek.x).abs() + (y - ek.y).abs();
         if dist <= 3 {
             bonus += 10; // Fork potential
         }
     }
-    
+
     bonus
 }
 
-fn evaluate_bishop(x: i64, y: i64, color: PlayerColor, 
-                   white_king: &Option<Coordinate>, black_king: &Option<Coordinate>) -> i32 {
+fn evaluate_bishop(
+    game: &GameState,
+    x: i64,
+    y: i64,
+    color: PlayerColor,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+) -> i32 {
     let mut bonus: i32 = 0;
-    
-    // Long diagonal control bonus
+
+    // Bishop mobility along diagonals – bishops should control long diagonals.
+    let bishop_dirs: &[(i64, i64)] = &[(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    let mobility = slider_mobility(&game.board, x, y, bishop_dirs, 12);
+    bonus += mobility * BISHOP_MOBILITY_BONUS;
+    bump_feat!(bishop_mobility_bonus, mobility);
+
+    // Long diagonal control bonus (approximate "main diagonals" notion)
     if (x - y).abs() <= 1 || (x + y - 8).abs() <= 1 {
-        bonus += 8; // On or near main diagonals
+        bonus += 8;
     }
-    
+
     // Behind enemy king bonus - bishop past enemy king for attack
-    let enemy_king = if color == PlayerColor::White { black_king } else { white_king };
+    let enemy_king = if color == PlayerColor::White {
+        black_king
+    } else {
+        white_king
+    };
     if let Some(ek) = enemy_king {
         if color == PlayerColor::White && y > ek.y {
-            bonus += BEHIND_KING_BONUS / 2; // Bishops get half bonus (less direct than rooks)
+            bonus += BISHOP_BEHIND_KING_BONUS;
+            bump_feat!(bishop_behind_king_bonus, 1);
         } else if color == PlayerColor::Black && y < ek.y {
-            bonus += BEHIND_KING_BONUS / 2;
+            bonus += BISHOP_BEHIND_KING_BONUS;
+            bump_feat!(bishop_behind_king_bonus, 1);
         }
         // King tropism
         let dist = (x - ek.x).abs() + (y - ek.y).abs();
-        bonus += ((15 - dist.min(15)) as i32) * KING_TROPISM_BONUS / 2;
+        let trop = ((15 - dist.min(15)) as i32) / 2;
+        bonus += trop * KING_TROPISM_BONUS;
+        bump_feat!(king_tropism_bonus, trop);
+
+        // Direct diagonal pressure towards the enemy king, even from afar.
+        let dx = ek.x - x;
+        let dy = ek.y - y;
+        if dx.abs() == dy.abs() {
+            let lin_dist = dx.abs() as i32;
+            let capped = lin_dist.min(24);
+            bonus += capped * KING_TROPISM_BONUS;
+            bump_feat!(king_tropism_bonus, capped);
+        }
     }
-    
+
     bonus
 }
 
 fn evaluate_pawn_position(x: i64, y: i64, color: PlayerColor) -> i32 {
     let mut bonus: i32 = 0;
-    
+
     // Advancement bonus - more advanced pawns are better
     if color == PlayerColor::White {
         bonus += ((y - 2) as i32).max(0) * 3; // Bonus for ranks 3+
     } else {
         bonus += ((7 - y) as i32).max(0) * 3; // Bonus for ranks 6-
     }
-    
+
     // Central pawns are valuable
     if x >= 3 && x <= 5 {
         bonus += 5;
     }
-    
+
     bonus
 }
 
 // ==================== King Safety ====================
 
-fn evaluate_king_safety(game: &GameState, white_king: &Option<Coordinate>, black_king: &Option<Coordinate>) -> i32 {
+fn evaluate_king_safety(
+    game: &GameState,
+    white_king: &Option<Coordinate>,
+    black_king: &Option<Coordinate>,
+) -> i32 {
     let mut score: i32 = 0;
-    
+
     // White king safety
     if let Some(wk) = white_king {
         score += evaluate_king_shelter(game, wk, PlayerColor::White);
     }
-    
+
     // Black king safety
     if let Some(bk) = black_king {
         score -= evaluate_king_shelter(game, bk, PlayerColor::Black);
     }
-    
+
     score
 }
 
 fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor) -> i32 {
     let mut safety: i32 = 0;
-    
-    // Count friendly pawns directly adjacent to king (8 squares around)
+
+    // 1. Local pawn / guard cover
+    let mut has_ring_cover = false;
     for dx in -1..=1_i64 {
         for dy in -1..=1_i64 {
-            if dx == 0 && dy == 0 { continue; }
-            
-            let check_x = king.x + dx;
-            let check_y = king.y + dy;
-            
-            if let Some(piece) = game.board.get_piece(&check_x, &check_y) {
-                if piece.piece_type == PieceType::Pawn && piece.color == color {
-                    // Pawns in front are more valuable
-                    if (color == PlayerColor::White && dy > 0) || 
-                       (color == PlayerColor::Black && dy < 0) {
-                        safety += PAWN_SHIELD_BONUS;
-                    } else {
-                        safety += PAWN_SHIELD_BONUS / 2; // Side/behind pawns less valuable
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let cx = king.x + dx;
+            let cy = king.y + dy;
+            if let Some(piece) = game.board.get_piece(&cx, &cy) {
+                if piece.color == color {
+                    if piece.piece_type == PieceType::Pawn
+                        || piece.piece_type == PieceType::Guard
+                        || piece.piece_type == PieceType::Void
+                    {
+                        safety += KING_RING_PAWN_BONUS;
+                        bump_feat!(king_ring_pawn_bonus, 1);
+                        has_ring_cover = true;
+
+                        // Extra bonus for a front pawn/guard shield in the direction of the enemy.
+                        if (color == PlayerColor::White && cy > king.y)
+                            || (color == PlayerColor::Black && cy < king.y)
+                        {
+                            safety += KING_FRONT_SHIELD_BONUS;
+                            bump_feat!(king_front_shield_bonus, 1);
+                        }
                     }
                 }
             }
         }
     }
-    
-    // Penalty if king is too exposed (no pawns nearby)
-    if safety == 0 {
-        safety -= 15;
+    if !has_ring_cover {
+        safety -= KING_RING_MISSING_PENALTY;
+        bump_feat!(king_ring_missing_penalty, -1);
     }
-    
-    // Bonus for safe castled squares
-    // White king on (6,2) or Black king on (6,7) are safe positions
-    if color == PlayerColor::White {
-        if king.x == 6 && king.y == 2 {
-            safety += 20; // Ideal castled position
-        } else if (king.x >= 6 && king.x <= 7) && king.y <= 2 {
-            safety += 10; // Good castled area
+
+    // 2. Open rays (more open lines = more vulnerable)
+    let directions: &[(i64, i64)] = &[
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    for &(dx, dy) in directions {
+        let mut cx = king.x;
+        let mut cy = king.y;
+        let mut ray_open = true;
+        // limit ray length; tactics around king are local
+        for _step in 0..8 {
+            cx += dx;
+            cy += dy;
+            if let Some(piece) = game.board.get_piece(&cx, &cy) {
+                // Friendly piece stops the ray and provides some cover
+                if piece.color == color {
+                    ray_open = false;
+                }
+                break;
+            }
         }
-    } else {
-        if king.x == 6 && king.y == 7 {
-            safety += 20; // Ideal castled position
-        } else if (king.x >= 6 && king.x <= 7) && king.y >= 7 {
-            safety += 10; // Good castled area
+        if ray_open {
+            safety -= KING_OPEN_RAY_PENALTY;
+            bump_feat!(king_open_ray_penalty, -1);
         }
     }
-    
+
+    // 3. Enemy sliders attacking king zone
+    let mut enemy_slider_threats = 0;
+    for ((x, y), piece) in &game.board.pieces {
+        if piece.color == color {
+            continue;
+        }
+
+        match piece.piece_type {
+            PieceType::Rook | PieceType::Bishop | PieceType::Queen | PieceType::Amazon => {
+                // First check: is the slider even roughly in line with the king?
+                let dx = x - king.x;
+                let dy = y - king.y;
+
+                let same_file = dx == 0;
+                let same_rank = dy == 0;
+                let same_diag = dx.abs() == dy.abs();
+
+                if !(same_file || same_rank || same_diag) {
+                    continue;
+                }
+
+                // In infinite chess, ignore ridiculously far sliders for safety.
+                // King safety is local; cap at some reasonable radius (e.g. 32).
+                let chebyshev = dx.abs().max(dy.abs());
+                if chebyshev > 32 {
+                    continue;
+                }
+
+                // Now use the O(#pieces) line-of-sight check instead of stepping square-by-square.
+                let from = Coordinate { x: *x, y: *y };
+                if is_clear_line_between(&game.board, &from, king) {
+                    enemy_slider_threats += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    safety -= enemy_slider_threats * KING_ENEMY_SLIDER_PENALTY;
+    bump_feat!(king_enemy_slider_penalty, -enemy_slider_threats);
+
+    // 4. Friendly knights close to the king act as dynamic shields.
+    for ((x, y), piece) in &game.board.pieces {
+        if piece.color != color {
+            continue;
+        }
+        if piece.piece_type == PieceType::Knight {
+            let dist = (x - king.x).abs() + (y - king.y).abs();
+            if dist <= 3 {
+                safety += KING_KNIGHT_SHIELD_BONUS;
+                bump_feat!(king_knight_shield_bonus, 1);
+            }
+        }
+    }
+
     safety
 }
 
@@ -385,13 +786,13 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
 
 fn evaluate_pawn_structure(game: &GameState) -> i32 {
     let mut score: i32 = 0;
-    
+
     // Track pawns per file for each color
     let mut white_pawn_files: Vec<i64> = Vec::new();
     let mut black_pawn_files: Vec<i64> = Vec::new();
     let mut white_pawns: Vec<(i64, i64)> = Vec::new();
     let mut black_pawns: Vec<(i64, i64)> = Vec::new();
-    
+
     for ((x, y), piece) in &game.board.pieces {
         if piece.piece_type == PieceType::Pawn {
             if piece.color == PlayerColor::White {
@@ -403,56 +804,63 @@ fn evaluate_pawn_structure(game: &GameState) -> i32 {
             }
         }
     }
-    
+
     // Doubled pawns penalty
     white_pawn_files.sort();
     black_pawn_files.sort();
-    
+
     let mut prev_file: Option<i64> = None;
     for &file in &white_pawn_files {
         if prev_file == Some(file) {
             score -= DOUBLED_PAWN_PENALTY;
+            bump_feat!(doubled_pawn_penalty, -1);
         }
         prev_file = Some(file);
     }
-    
+
     prev_file = None;
     for &file in &black_pawn_files {
         if prev_file == Some(file) {
             score += DOUBLED_PAWN_PENALTY;
+            bump_feat!(doubled_pawn_penalty, 1);
         }
         prev_file = Some(file);
     }
-    
+
     // Passed pawn bonus
     for (x, y) in &white_pawns {
         if is_passed_pawn(*x, *y, PlayerColor::White, &black_pawns) {
-            // More bonus for more advanced passed pawns
-            score += PASSED_PAWN_BONUS + ((*y - 2) as i32).max(0) * 5;
+            let advanced = ((*y - 2) as i32).max(0) * 5;
+            score += PASSED_PAWN_BONUS + advanced;
+            bump_feat!(passed_pawn_bonus, 1);
         }
     }
-    
+
     for (x, y) in &black_pawns {
         if is_passed_pawn(*x, *y, PlayerColor::Black, &white_pawns) {
-            score -= PASSED_PAWN_BONUS + ((7 - *y) as i32).max(0) * 5;
+            let advanced = ((7 - *y) as i32).max(0) * 5;
+            score -= PASSED_PAWN_BONUS + advanced;
+            bump_feat!(passed_pawn_bonus, -1);
         }
     }
-    
+
     // Isolated pawn penalty
     for (x, _) in &white_pawns {
         let has_neighbor = white_pawns.iter().any(|(px, _)| (*px - *x).abs() == 1);
         if !has_neighbor {
             score -= ISOLATED_PAWN_PENALTY;
+            bump_feat!(isolated_pawn_penalty, -1);
         }
     }
-    
+
     for (x, _) in &black_pawns {
         let has_neighbor = black_pawns.iter().any(|(px, _)| (*px - *x).abs() == 1);
         if !has_neighbor {
             score += ISOLATED_PAWN_PENALTY;
+            bump_feat!(isolated_pawn_penalty, 1);
         }
     }
-    
+
     score
 }
 
@@ -475,7 +883,7 @@ fn is_passed_pawn(x: i64, y: i64, color: PlayerColor, enemy_pawns: &[(i64, i64)]
 fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
     let mut white_king: Option<Coordinate> = None;
     let mut black_king: Option<Coordinate> = None;
-    
+
     for ((x, y), piece) in &board.pieces {
         if piece.piece_type == PieceType::King {
             if piece.color == PlayerColor::White {
@@ -485,7 +893,7 @@ fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
             }
         }
     }
-    
+
     (white_king, black_king)
 }
 
@@ -499,23 +907,127 @@ fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
     true
 }
 
-/// Endgame evaluation when opponent only has a lone king
+// (Your existing evaluate_lone_king_endgame + needs_king_for_mate here; unchanged)
+
+fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
+    let mut own_pawns = 0;
+    let mut enemy_pawns = 0;
+
+    for ((x, _), piece) in &game.board.pieces {
+        if *x == file && piece.piece_type == PieceType::Pawn {
+            if piece.color == color {
+                own_pawns += 1;
+            } else {
+                enemy_pawns += 1;
+            }
+        }
+    }
+
+    (own_pawns, enemy_pawns)
+}
+
+fn is_between(a: i64, b: i64, c: i64) -> bool {
+    let (minv, maxv) = if b < c { (b, c) } else { (c, b) };
+    a > minv && a < maxv
+}
+
+fn slider_mobility(
+    board: &Board,
+    x: i64,
+    y: i64,
+    directions: &[(i64, i64)],
+    max_steps: i64,
+) -> i32 {
+    let mut count: i32 = 0;
+
+    for (dx, dy) in directions {
+        let mut cx = x;
+        let mut cy = y;
+        for _ in 0..max_steps {
+            cx += dx;
+            cy += dy;
+            if board.get_piece(&cx, &cy).is_some() {
+                break;
+            }
+            count += 1;
+        }
+    }
+
+    count
+}
+
+/// Returns true if the straight line between `from` and `to` is not blocked by any piece.
+/// Works for ranks, files, and diagonals on an unbounded board by checking only existing pieces.
+fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) -> bool {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+
+    // Not collinear in rook/bishop directions -> we don't consider it a line for sliders.
+    if !(dx == 0 || dy == 0 || dx.abs() == dy.abs()) {
+        return false;
+    }
+
+    for ((px, py), _) in &board.pieces {
+        // Skip the endpoints themselves
+        if *px == from.x && *py == from.y {
+            continue;
+        }
+        if *px == to.x && *py == to.y {
+            continue;
+        }
+
+        // Same file
+        if dx == 0 && *px == from.x && is_between(*py, from.y, to.y) {
+            return false;
+        }
+
+        // Same rank
+        if dy == 0 && *py == from.y && is_between(*px, from.x, to.x) {
+            return false;
+        }
+
+        // Same diagonal
+        if dx.abs() == dy.abs() {
+            let vx = *px - from.x;
+            let vy = *py - from.y;
+            // Collinear and between
+            if vx * dy == vy * dx && is_between(*px, from.x, to.x) && is_between(*py, from.y, to.y)
+            {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// evaluation when opponent only has a lone king
 /// Key strategy for 2+ rooks: SANDWICH the king
 /// - Rooks on adjacent ranks (e.g., rank 8 and 10 if king on rank 9)
 /// - Rooks protect each other (same file)
 /// - This cuts off both sides, king can't escape or attack rooks
 /// - Then bring our king in to help deliver mate
-fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_king: &Coordinate, winning_color: PlayerColor) -> i32 {
+fn evaluate_lone_king_endgame(
+    game: &GameState,
+    our_king: &Coordinate,
+    enemy_king: &Coordinate,
+    winning_color: PlayerColor,
+) -> i32 {
     let mut bonus: i32 = 0;
 
     let king_needed = needs_king_for_mate(&game.board, winning_color);
 
     // Collect slider positions
-    struct SliderInfo { x: i64, y: i64 }
+    struct SliderInfo {
+        x: i64,
+        y: i64,
+    }
     let mut sliders: Vec<SliderInfo> = Vec::new();
 
     for ((x, y), piece) in &game.board.pieces {
-        if piece.color != winning_color || piece.piece_type.is_royal() { continue; }
+        if piece.color != winning_color || piece.piece_type.is_royal() {
+            continue;
+        }
         match piece.piece_type {
             PieceType::Rook | PieceType::Chancellor | PieceType::Queen | PieceType::Amazon => {
                 sliders.push(SliderInfo { x: *x, y: *y });
@@ -527,15 +1039,31 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
     // ========== SANDWICH DETECTION ==========
     // The ideal formation: two rooks on ADJACENT ranks/files to the enemy king
     // Example: enemy king on rank 9, rooks on ranks 8 and 10 (same file to protect each other)
-    
+
     let mut has_sandwich_horizontal = false; // Rooks on files adjacent to king's file (king sandwiched on files)
-    let mut has_sandwich_vertical = false;   // Rooks on ranks adjacent to king's rank (king sandwiched on ranks)
-    
+    let mut has_sandwich_vertical = false; // Rooks on ranks adjacent to king's rank (king sandwiched on ranks)
+
     // Collect ranks/files above/below and left/right of the enemy king
-    let ranks_above: Vec<i64> = sliders.iter().filter(|s| s.y > enemy_king.y).map(|s| s.y).collect();
-    let ranks_below: Vec<i64> = sliders.iter().filter(|s| s.y < enemy_king.y).map(|s| s.y).collect();
-    let files_right: Vec<i64> = sliders.iter().filter(|s| s.x > enemy_king.x).map(|s| s.x).collect();
-    let files_left: Vec<i64> = sliders.iter().filter(|s| s.x < enemy_king.x).map(|s| s.x).collect();
+    let ranks_above: Vec<i64> = sliders
+        .iter()
+        .filter(|s| s.y > enemy_king.y)
+        .map(|s| s.y)
+        .collect();
+    let ranks_below: Vec<i64> = sliders
+        .iter()
+        .filter(|s| s.y < enemy_king.y)
+        .map(|s| s.y)
+        .collect();
+    let files_right: Vec<i64> = sliders
+        .iter()
+        .filter(|s| s.x > enemy_king.x)
+        .map(|s| s.x)
+        .collect();
+    let files_left: Vec<i64> = sliders
+        .iter()
+        .filter(|s| s.x < enemy_king.x)
+        .map(|s| s.x)
+        .collect();
 
     // Closest fences in each direction as Option<i64>, reusable for box/run geometry
     let closest_above = ranks_above.iter().min().copied();
@@ -547,7 +1075,7 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
     if let (Some(ca), Some(cb)) = (closest_above, closest_below) {
         has_sandwich_vertical = true;
         let gap = ca - cb - 1; // Gap the king is confined to
-        
+
         // MASSIVE bonus for tight sandwich
         if gap <= 1 {
             bonus += 600; // King trapped to 1 rank
@@ -561,12 +1089,12 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
             bonus += 150;
         }
     }
-    
+
     // File sandwich (rooks left and right of king's file)
     if let (Some(cr), Some(cl)) = (closest_right, closest_left) {
         has_sandwich_horizontal = true;
         let gap = cr - cl - 1;
-        
+
         if gap <= 1 {
             bonus += 600;
         } else if gap <= 2 {
@@ -583,7 +1111,7 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
     // ========== ROOK MUTUAL PROTECTION ==========
     // Rooks on the same rank OR same file protect each other
     // This is CRITICAL - enemy king can't attack protected rooks
-    
+
     let mut protected_count = 0;
     for i in 0..sliders.len() {
         let mut is_protected = false;
@@ -603,11 +1131,11 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
 
     // ========== FENCE CLOSENESS ==========
     // Bonus for having rooks close to the enemy king (but not ON same rank/file)
-    
+
     for s in &sliders {
         let rank_dist = (s.y - enemy_king.y).abs();
         let file_dist = (s.x - enemy_king.x).abs();
-        
+
         // Rank fence quality (rook NOT on same rank as king)
         if s.y != enemy_king.y {
             if rank_dist == 1 {
@@ -622,7 +1150,7 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
                 bonus += 20;
             }
         }
-        
+
         // File fence quality
         if s.x != enemy_king.x {
             if file_dist == 1 {
@@ -642,7 +1170,7 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
     // ========== STRONG PENALTY FOR CHECKING ==========
     // Rook on same rank/file as king = giving check, NOT fencing
     // This breaks the sandwich and lets king escape
-    
+
     for s in &sliders {
         if s.x == enemy_king.x {
             let dist = (s.y - enemy_king.y).abs();
@@ -665,10 +1193,10 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
     // ========== CUTTING OFF ESCAPE DIRECTION ==========
     // Bonus for having fences on the side AWAY from our king
     // This pushes enemy king toward our king
-    
+
     let our_dx = our_king.x - enemy_king.x;
     let our_dy = our_king.y - enemy_king.y;
-    
+
     // If our king is to the right, we want fences on the left to push enemy right
     if our_dx > 0 && !files_left.is_empty() {
         bonus += 200;
@@ -742,15 +1270,18 @@ fn evaluate_lone_king_endgame(game: &GameState, our_king: &Coordinate, enemy_kin
         //    directions that increase distance from our king (boxed in), or
         // 2. Rooks are protected so king harassment doesn't matter, or
         // 3. We have a strong sandwich in either axis.
-        let should_approach = !enemy_can_run_away || rooks_protected || has_sandwich_horizontal || has_sandwich_vertical;
-        
+        let should_approach = !enemy_can_run_away
+            || rooks_protected
+            || has_sandwich_horizontal
+            || has_sandwich_vertical;
+
         if should_approach {
             // Enemy is trapped - bring king in AGGRESSIVELY.
             // Make king approach dominate over any small rook shuffles once the
             // box/net is effectively closed.
             let prox = (30 - king_dist.min(30)) as i32;
             bonus += prox * 40; // Stronger approach bonus so K-moves beat rook shuffles
-            
+
             // Opposition bonus
             if (dx_abs == 2 && dy_abs == 0) || (dx_abs == 0 && dy_abs == 2) {
                 bonus += 250;
@@ -853,9 +1384,11 @@ fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
     let mut amazons = 0;
     let mut hawks = 0;
     let mut guards = 0;
-    
+
     for (_, piece) in &board.pieces {
-        if piece.color != color { continue; }
+        if piece.color != color {
+            continue;
+        }
         match piece.piece_type {
             PieceType::Queen | PieceType::RoyalQueen => queens += 1,
             PieceType::Rook => rooks += 1,
@@ -869,57 +1402,78 @@ fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
             _ => {}
         }
     }
-    
+
     // Cases where king is NOT needed (can mate without king)
     // 3+ Rooks, 2+ Chancellors, 2+ Queens, Amazon, etc.
-    if rooks >= 3 { return false; }
-    if chancellors >= 2 { return false; }
-    if queens >= 2 { return false; }
-    if amazons >= 1 { return false; }
-    if archbishops >= 3 { return false; }
-    if hawks >= 4 { return false; }
-    if bishops >= 6 { return false; }
-    
+    if rooks >= 3 {
+        return false;
+    }
+    if chancellors >= 2 {
+        return false;
+    }
+    if queens >= 2 {
+        return false;
+    }
+    if amazons >= 1 {
+        return false;
+    }
+    if archbishops >= 3 {
+        return false;
+    }
+    if hawks >= 4 {
+        return false;
+    }
+    if bishops >= 6 {
+        return false;
+    }
+
     // Strong combinations that don't need king
-    if queens >= 1 && chancellors >= 1 { return false; }
-    if queens >= 1 && bishops >= 2 { return false; }
-    if queens >= 1 && knights >= 2 { return false; }
-    if queens >= 1 && guards >= 2 { return false; }
-    if queens >= 1 && rooks >= 1 && (bishops >= 1 || knights >= 1) { return false; }
-    if chancellors >= 1 && bishops >= 2 { return false; }
-    if rooks >= 2 && (bishops >= 2 || knights >= 2 || guards >= 1) { return false; }
-    if rooks >= 1 && bishops >= 3 { return false; }
-    if rooks >= 1 && knights >= 4 { return false; }
-    if rooks >= 1 && guards >= 2 { return false; }
-    
+    if queens >= 1 && chancellors >= 1 {
+        return false;
+    }
+    if queens >= 1 && bishops >= 2 {
+        return false;
+    }
+    if queens >= 1 && knights >= 2 {
+        return false;
+    }
+    if queens >= 1 && guards >= 2 {
+        return false;
+    }
+    if queens >= 1 && rooks >= 1 && (bishops >= 1 || knights >= 1) {
+        return false;
+    }
+    if chancellors >= 1 && bishops >= 2 {
+        return false;
+    }
+    if rooks >= 2 && (bishops >= 2 || knights >= 2 || guards >= 1) {
+        return false;
+    }
+    if rooks >= 1 && bishops >= 3 {
+        return false;
+    }
+    if rooks >= 1 && knights >= 4 {
+        return false;
+    }
+    if rooks >= 1 && guards >= 2 {
+        return false;
+    }
+
     // Default: king is needed
     true
 }
 
-fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
-    let mut own_pawns = 0;
-    let mut enemy_pawns = 0;
-    
-    for ((x, _), piece) in &game.board.pieces {
-        if *x == file && piece.piece_type == PieceType::Pawn {
-            if piece.color == color {
-                own_pawns += 1;
-            } else {
-                enemy_pawns += 1;
-            }
-        }
-    }
-    
-    (own_pawns, enemy_pawns)
-}
-
 /// Check if a side has sufficient material to force checkmate in infinite chess.
 /// Based on the official insufficientmaterial.ts from infinitechess.org
-/// 
+///
 /// Logic: This lists INSUFFICIENT scenarios. Anything not matching
 /// those scenarios is sufficient. We check if the current material fits within
 /// any insufficient scenario.
-pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our_king: bool) -> bool {
+pub fn has_sufficient_mating_material(
+    board: &Board,
+    color: PlayerColor,
+    has_our_king: bool,
+) -> bool {
     let mut queens = 0;
     let mut rooks = 0;
     let mut bishops = 0;
@@ -934,9 +1488,11 @@ pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our
     let mut huygens = 0;
     let mut light_bishops = 0;
     let mut dark_bishops = 0;
-    
+
     for ((x, y), piece) in &board.pieces {
-        if piece.color != color { continue; }
+        if piece.color != color {
+            continue;
+        }
         match piece.piece_type {
             PieceType::Queen | PieceType::RoyalQueen => queens += 1,
             PieceType::Rook => rooks += 1,
@@ -947,7 +1503,7 @@ pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our
                 } else {
                     dark_bishops += 1;
                 }
-            },
+            }
             PieceType::Knight => knights += 1,
             PieceType::Chancellor => chancellors += 1,
             PieceType::Archbishop => archbishops += 1,
@@ -960,194 +1516,353 @@ pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our
             _ => {}
         }
     }
-    
+
     // Amazon can always mate
-    if amazons >= 1 { return true; }
-    
+    if amazons >= 1 {
+        return true;
+    }
+
     // Helper: check if we have "only" certain pieces (nothing else)
-    let has_only = |q: i32, r: i32, b: i32, n: i32, c: i32, a: i32, h: i32, g: i32, p: i32, s: i32, hu: i32| -> bool {
-        queens <= q && rooks <= r && bishops <= b && knights <= n &&
-        chancellors <= c && archbishops <= a && hawks <= h && guards <= g &&
-        pawns <= p && knightriders <= s && huygens <= hu
+    let has_only = |q: i32,
+                    r: i32,
+                    b: i32,
+                    n: i32,
+                    c: i32,
+                    a: i32,
+                    h: i32,
+                    g: i32,
+                    p: i32,
+                    s: i32,
+                    hu: i32|
+     -> bool {
+        queens <= q
+            && rooks <= r
+            && bishops <= b
+            && knights <= n
+            && chancellors <= c
+            && archbishops <= a
+            && hawks <= h
+            && guards <= g
+            && pawns <= p
+            && knightriders <= s
+            && huygens <= hu
     };
-    
+
     // =====================================================================
     // 1K vs 1k scenarios (with our king helping)
     // These are INSUFFICIENT scenarios from insuffmatScenarios_1K1k
     // =====================================================================
     if has_our_king {
         // {queensW: 1} - single queen insufficient
-        if queens == 1 && has_only(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if queens == 1 && has_only(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {bishopsW: [Inf, 1]} - any number of same-color bishops insufficient
-        if bishops > 0 && (light_bishops == 0 || dark_bishops == 0) && 
-           has_only(0, 0, i32::MAX, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if bishops > 0
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 0, i32::MAX, 0, 0, 0, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {knightsW: 3} - up to 3 knights insufficient
-        if knights <= 3 && has_only(0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if knights <= 3 && has_only(0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {hawksW: 2} - 2 hawks insufficient
-        if hawks <= 2 && has_only(0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0) { return false; }
-        
+        if hawks <= 2 && has_only(0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {hawksW: 1, bishopsW: [1,0]} - hawk + same-color bishop
-        if hawks == 1 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-           has_only(0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0) { return false; }
-        
+        if hawks == 1
+            && bishops == 1
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {rooksW: 1, knightsW: 1} - rook + knight insufficient
-        if rooks == 1 && knights == 1 && has_only(0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if rooks == 1 && knights == 1 && has_only(0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {rooksW: 1, bishopsW: [1,0]} - rook + same-color bishop
-        if rooks == 1 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-           has_only(0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if rooks == 1
+            && bishops == 1
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {rooksW: 1, rooksB: 1} - rook vs rook (but we only count our pieces, so skip)
-        
+
         // {archbishopsW: 1, bishopsW: [1,0]} - archbishop + same-color bishop
-        if archbishops == 1 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-           has_only(0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0) { return false; }
-        
+        if archbishops == 1
+            && bishops == 1
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {archbishopsW: 1, knightsW: 1} - archbishop + knight
-        if archbishops == 1 && knights == 1 && has_only(0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0) { return false; }
-        
+        if archbishops == 1 && knights == 1 && has_only(0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {knightsW: 1, bishopsW: [Inf, 0]} - knight + any same-color bishops
-        if knights == 1 && bishops > 0 && (light_bishops == 0 || dark_bishops == 0) &&
-           has_only(0, 0, i32::MAX, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if knights == 1
+            && bishops > 0
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 0, i32::MAX, 1, 0, 0, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {knightsW: 1, bishopsW: [1,1]} - knight + one of each bishop color
-        if knights == 1 && light_bishops == 1 && dark_bishops == 1 &&
-           has_only(0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if knights == 1
+            && light_bishops == 1
+            && dark_bishops == 1
+            && has_only(0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {knightsW: 2, bishopsW: [1,0]} - 2 knights + same-color bishop
-        if knights == 2 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-           has_only(0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if knights == 2
+            && bishops == 1
+            && (light_bishops == 0 || dark_bishops == 0)
+            && has_only(0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0)
+        {
+            return false;
+        }
+
         // {guardsW: 1} - single guard insufficient
-        if guards == 1 && has_only(0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0) { return false; }
-        
+        if guards == 1 && has_only(0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0) {
+            return false;
+        }
+
         // {chancellorsW: 1} - single chancellor insufficient
-        if chancellors == 1 && has_only(0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0) { return false; }
-        
+        if chancellors == 1 && has_only(0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0) {
+            return false;
+        }
+
         // {knightridersW: 2} - 2 knightriders insufficient
-        if knightriders <= 2 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0) { return false; }
-        
+        if knightriders <= 2 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0) {
+            return false;
+        }
+
         // {pawnsW: 3} - up to 3 pawns insufficient
-        if pawns <= 3 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0) { return false; }
-        
+        if pawns <= 3 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0) {
+            return false;
+        }
+
         // Everything else with king is sufficient
         return true;
     }
-    
+
     // =====================================================================
     // 0K vs 1k scenarios (without our king)
     // These are INSUFFICIENT scenarios from insuffmatScenarios_0K1k
     // Anything NOT in this list is sufficient
     // =====================================================================
-    
+
     // {queensW: 1, rooksW: 1}
-    if queens == 1 && rooks == 1 && has_only(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if queens == 1 && rooks == 1 && has_only(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {queensW: 1, knightsW: 1}
-    if queens == 1 && knights == 1 && has_only(1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if queens == 1 && knights == 1 && has_only(1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {queensW: 1, bishopsW: [1,0]}
-    if queens == 1 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-       has_only(1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if queens == 1
+        && bishops == 1
+        && (light_bishops == 0 || dark_bishops == 0)
+        && has_only(1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {queensW: 1, pawnsW: 1}
-    if queens == 1 && pawns == 1 && has_only(1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0) { return false; }
-    
+    if queens == 1 && pawns == 1 && has_only(1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0) {
+        return false;
+    }
+
     // {bishopsW: [2,2]} - 2 light + 2 dark bishops
-    if light_bishops == 2 && dark_bishops == 2 && has_only(0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if light_bishops == 2 && dark_bishops == 2 && has_only(0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {bishopsW: [Inf, 1]} - any number of one color + 1 of other
-    if bishops > 0 && (light_bishops == 0 || dark_bishops == 0 || 
-       (light_bishops <= 1 && dark_bishops > 0) || (dark_bishops <= 1 && light_bishops > 0)) &&
-       has_only(0, 0, i32::MAX, 0, 0, 0, 0, 0, 0, 0, 0) {
+    if bishops > 0
+        && (light_bishops == 0
+            || dark_bishops == 0
+            || (light_bishops <= 1 && dark_bishops > 0)
+            || (dark_bishops <= 1 && light_bishops > 0))
+        && has_only(0, 0, i32::MAX, 0, 0, 0, 0, 0, 0, 0, 0)
+    {
         // Actually: [Inf, 1] means unlimited of one color, at most 1 of the other
         if (light_bishops == 0 || dark_bishops <= 1) && (dark_bishops == 0 || light_bishops <= 1) {
             return false;
         }
     }
-    
+
     // {knightsW: 4}
-    if knights <= 4 && has_only(0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if knights <= 4 && has_only(0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {knightsW: 2, bishopsW: [Inf, 0]}
-    if knights <= 2 && bishops > 0 && (light_bishops == 0 || dark_bishops == 0) &&
-       has_only(0, 0, i32::MAX, 2, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if knights <= 2
+        && bishops > 0
+        && (light_bishops == 0 || dark_bishops == 0)
+        && has_only(0, 0, i32::MAX, 2, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {knightsW: 2, bishopsW: [1,1]}
-    if knights <= 2 && light_bishops == 1 && dark_bishops == 1 &&
-       has_only(0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if knights <= 2
+        && light_bishops == 1
+        && dark_bishops == 1
+        && has_only(0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {knightsW: 1, bishopsW: [2,1]}
-    if knights == 1 && light_bishops <= 2 && dark_bishops <= 1 && bishops <= 3 &&
-       has_only(0, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if knights == 1
+        && light_bishops <= 2
+        && dark_bishops <= 1
+        && bishops <= 3
+        && has_only(0, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {hawksW: 3}
-    if hawks <= 3 && has_only(0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0) { return false; }
-    
+    if hawks <= 3 && has_only(0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {rooksW: 1, knightsW: 1, bishopsW: [1,0]}
-    if rooks == 1 && knights == 1 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-       has_only(0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if rooks == 1
+        && knights == 1
+        && bishops == 1
+        && (light_bishops == 0 || dark_bishops == 0)
+        && has_only(0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {rooksW: 1, knightsW: 1, pawnsW: 1}
-    if rooks == 1 && knights == 1 && pawns == 1 && has_only(0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0) { return false; }
-    
+    if rooks == 1 && knights == 1 && pawns == 1 && has_only(0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0) {
+        return false;
+    }
+
     // {rooksW: 1, knightsW: 2}
-    if rooks == 1 && knights <= 2 && has_only(0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if rooks == 1 && knights <= 2 && has_only(0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {rooksW: 1, guardsW: 1}
-    if rooks == 1 && guards == 1 && has_only(0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0) { return false; }
-    
+    if rooks == 1 && guards == 1 && has_only(0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0) {
+        return false;
+    }
+
     // {rooksW: 2, bishopsW: [1,0]}
-    if rooks == 2 && bishops == 1 && (light_bishops == 0 || dark_bishops == 0) &&
-       has_only(0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if rooks == 2
+        && bishops == 1
+        && (light_bishops == 0 || dark_bishops == 0)
+        && has_only(0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {rooksW: 2, knightsW: 1}
-    if rooks == 2 && knights == 1 && has_only(0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if rooks == 2 && knights == 1 && has_only(0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {rooksW: 2, pawnsW: 1}
-    if rooks == 2 && pawns == 1 && has_only(0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0) { return false; }
-    
+    if rooks == 2 && pawns == 1 && has_only(0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0) {
+        return false;
+    }
+
     // {archbishopsW: 1, bishopsW: [2,0]}
-    if archbishops == 1 && bishops <= 2 && (light_bishops == 0 || dark_bishops == 0) &&
-       has_only(0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0) { return false; }
-    
+    if archbishops == 1
+        && bishops <= 2
+        && (light_bishops == 0 || dark_bishops == 0)
+        && has_only(0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {archbishopsW: 1, bishopsW: [1,1]}
-    if archbishops == 1 && light_bishops == 1 && dark_bishops == 1 &&
-       has_only(0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0) { return false; }
-    
+    if archbishops == 1
+        && light_bishops == 1
+        && dark_bishops == 1
+        && has_only(0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 0)
+    {
+        return false;
+    }
+
     // {archbishopsW: 1, knightsW: 2}
-    if archbishops == 1 && knights <= 2 && has_only(0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0) { return false; }
-    
+    if archbishops == 1 && knights <= 2 && has_only(0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {archbishopsW: 2}
-    if archbishops <= 2 && has_only(0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0) { return false; }
-    
+    if archbishops <= 2 && has_only(0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {chancellorsW: 1, guardsW: 1}
-    if chancellors == 1 && guards == 1 && has_only(0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0) { return false; }
-    
+    if chancellors == 1 && guards == 1 && has_only(0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0) {
+        return false;
+    }
+
     // {chancellorsW: 1, knightsW: 1}
-    if chancellors == 1 && knights == 1 && has_only(0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if chancellors == 1 && knights == 1 && has_only(0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {chancellorsW: 1, rooksW: 1}
-    if chancellors == 1 && rooks == 1 && has_only(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) { return false; }
-    
+    if chancellors == 1 && rooks == 1 && has_only(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0) {
+        return false;
+    }
+
     // {guardsW: 2}
-    if guards <= 2 && has_only(0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0) { return false; }
-    
+    if guards <= 2 && has_only(0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0) {
+        return false;
+    }
+
     // {amazonsW: 1} - amazon is always sufficient
     // (already handled above)
-    
+
     // {knightridersW: 3}
-    if knightriders <= 3 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0) { return false; }
-    
+    if knightriders <= 3 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0) {
+        return false;
+    }
+
     // {pawnsW: 6}
-    if pawns <= 6 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0) { return false; }
-    
+    if pawns <= 6 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0) {
+        return false;
+    }
+
     // {huygensW: 4}
-    if huygens <= 4 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4) { return false; }
-    
+    if huygens <= 4 && has_only(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4) {
+        return false;
+    }
+
     // Everything else is sufficient (not in any insufficient scenario)
     true
 }
@@ -1156,14 +1871,22 @@ pub fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our
 pub fn is_insufficient_material(board: &Board) -> bool {
     // Count pieces quickly - if too many pieces, definitely not insufficient
     let total_pieces = board.pieces.len();
-    if total_pieces >= 10 { return false; } // Fast exit for complex positions
-    
-    let white_has_king = board.pieces.iter().any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::White);
-    let black_has_king = board.pieces.iter().any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::Black);
-    
+    if total_pieces >= 10 {
+        return false;
+    } // Fast exit for complex positions
+
+    let white_has_king = board
+        .pieces
+        .iter()
+        .any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::White);
+    let black_has_king = board
+        .pieces
+        .iter()
+        .any(|(_, p)| p.piece_type.is_royal() && p.color == PlayerColor::Black);
+
     let white_can_mate = has_sufficient_mating_material(board, PlayerColor::White, white_has_king);
     let black_can_mate = has_sufficient_mating_material(board, PlayerColor::Black, black_has_king);
-    
+
     // Draw if neither side can mate
     !white_can_mate && !black_can_mate
 }
