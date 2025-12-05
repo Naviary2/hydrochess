@@ -376,18 +376,15 @@ pub fn get_best_move_timed_with_eval(
         return Some((single, score));
     }
 
-    // Find first legal move as ultimate fallback (with time check)
+    // Find first legal move as ultimate fallback
+    // CRITICAL: We must ALWAYS check legality, even under time pressure.
+    // Accepting an illegal move (one that leaves our king in check) is never acceptable.
     let fallback_move = moves
         .iter()
         .find(|m| {
-            // Time check during legal move validation
-            if searcher.timer.elapsed_ms() >= searcher.time_limit_ms {
-                return true; // Just accept this move
-            }
             let undo = game.make_move(m);
             let legal = !game.is_move_illegal();
             game.undo_move(m, undo);
-
             legal
         })
         .cloned();

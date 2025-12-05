@@ -1,6 +1,5 @@
 use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
-use crate::Variant;
 
 #[cfg(feature = "eval_tuning")]
 use once_cell::sync::Lazy;
@@ -69,30 +68,6 @@ macro_rules! bump_feat {
 }
 
 // ==================== Piece Values ====================
-
-/// Run a block of evaluation code only for a specific variant.
-/// Usage inside evaluate():
-///   variant_block!(game, Variant::PawnHorde, {
-///       score += 50;
-///   });
-// macro_rules! variant_block {
-//     ($game:expr, $name:expr, $body:block) => {
-//         if $game.variant == Some($name) {
-//             $body
-//         }
-//     };
-// }
-
-/// Run a single statement only for a specific variant.
-/// Usage inside evaluate():
-///   variant_line!(game, Variant::Space, score += 10;);
-macro_rules! variant_line {
-    ($game:expr, $name:expr, $stmt:stmt) => {
-        if $game.variant == Some($name) {
-            $stmt
-        }
-    };
-}
 
 pub fn get_piece_value(piece_type: PieceType) -> i32 {
     match piece_type {
@@ -181,6 +156,31 @@ const DOUBLED_PAWN_PENALTY: i32 = 8;
 const BISHOP_PAIR_BONUS: i32 = 60;
 const QUEEN_IDEAL_LINE_DIST: i32 = 4;
 
+/// Compute the centroid of all non-obstacle, non-void pieces on the board.
+/// Used for piece cloud calculations. (Made public for variant modules.)
+pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
+    let mut sum_x: i64 = 0;
+    let mut sum_y: i64 = 0;
+    let mut count: i64 = 0;
+
+    for ((x, y), piece) in &board.pieces {
+        if piece.piece_type != PieceType::Void && piece.piece_type != PieceType::Obstacle {
+            sum_x += *x;
+            sum_y += *y;
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        Some(Coordinate {
+            x: sum_x / count,
+            y: sum_y / count,
+        })
+    } else {
+        None
+    }
+}
+
 // ==================== Main Evaluation ====================
 
 pub fn evaluate(game: &GameState) -> i32 {
@@ -229,14 +229,6 @@ pub fn evaluate(game: &GameState) -> i32 {
         score += evaluate_pawn_structure(game);
     }
 
-    // Extra eval only in certain variants:
-    variant_line!(game, Variant::PawnHorde, {
-        // e.g. bonus when white has many pawns still alive
-        if game.white_piece_count > game.black_piece_count {
-            score += 10;
-        }
-    });
-
     // Return from current player's perspective
     if game.turn == PlayerColor::Black {
         -score
@@ -259,7 +251,7 @@ pub fn evaluate_fast(game: &GameState) -> i32 {
 
 // ==================== Piece Evaluation ====================
 
-fn evaluate_pieces(
+pub fn evaluate_pieces(
     game: &GameState,
     white_king: &Option<Coordinate>,
     black_king: &Option<Coordinate>,
@@ -276,28 +268,7 @@ fn evaluate_pieces(
     let mut white_bishop_colors: (bool, bool) = (false, false); // (light, dark)
     let mut black_bishop_colors: (bool, bool) = (false, false);
 
-    let mut cloud_center: Option<Coordinate> = None;
-    {
-        let mut sum_x: i64 = 0;
-        let mut sum_y: i64 = 0;
-        let mut count: i64 = 0;
-
-        for ((x, y), piece) in &game.board.pieces {
-            if piece.piece_type != PieceType::Void && piece.piece_type != PieceType::Obstacle {
-                sum_x += *x;
-                sum_y += *y;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            cloud_center = Some(Coordinate {
-                x: sum_x / count,
-                y: sum_y / count,
-            });
-        }
-    }
-
+    let cloud_center: Option<Coordinate> = compute_cloud_center(&game.board);
     for ((x, y), piece) in &game.board.pieces {
         let mut piece_score = match piece.piece_type {
             PieceType::Rook => evaluate_rook(game, *x, *y, piece.color, white_king, black_king),
@@ -327,6 +298,7 @@ fn evaluate_pieces(
             _ => 0,
         };
 
+        // Cloud penalty: pieces too far from piece centroid
         if let Some(center) = &cloud_center {
             let cheb = (*x - center.x).abs().max((*y - center.y).abs());
             if cheb > PIECE_CLOUD_CHEB_RADIUS {
@@ -382,7 +354,7 @@ fn evaluate_pieces(
     score
 }
 
-fn evaluate_rook(
+pub fn evaluate_rook(
     game: &GameState,
     x: i64,
     y: i64,
@@ -481,7 +453,7 @@ fn evaluate_rook(
     bonus
 }
 
-fn evaluate_queen(
+pub fn evaluate_queen(
     game: &GameState,
     x: i64,
     y: i64,
@@ -600,7 +572,7 @@ fn evaluate_queen(
     bonus
 }
 
-fn evaluate_knight(
+pub fn evaluate_knight(
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -647,7 +619,7 @@ fn evaluate_knight(
     bonus
 }
 
-fn evaluate_bishop(
+pub fn evaluate_bishop(
     game: &GameState,
     x: i64,
     y: i64,
@@ -719,7 +691,7 @@ fn evaluate_bishop(
     bonus
 }
 
-fn evaluate_pawn_position(
+pub fn evaluate_pawn_position(
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -743,8 +715,7 @@ fn evaluate_pawn_position(
         PlayerColor::Neutral => {}
     }
 
-    // Central pawns are valuable (kept simple for now; could be widened for
-    // large boards in future tuning).
+    // Central pawns are valuable
     if x >= 3 && x <= 5 {
         bonus += 5;
     }
@@ -754,7 +725,7 @@ fn evaluate_pawn_position(
 
 // ==================== King Safety ====================
 
-fn evaluate_king_safety(
+pub fn evaluate_king_safety(
     game: &GameState,
     white_king: &Option<Coordinate>,
     black_king: &Option<Coordinate>,
@@ -944,11 +915,13 @@ fn evaluate_pawn_structure(game: &GameState) -> i32 {
         }
     }
 
-    // Doubled pawns penalty
-    white_pawn_files.sort();
-    black_pawn_files.sort();
+    // Doubled pawns penalty and Passed Pawn / Tunnel detection
+    // Note: We reuse the coordinate lists built above.
+    // white_pawns and black_pawns are Vec<(x, y)>
 
+    // --- WHITE PAWNS ---
     let mut prev_file: Option<i64> = None;
+    white_pawn_files.sort();
     for &file in &white_pawn_files {
         if prev_file == Some(file) {
             score -= DOUBLED_PAWN_PENALTY;
@@ -957,7 +930,26 @@ fn evaluate_pawn_structure(game: &GameState) -> i32 {
         prev_file = Some(file);
     }
 
-    prev_file = None;
+    // Check passed pawns for White
+    for (wx, wy) in &white_pawns {
+        // 1. Is it passed? (No black pawns ahead on files x-1, x, x+1)
+        let mut is_passed = true;
+        for (bx, by) in &black_pawns {
+            if (*bx - wx).abs() <= 1 && *by > *wy {
+                is_passed = false;
+                break;
+            }
+        }
+
+        if is_passed {
+            // Base bonus for passed pawn
+            score += 20;
+        }
+    }
+
+    // --- BLACK PAWNS ---
+    let mut prev_file: Option<i64> = None;
+    black_pawn_files.sort();
     for &file in &black_pawn_files {
         if prev_file == Some(file) {
             score += DOUBLED_PAWN_PENALTY;
@@ -966,12 +958,26 @@ fn evaluate_pawn_structure(game: &GameState) -> i32 {
         prev_file = Some(file);
     }
 
+    // Check passed pawns for Black
+    for (bx, by) in &black_pawns {
+        // 1. Is it passed? (No white pawns ahead (y < by) on files x-1, x, x+1)
+        let mut is_passed = true;
+        for (wx, wy) in &white_pawns {
+            if (*wx - bx).abs() <= 1 && *wy < *by {
+                is_passed = false;
+                break;
+            }
+        }
+
+        if is_passed {
+            score -= 20;
+        }
+    }
+
     score
 }
 
-// ==================== Helper Functions ====================
-
-fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
+pub fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
     let mut white_king: Option<Coordinate> = None;
     let mut black_king: Option<Coordinate> = None;
 
@@ -989,7 +995,7 @@ fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
 }
 
 /// Check if a side only has a king (no other pieces)
-fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
+pub fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
     for (_, piece) in &board.pieces {
         if piece.color == color && piece.piece_type != PieceType::King {
             return false;
@@ -1000,7 +1006,7 @@ fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
 
 // (Your existing evaluate_lone_king_endgame + needs_king_for_mate here; unchanged)
 
-fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
+pub fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (i32, i32) {
     let mut own_pawns = 0;
     let mut enemy_pawns = 0;
 
@@ -1022,7 +1028,7 @@ fn is_between(a: i64, b: i64, c: i64) -> bool {
     a > minv && a < maxv
 }
 
-fn slider_mobility(
+pub fn slider_mobility(
     board: &Board,
     x: i64,
     y: i64,
@@ -1049,7 +1055,7 @@ fn slider_mobility(
 
 /// Returns true if the straight line between `from` and `to` is not blocked by any piece.
 /// Works for ranks, files, and diagonals on an unbounded board by checking only existing pieces.
-fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) -> bool {
+pub fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) -> bool {
     let dx = to.x - from.x;
     let dy = to.y - from.y;
 
@@ -1098,7 +1104,7 @@ fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) -> b
 /// - Rooks protect each other (same file)
 /// - This cuts off both sides, king can't escape or attack rooks
 /// - Then bring our king in to help deliver mate
-fn evaluate_lone_king_endgame(
+pub fn evaluate_lone_king_endgame(
     game: &GameState,
     our_king: &Coordinate,
     enemy_king: &Coordinate,

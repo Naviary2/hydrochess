@@ -1256,16 +1256,23 @@ fn generate_pawn_capture_moves(
         let capture_y = from.y + direction;
 
         if let Some(target) = board.get_piece(&capture_x, &capture_y) {
-            if is_enemy_piece(target, piece.color) && !target.piece_type.is_neutral_type() {
-                add_pawn_cap_move(
-                    out,
-                    *from,
-                    capture_x,
-                    capture_y,
-                    *piece,
-                    &promotion_ranks,
-                    &promotion_pieces,
-                );
+            if is_enemy_piece(target, piece.color) {
+                // Obstocean Optimization:
+                // If it's a neutral piece (Obstacle), capturing it is a "quiet" move in material terms (0 -> 0).
+                // Doing this for all obstacles causes a QS explosion.
+                // We ONLY allow capturing obstacles in QS if it results in PROMOTION (Tactical win).
+                let is_neutral = target.piece_type.is_neutral_type();
+                if !is_neutral || promotion_ranks.contains(&capture_y) {
+                    add_pawn_cap_move(
+                        out,
+                        *from,
+                        capture_x,
+                        capture_y,
+                        *piece,
+                        &promotion_ranks,
+                        &promotion_pieces,
+                    );
+                }
             }
         } else if let Some(ep) = en_passant {
             // En passant capture square must match
@@ -1377,6 +1384,7 @@ fn generate_sliding_capture_moves(
                 }
 
                 if let Some(target) = board.get_piece(&x, &y) {
+                    // For sliders in QS, we do NOT want to capture obstacles (quiet positional moves).
                     if is_enemy_piece(target, piece.color) && !target.piece_type.is_neutral_type() {
                         out.push(Move::new(*from, Coordinate::new(x, y), *piece));
                     }

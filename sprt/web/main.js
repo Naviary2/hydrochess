@@ -117,7 +117,7 @@ function getRandomOpening() {
 function loadVariants() {
     // Create a temporary worker to get variants
     const worker = new Worker('./sprt-worker.js', { type: 'module' });
-    
+
     worker.onmessage = (e) => {
         if (e.data.type === 'variants') {
             availableVariants = e.data.variants;
@@ -126,7 +126,7 @@ function loadVariants() {
             worker.terminate();
         }
     };
-    
+
     worker.postMessage({ type: 'getVariants' });
 }
 
@@ -186,7 +186,7 @@ function getNextVariant() {
     if (variantQueue.length === 0) {
         return { variant: 'Classical', newPlaysWhite: true };
     }
-    
+
     const result = variantQueue[currentVariantIndex];
     currentVariantIndex = (currentVariantIndex + 1) % variantQueue.length;
     return result;
@@ -410,7 +410,21 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
     }).filter(Boolean);
 
     const movesStr = moves.join('|');
-    return `${headers} ${nextTurn} ${halfmove}/100 ${fullmove} (8|1) ${startPositionStr}${movesStr ? ' ' + movesStr : ''}`;
+    // Determine promotion ranks for the variant (default to standard 8 for white, 1 for black)
+    let whiteRank = '8';
+    let blackRank = '1';
+    try {
+        const vdata = getVariantData(variantName);
+        if (vdata && vdata.game_rules && vdata.game_rules.promotion_ranks) {
+            const ranks = vdata.game_rules.promotion_ranks;
+            if (ranks.white && ranks.white.length > 0) whiteRank = ranks.white[0];
+            if (ranks.black && ranks.black.length > 0) blackRank = ranks.black[0];
+        }
+    } catch (e) {
+        // ignore errors, use defaults
+    }
+    const promotionRanksToken = `(${whiteRank}|${blackRank})`;
+    return `${headers} ${nextTurn} ${halfmove}/100 ${fullmove} ${promotionRanksToken} ${startPositionStr}${movesStr ? ' ' + movesStr : ''}`;
 }
 
 function log(message, type) {
@@ -522,7 +536,7 @@ async function initWasm() {
         setStatus('ready', 'WASM loaded and ready');
         runSprtBtn.disabled = false;
         log('WASM module initialized successfully', 'success');
-        
+
         const testPos = getStandardPosition();
         const engine = new EngineNew(testPos);
         const move = engine.get_best_move_with_time(100);
@@ -545,15 +559,15 @@ function applyMove(position, move) {
     const fromY = fromParts[1];
     const toX = toParts[0];
     const toY = toParts[1];
-    
-    const capturedIdx = pieces.findIndex(function(p) {
+
+    const capturedIdx = pieces.findIndex(function (p) {
         return p.x === toX && p.y === toY;
     });
     if (capturedIdx !== -1) {
         pieces.splice(capturedIdx, 1);
     }
-    
-    const movingPiece = pieces.find(function(p) {
+
+    const movingPiece = pieces.find(function (p) {
         return p.x === fromX && p.y === fromY;
     });
     if (!movingPiece) {
@@ -561,17 +575,17 @@ function applyMove(position, move) {
     }
     movingPiece.x = toX;
     movingPiece.y = toY;
-    
+
     if (move.promotion) {
         movingPiece.piece_type = move.promotion.toLowerCase();
     }
-    
+
     position.turn = position.turn === 'w' ? 'b' : 'w';
     return position;
 }
 
 function isGameOver(position) {
-    const kings = position.board.pieces.filter(function(p) {
+    const kings = position.board.pieces.filter(function (p) {
         return p.piece_type === 'k';
     });
     if (kings.length < 2) {
@@ -623,7 +637,7 @@ async function detectMaxConcurrency(maxCap = 64) {
         });
         try {
             worker.terminate();
-        } catch (e) {}
+        } catch (e) { }
         if (!ok) {
             break;
         }
@@ -642,12 +656,12 @@ async function detectMaxConcurrency(maxCap = 64) {
 
 async function runSprt() {
     if (!wasmReady || sprtRunning) return;
-    
+
     sprtRunning = true;
     stopRequested = false;
     runSprtBtn.disabled = true;
     stopSprtBtn.disabled = false;
-    
+
     // Read configuration from UI
     CONFIG.boundsPreset = sprtBoundsPreset.value || 'all';
     CONFIG.boundsMode = sprtBoundsMode.value || 'gainer';
@@ -697,13 +711,13 @@ async function runSprt() {
     const timePerMove = perMoveMs;
     const maxGames = CONFIG.maxGames;
     const maxMovesPerGame = CONFIG.maxMoves;
-    
+
     let wins = 0;
     let losses = 0;
     let draws = 0;
     let llr = 0;
     gameLogs = [];
-    
+
     sprtOutput.innerHTML = '';
     perVariantStats = {};
     clearLog();
@@ -730,15 +744,15 @@ async function runSprt() {
         const gameIndex = nextGameIndex++;
         if (gameIndex >= maxGames) return false;
         activeWorkers++;
-        
+
         // Get next variant from the cycling queue
         const { variant: variantName, newPlaysWhite } = getNextVariant();
-        
+
         // Games run in pairs: each variant appears twice (both colors)
         const pairIndex = Math.floor(gameIndex / 2);
         // Only use opening moves for Classical variant to avoid errors with custom positions
         const openingMove = variantName === 'Classical' ? getOpeningForPair(pairIndex) : null;
-        
+
         worker.postMessage({
             type: 'runGame',
             gameIndex,
@@ -768,7 +782,7 @@ async function runSprt() {
                     resolve(undefined);
                     return;
                 }
-                
+
                 worker.onmessage = (e) => {
                     const msg = e.data;
                     if (msg.type === 'result') {
@@ -886,7 +900,7 @@ async function runSprt() {
 
     workers.forEach(w => w.terminate());
     activeSprtWorkers = [];
-    
+
     const { elo: finalElo, error: finalErr } = estimateElo(wins, losses, draws);
     const verdict = llr >= bounds.upper ? 'PASSED (new > old)'
         : (llr <= bounds.lower ? 'FAILED (no gain)' : 'INCONCLUSIVE');
@@ -920,7 +934,7 @@ async function runSprt() {
     else if (verdict.startsWith('FAILED')) cls += 'fail';
     else cls += 'inconclusive';
     sprtStatusEl.className = cls;
-    
+
     sprtRunning = false;
     runSprtBtn.disabled = false;
     stopSprtBtn.disabled = true;
@@ -935,7 +949,7 @@ function stopSprt() {
     // Immediately terminate all active workers so we don't wait for games to finish
     if (activeSprtWorkers && activeSprtWorkers.length) {
         activeSprtWorkers.forEach(w => {
-            try { w.terminate(); } catch (e) {}
+            try { w.terminate(); } catch (e) { }
         });
         activeSprtWorkers = [];
     }
@@ -1047,10 +1061,10 @@ window.__sprt_export_samples = (offset = 0) => {
 };
 window.__sprt_is_ready = () => wasmReady;
 window.__sprt_status = () => ({
-	running: sprtRunning,
-	wins: lastWins,
-	losses: lastLosses,
-	draws: lastDraws,
+    running: sprtRunning,
+    wins: lastWins,
+    losses: lastLosses,
+    draws: lastDraws,
 });
 
 window.__sprt_compute_features = async (rawSamples) => {
