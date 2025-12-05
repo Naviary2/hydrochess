@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Coordinate {
@@ -188,19 +188,80 @@ impl Piece {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "BoardRaw", into = "BoardRaw")]
 pub struct Board {
     pub pieces: HashMap<(i64, i64), Piece>,
+    #[serde(skip)]
+    pub active_coords: Option<HashSet<(i64, i64)>>,
+}
+
+/// Raw representation for serialization
+#[derive(Serialize, Deserialize)]
+struct BoardRaw {
+    pieces: HashMap<(i64, i64), Piece>,
+}
+
+impl From<BoardRaw> for Board {
+    fn from(raw: BoardRaw) -> Self {
+        let has_neutral = raw.pieces.values().any(|p| p.piece_type.is_neutral_type());
+        let active_coords = if has_neutral {
+            let mut set = HashSet::new();
+            for (pos, piece) in &raw.pieces {
+                if !piece.piece_type.is_neutral_type() {
+                    set.insert(*pos);
+                }
+            }
+            Some(set)
+        } else {
+            None
+        };
+
+        Board {
+            pieces: raw.pieces,
+            active_coords,
+        }
+    }
+}
+
+impl From<Board> for BoardRaw {
+    fn from(board: Board) -> Self {
+        BoardRaw {
+            pieces: board.pieces,
+        }
+    }
 }
 
 impl Board {
     pub fn new() -> Self {
         Board {
             pieces: HashMap::new(),
+            active_coords: None,
         }
     }
 
     pub fn set_piece(&mut self, x: i64, y: i64, piece: Piece) {
-        self.pieces.insert((x, y), piece);
+        let pos = (x, y);
+
+        // If we find a neutral piece and we aren't already tracking active coords, start tracking
+        if piece.piece_type.is_neutral_type() && self.active_coords.is_none() {
+            let mut set = HashSet::new();
+            for (p_pos, p) in &self.pieces {
+                if !p.piece_type.is_neutral_type() {
+                    set.insert(*p_pos);
+                }
+            }
+            self.active_coords = Some(set);
+        }
+
+        self.pieces.insert(pos, piece);
+
+        if let Some(ref mut active) = self.active_coords {
+            if !piece.piece_type.is_neutral_type() {
+                active.insert(pos);
+            } else {
+                active.remove(&pos);
+            }
+        }
     }
 
     pub fn get_piece(&self, x: &i64, y: &i64) -> Option<&Piece> {
@@ -208,6 +269,14 @@ impl Board {
     }
 
     pub fn remove_piece(&mut self, x: &i64, y: &i64) -> Option<Piece> {
-        self.pieces.remove(&(*x, *y))
+        let p = self.pieces.remove(&(*x, *y));
+        if let Some(ref piece) = p {
+            if let Some(ref mut active) = self.active_coords {
+                if !piece.piece_type.is_neutral_type() {
+                    active.remove(&(*x, *y));
+                }
+            }
+        }
+        p
     }
 }

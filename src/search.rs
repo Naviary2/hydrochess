@@ -891,7 +891,7 @@ fn negamax(
 
     for m in &moves {
         let captured_piece = game.board.get_piece(&m.to.x, &m.to.y);
-        let is_capture = captured_piece.is_some();
+        let is_capture = captured_piece.map_or(false, |p| !p.piece_type.is_neutral_type());
         let captured_type = captured_piece.map(|p| p.piece_type);
         let is_promotion = m.promotion.is_some();
 

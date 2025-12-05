@@ -282,23 +282,47 @@ pub fn get_legal_moves_into(
 ) {
     out.clear();
 
-    for ((x, y), piece) in &board.pieces {
-        // Skip neutral pieces and non-turn pieces
-        if piece.color != turn || piece.color == PlayerColor::Neutral {
-            continue;
-        }
+    if let Some(active) = &board.active_coords {
+        for (x, y) in active {
+            let piece = match board.get_piece(x, y) {
+                Some(p) => p,
+                None => continue,
+            };
 
-        let from = Coordinate::new(*x, *y);
-        let piece_moves = get_pseudo_legal_moves_for_piece(
-            board,
-            piece,
-            &from,
-            special_rights,
-            en_passant,
-            Some(indices),
-            game_rules,
-        );
-        out.extend(piece_moves);
+            // Skip neutral pieces (already covered by active_coords) and non-turn pieces
+            if piece.color != turn {
+                continue;
+            }
+
+            let from = Coordinate::new(*x, *y);
+            let piece_moves = get_pseudo_legal_moves_for_piece(
+                board,
+                piece,
+                &from,
+                special_rights,
+                en_passant,
+                Some(indices),
+                game_rules,
+            );
+            out.extend(piece_moves);
+        }
+    } else {
+        for ((x, y), piece) in &board.pieces {
+            if piece.color != turn || piece.color == PlayerColor::Neutral {
+                continue;
+            }
+            let from = Coordinate::new(*x, *y);
+            let piece_moves = get_pseudo_legal_moves_for_piece(
+                board,
+                piece,
+                &from,
+                special_rights,
+                en_passant,
+                Some(indices),
+                game_rules,
+            );
+            out.extend(piece_moves);
+        }
     }
 }
 
@@ -336,166 +360,212 @@ pub fn get_quiescence_captures(
 ) {
     out.clear();
 
-    for ((x, y), piece) in &board.pieces {
-        if piece.color != turn || piece.color == PlayerColor::Neutral {
-            continue;
+    if let Some(active) = &board.active_coords {
+        for (x, y) in active {
+            let piece = match board.get_piece(x, y) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            if piece.color != turn {
+                continue;
+            }
+
+            let from = Coordinate::new(*x, *y);
+            generate_captures_for_piece(
+                board,
+                piece,
+                &from,
+                special_rights,
+                en_passant,
+                game_rules,
+                indices,
+                out,
+            );
+        }
+    } else {
+        for ((x, y), piece) in &board.pieces {
+            if piece.color != turn || piece.color == PlayerColor::Neutral {
+                continue;
+            }
+            let from = Coordinate::new(*x, *y);
+            generate_captures_for_piece(
+                board,
+                piece,
+                &from,
+                special_rights,
+                en_passant,
+                game_rules,
+                indices,
+                out,
+            );
+        }
+    }
+}
+
+// Helper to avoid duplicating the switch logic
+fn generate_captures_for_piece(
+    board: &Board,
+    piece: &Piece,
+    from: &Coordinate,
+    special_rights: &HashSet<Coordinate>,
+    en_passant: &Option<EnPassantState>,
+    game_rules: &GameRules,
+    indices: &SpatialIndices,
+    out: &mut Vec<Move>,
+) {
+    match piece.piece_type {
+        PieceType::Void | PieceType::Obstacle => {}
+
+        // Pawns: only capture and en-passant moves (with promotions when applicable)
+        PieceType::Pawn => {
+            generate_pawn_capture_moves(
+                board,
+                from,
+                piece,
+                special_rights,
+                en_passant,
+                game_rules,
+                out,
+            );
         }
 
-        let from = Coordinate::new(*x, *y);
+        // Knight-like leapers
+        PieceType::Knight => {
+            let m = generate_leaper_moves(board, from, piece, 1, 2);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Camel => {
+            let m = generate_leaper_moves(board, from, piece, 1, 3);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Giraffe => {
+            let m = generate_leaper_moves(board, from, piece, 1, 4);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Zebra => {
+            let m = generate_leaper_moves(board, from, piece, 2, 3);
+            extend_captures_only(board, piece.color, m, out);
+        }
 
-        match piece.piece_type {
-            PieceType::Void | PieceType::Obstacle => {}
+        // King/Guard/Centaur/RoyalCentaur/Hawk: use compass moves, then filter captures
+        PieceType::King | PieceType::Guard => {
+            let m = generate_compass_moves(board, from, piece, 1);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Centaur | PieceType::RoyalCentaur => {
+            let m = generate_compass_moves(board, from, piece, 1);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Hawk => {
+            let mut m = generate_compass_moves(board, from, piece, 2);
+            m.extend(generate_compass_moves(board, from, piece, 3));
+            extend_captures_only(board, piece.color, m, out);
+        }
 
-            // Pawns: only capture and en-passant moves (with promotions when applicable)
-            PieceType::Pawn => {
-                generate_pawn_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    special_rights,
-                    en_passant,
-                    game_rules,
-                    out,
-                );
-            }
+        // Standard sliders and slider-leaper compounds
+        PieceType::Rook => {
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                Some(indices),
+                out,
+            );
+        }
+        PieceType::Bishop => {
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                Some(indices),
+                out,
+            );
+        }
+        PieceType::Queen | PieceType::RoyalQueen => {
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                Some(indices),
+                out,
+            );
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                Some(indices),
+                out,
+            );
+        }
+        PieceType::Chancellor => {
+            // Rook + knight
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                Some(indices),
+                out,
+            );
+            let m = generate_leaper_moves(board, from, piece, 1, 2);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Archbishop => {
+            // Bishop + knight
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                Some(indices),
+                out,
+            );
+            let m = generate_leaper_moves(board, from, piece, 1, 2);
+            extend_captures_only(board, piece.color, m, out);
+        }
+        PieceType::Amazon => {
+            // Queen + knight
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                Some(indices),
+                out,
+            );
+            generate_sliding_capture_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                Some(indices),
+                out,
+            );
+            let m = generate_leaper_moves(board, from, piece, 1, 2);
+            extend_captures_only(board, piece.color, m, out);
+        }
 
-            // Knight-like leapers
-            PieceType::Knight => {
-                let m = generate_leaper_moves(board, &from, piece, 1, 2);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Camel => {
-                let m = generate_leaper_moves(board, &from, piece, 1, 3);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Giraffe => {
-                let m = generate_leaper_moves(board, &from, piece, 1, 4);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Zebra => {
-                let m = generate_leaper_moves(board, &from, piece, 2, 3);
-                extend_captures_only(board, piece.color, m, out);
-            }
+        // Knightrider: sliding along knight vectors
+        PieceType::Knightrider => {
+            let m = generate_knightrider_moves(board, from, piece);
+            extend_captures_only(board, piece.color, m, out);
+        }
 
-            // King/Guard/Centaur/RoyalCentaur/Hawk: use compass moves, then filter captures
-            PieceType::King | PieceType::Guard => {
-                let m = generate_compass_moves(board, &from, piece, 1);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Centaur | PieceType::RoyalCentaur => {
-                let m = generate_compass_moves(board, &from, piece, 1);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Hawk => {
-                let mut m = generate_compass_moves(board, &from, piece, 2);
-                m.extend(generate_compass_moves(board, &from, piece, 3));
-                extend_captures_only(board, piece.color, m, out);
-            }
+        // Huygen: use existing generator and keep only captures
+        PieceType::Huygen => {
+            let m = generate_huygen_moves(board, from, piece, Some(indices));
+            extend_captures_only(board, piece.color, m, out);
+        }
 
-            // Standard sliders and slider-leaper compounds
-            PieceType::Rook => {
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 0), (0, 1)],
-                    Some(indices),
-                    out,
-                );
-            }
-            PieceType::Bishop => {
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 1), (1, -1)],
-                    Some(indices),
-                    out,
-                );
-            }
-            PieceType::Queen | PieceType::RoyalQueen => {
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 0), (0, 1)],
-                    Some(indices),
-                    out,
-                );
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 1), (1, -1)],
-                    Some(indices),
-                    out,
-                );
-            }
-            PieceType::Chancellor => {
-                // Rook + knight
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 0), (0, 1)],
-                    Some(indices),
-                    out,
-                );
-                let m = generate_leaper_moves(board, &from, piece, 1, 2);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Archbishop => {
-                // Bishop + knight
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 1), (1, -1)],
-                    Some(indices),
-                    out,
-                );
-                let m = generate_leaper_moves(board, &from, piece, 1, 2);
-                extend_captures_only(board, piece.color, m, out);
-            }
-            PieceType::Amazon => {
-                // Queen + knight
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 0), (0, 1)],
-                    Some(indices),
-                    out,
-                );
-                generate_sliding_capture_moves(
-                    board,
-                    &from,
-                    piece,
-                    &[(1, 1), (1, -1)],
-                    Some(indices),
-                    out,
-                );
-                let m = generate_leaper_moves(board, &from, piece, 1, 2);
-                extend_captures_only(board, piece.color, m, out);
-            }
-
-            // Knightrider: sliding along knight vectors
-            PieceType::Knightrider => {
-                let m = generate_knightrider_moves(board, &from, piece);
-                extend_captures_only(board, piece.color, m, out);
-            }
-
-            // Huygen: use existing generator and keep only captures
-            PieceType::Huygen => {
-                let m = generate_huygen_moves(board, &from, piece, Some(indices));
-                extend_captures_only(board, piece.color, m, out);
-            }
-
-            // Rose: use existing generator and keep only captures
-            PieceType::Rose => {
-                let m = generate_rose_moves(board, &from, piece);
-                extend_captures_only(board, piece.color, m, out);
-            }
+        // Rose: use existing generator and keep only captures
+        PieceType::Rose => {
+            let m = generate_rose_moves(board, from, piece);
+            extend_captures_only(board, piece.color, m, out);
         }
     }
 }
@@ -1186,7 +1256,7 @@ fn generate_pawn_capture_moves(
         let capture_y = from.y + direction;
 
         if let Some(target) = board.get_piece(&capture_x, &capture_y) {
-            if is_enemy_piece(target, piece.color) {
+            if is_enemy_piece(target, piece.color) && !target.piece_type.is_neutral_type() {
                 add_pawn_cap_move(
                     out,
                     *from,
@@ -1307,7 +1377,7 @@ fn generate_sliding_capture_moves(
                 }
 
                 if let Some(target) = board.get_piece(&x, &y) {
-                    if is_enemy_piece(target, piece.color) {
+                    if is_enemy_piece(target, piece.color) && !target.piece_type.is_neutral_type() {
                         out.push(Move::new(*from, Coordinate::new(x, y), *piece));
                     }
                     break; // Any piece blocks further along this ray
@@ -1331,7 +1401,7 @@ fn extend_captures_only(
 ) {
     for m in moves_in {
         if let Some(target) = board.get_piece(&m.to.x, &m.to.y) {
-            if is_enemy_piece(target, our_color) {
+            if is_enemy_piece(target, our_color) && !target.piece_type.is_neutral_type() {
                 out.push(m);
             }
         }

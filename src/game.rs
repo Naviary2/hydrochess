@@ -197,17 +197,37 @@ impl GameState {
         self.white_pieces.clear();
         self.black_pieces.clear();
 
-        for ((x, y), piece) in &self.board.pieces {
-            match piece.color {
-                PlayerColor::White => {
-                    white = white.saturating_add(1);
-                    self.white_pieces.push((*x, *y));
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                match piece.color {
+                    PlayerColor::White => {
+                        white = white.saturating_add(1);
+                        self.white_pieces.push((*x, *y));
+                    }
+                    PlayerColor::Black => {
+                        black = black.saturating_add(1);
+                        self.black_pieces.push((*x, *y));
+                    }
+                    PlayerColor::Neutral => {}
                 }
-                PlayerColor::Black => {
-                    black = black.saturating_add(1);
-                    self.black_pieces.push((*x, *y));
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                match piece.color {
+                    PlayerColor::White => {
+                        white = white.saturating_add(1);
+                        self.white_pieces.push((*x, *y));
+                    }
+                    PlayerColor::Black => {
+                        black = black.saturating_add(1);
+                        self.black_pieces.push((*x, *y));
+                    }
+                    PlayerColor::Neutral => {}
                 }
-                PlayerColor::Neutral => {}
             }
         }
         self.white_piece_count = white;
@@ -284,12 +304,28 @@ impl GameState {
         let mut white_has_non_king = false;
         let mut black_has_non_king = false;
 
-        for (_, piece) in &self.board.pieces {
-            if piece.piece_type != PieceType::King {
-                if piece.color == PlayerColor::White {
-                    white_has_non_king = true;
-                } else {
-                    black_has_non_king = true;
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.piece_type != PieceType::King {
+                    if piece.color == PlayerColor::White {
+                        white_has_non_king = true;
+                    } else if piece.color == PlayerColor::Black {
+                        black_has_non_king = true;
+                    }
+                }
+            }
+        } else {
+            for (_, piece) in &self.board.pieces {
+                if piece.piece_type != PieceType::King {
+                    if piece.color == PlayerColor::White {
+                        white_has_non_king = true;
+                    } else if piece.color == PlayerColor::Black {
+                        black_has_non_king = true;
+                    }
                 }
             }
         }
@@ -356,9 +392,23 @@ impl GameState {
 
         let mut h: u64 = 0;
 
-        // Hash all pieces
-        for ((x, y), piece) in &self.board.pieces {
-            h ^= piece_key(piece.piece_type, piece.color, *x, *y);
+        // Hash all pieces (excluding obstacles/voids for performance)
+        // Hash all pieces (excluding obstacles/voids for performance)
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                h ^= piece_key(piece.piece_type, piece.color, *x, *y);
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                if piece.color == PlayerColor::Neutral {
+                    continue;
+                }
+                h ^= piece_key(piece.piece_type, piece.color, *x, *y);
+            }
         }
 
         // Hash special rights
@@ -411,34 +461,76 @@ impl GameState {
         let our_color = self.turn;
         let their_color = our_color.opponent();
 
-        for (_, piece) in &self.board.pieces {
-            if piece.color == PlayerColor::Neutral {
-                continue;
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.color == PlayerColor::Neutral {
+                    continue;
+                }
+                match piece.piece_type {
+                    PieceType::King
+                    | PieceType::Queen
+                    | PieceType::Rook
+                    | PieceType::Bishop
+                    | PieceType::Knight
+                    | PieceType::Pawn
+                    | PieceType::RoyalQueen
+                    | PieceType::RoyalCentaur => {}
+                    _ => {
+                        self.get_legal_moves_into(out);
+                        return;
+                    }
+                }
             }
-            match piece.piece_type {
-                PieceType::King
-                | PieceType::Queen
-                | PieceType::Rook
-                | PieceType::Bishop
-                | PieceType::Knight
-                | PieceType::Pawn
-                | PieceType::RoyalQueen
-                | PieceType::RoyalCentaur => {}
-                _ => {
-                    self.get_legal_moves_into(out);
-                    return;
+        } else {
+            for (_, piece) in &self.board.pieces {
+                if piece.color == PlayerColor::Neutral {
+                    continue;
+                }
+                match piece.piece_type {
+                    PieceType::King
+                    | PieceType::Queen
+                    | PieceType::Rook
+                    | PieceType::Bishop
+                    | PieceType::Knight
+                    | PieceType::Pawn
+                    | PieceType::RoyalQueen
+                    | PieceType::RoyalCentaur => {}
+                    _ => {
+                        self.get_legal_moves_into(out);
+                        return;
+                    }
                 }
             }
         }
 
         let mut royal_pos: Option<(Coordinate, Piece)> = None;
-        for ((x, y), piece) in &self.board.pieces {
-            if piece.color == our_color && piece.piece_type.is_royal() {
-                if royal_pos.is_some() {
-                    self.get_legal_moves_into(out);
-                    return;
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.color == our_color && piece.piece_type.is_royal() {
+                    if royal_pos.is_some() {
+                        self.get_legal_moves_into(out);
+                        return;
+                    }
+                    royal_pos = Some((Coordinate::new(*x, *y), *piece));
                 }
-                royal_pos = Some((Coordinate::new(*x, *y), *piece));
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                if piece.color == our_color && piece.piece_type.is_royal() {
+                    if royal_pos.is_some() {
+                        self.get_legal_moves_into(out);
+                        return;
+                    }
+                    royal_pos = Some((Coordinate::new(*x, *y), *piece));
+                }
             }
         }
 
@@ -598,87 +690,181 @@ impl GameState {
             return;
         }
 
-        for ((x, y), piece) in &self.board.pieces {
-            if piece.color != our_color {
-                continue;
-            }
-            if *x == king_sq.x && *y == king_sq.y {
-                continue;
-            }
-            let from = Coordinate::new(*x, *y);
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.color != our_color {
+                    continue;
+                }
+                if *x == king_sq.x && *y == king_sq.y {
+                    continue;
+                }
+                let from = Coordinate::new(*x, *y);
 
-            let mut may_reach = false;
-            for target in &targets {
-                let tx = target.x;
-                let ty = target.y;
-                let ddx = tx - from.x;
-                let ddy = ty - from.y;
+                let mut may_reach = false;
+                for target in &targets {
+                    let tx = target.x;
+                    let ty = target.y;
+                    let ddx = tx - from.x;
+                    let ddy = ty - from.y;
 
-                match piece.piece_type {
-                    PieceType::Pawn => {
-                        let dir = match our_color {
-                            PlayerColor::White => 1,
-                            PlayerColor::Black => -1,
-                            PlayerColor::Neutral => 0,
-                        };
-                        if dir != 0 {
-                            if ddy == dir && (ddx == -1 || ddx == 1) {
-                                may_reach = true;
-                            } else if ddx == 0 && (ddy == dir || ddy == dir * 2) {
+                    match piece.piece_type {
+                        PieceType::Pawn => {
+                            let dir = match our_color {
+                                PlayerColor::White => 1,
+                                PlayerColor::Black => -1,
+                                PlayerColor::Neutral => 0,
+                            };
+                            if dir != 0 {
+                                if ddy == dir && (ddx == -1 || ddx == 1) {
+                                    may_reach = true;
+                                } else if ddx == 0 && (ddy == dir || ddy == dir * 2) {
+                                    may_reach = true;
+                                }
+                            }
+                        }
+                        PieceType::Knight => {
+                            if (ddx.abs() == 1 && ddy.abs() == 2)
+                                || (ddx.abs() == 2 && ddy.abs() == 1)
+                            {
                                 may_reach = true;
                             }
                         }
-                    }
-                    PieceType::Knight => {
-                        if (ddx.abs() == 1 && ddy.abs() == 2) || (ddx.abs() == 2 && ddy.abs() == 1)
-                        {
-                            may_reach = true;
+                        PieceType::Bishop => {
+                            if ddx.abs() == ddy.abs() && ddx != 0 {
+                                may_reach = true;
+                            }
                         }
-                    }
-                    PieceType::Bishop => {
-                        if ddx.abs() == ddy.abs() && ddx != 0 {
-                            may_reach = true;
+                        PieceType::Rook => {
+                            if (ddx == 0 && ddy != 0) || (ddy == 0 && ddx != 0) {
+                                may_reach = true;
+                            }
                         }
-                    }
-                    PieceType::Rook => {
-                        if (ddx == 0 && ddy != 0) || (ddy == 0 && ddx != 0) {
-                            may_reach = true;
+                        PieceType::Queen => {
+                            if (ddx == 0 && ddy != 0)
+                                || (ddy == 0 && ddx != 0)
+                                || (ddx.abs() == ddy.abs() && ddx != 0)
+                            {
+                                may_reach = true;
+                            }
                         }
+                        _ => {}
                     }
-                    PieceType::Queen => {
-                        if (ddx == 0 && ddy != 0)
-                            || (ddy == 0 && ddx != 0)
-                            || (ddx.abs() == ddy.abs() && ddx != 0)
-                        {
-                            may_reach = true;
-                        }
-                    }
-                    _ => {}
-                }
 
-                if may_reach {
-                    break;
-                }
-            }
-
-            if !may_reach {
-                continue;
-            }
-
-            let pseudo = get_pseudo_legal_moves_for_piece(
-                &self.board,
-                piece,
-                &from,
-                &self.special_rights,
-                &self.en_passant,
-                Some(&self.spatial_indices),
-                &self.game_rules,
-            );
-            for m in pseudo {
-                for target in &targets {
-                    if m.to.x == target.x && m.to.y == target.y {
-                        out.push(m);
+                    if may_reach {
                         break;
+                    }
+                }
+
+                if !may_reach {
+                    continue;
+                }
+
+                let pseudo = get_pseudo_legal_moves_for_piece(
+                    &self.board,
+                    piece,
+                    &from,
+                    &self.special_rights,
+                    &self.en_passant,
+                    Some(&self.spatial_indices),
+                    &self.game_rules,
+                );
+                for m in pseudo {
+                    for target in &targets {
+                        if m.to.x == target.x && m.to.y == target.y {
+                            out.push(m);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                if piece.color != our_color {
+                    continue;
+                }
+                if *x == king_sq.x && *y == king_sq.y {
+                    continue;
+                }
+                let from = Coordinate::new(*x, *y);
+
+                let mut may_reach = false;
+                for target in &targets {
+                    let tx = target.x;
+                    let ty = target.y;
+                    let ddx = tx - from.x;
+                    let ddy = ty - from.y;
+
+                    match piece.piece_type {
+                        PieceType::Pawn => {
+                            let dir = match our_color {
+                                PlayerColor::White => 1,
+                                PlayerColor::Black => -1,
+                                PlayerColor::Neutral => 0,
+                            };
+                            if dir != 0 {
+                                if ddy == dir && (ddx == -1 || ddx == 1) {
+                                    may_reach = true;
+                                } else if ddx == 0 && (ddy == dir || ddy == dir * 2) {
+                                    may_reach = true;
+                                }
+                            }
+                        }
+                        PieceType::Knight => {
+                            if (ddx.abs() == 1 && ddy.abs() == 2)
+                                || (ddx.abs() == 2 && ddy.abs() == 1)
+                            {
+                                may_reach = true;
+                            }
+                        }
+                        PieceType::Bishop => {
+                            if ddx.abs() == ddy.abs() && ddx != 0 {
+                                may_reach = true;
+                            }
+                        }
+                        PieceType::Rook => {
+                            if (ddx == 0 && ddy != 0) || (ddy == 0 && ddx != 0) {
+                                may_reach = true;
+                            }
+                        }
+                        PieceType::Queen => {
+                            if (ddx == 0 && ddy != 0)
+                                || (ddy == 0 && ddx != 0)
+                                || (ddx.abs() == ddy.abs() && ddx != 0)
+                            {
+                                may_reach = true;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if may_reach {
+                        break;
+                    }
+                }
+
+                if !may_reach {
+                    continue;
+                }
+
+                let pseudo = get_pseudo_legal_moves_for_piece(
+                    &self.board,
+                    piece,
+                    &from,
+                    &self.special_rights,
+                    &self.en_passant,
+                    Some(&self.spatial_indices),
+                    &self.game_rules,
+                );
+                for m in pseudo {
+                    for target in &targets {
+                        if m.to.x == target.x && m.to.y == target.y {
+                            out.push(m);
+                            break;
+                        }
                     }
                 }
             }
@@ -695,11 +881,27 @@ impl GameState {
         let indices = &self.spatial_indices;
 
         // Find ALL royal pieces of the side that just moved and check if any are attacked
-        for ((x, y), piece) in &self.board.pieces {
-            if piece.color == moved_color && piece.piece_type.is_royal() {
-                let pos = Coordinate::new(*x, *y);
-                if is_square_attacked(&self.board, &pos, self.turn, Some(indices)) {
-                    return true;
+        // Find ALL royal pieces of the side that just moved and check if any are attacked
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.color == moved_color && piece.piece_type.is_royal() {
+                    let pos = Coordinate::new(*x, *y);
+                    if is_square_attacked(&self.board, &pos, self.turn, Some(indices)) {
+                        return true;
+                    }
+                }
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                if piece.color == moved_color && piece.piece_type.is_royal() {
+                    let pos = Coordinate::new(*x, *y);
+                    if is_square_attacked(&self.board, &pos, self.turn, Some(indices)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -711,11 +913,27 @@ impl GameState {
         let attacker_color = self.turn.opponent();
 
         // Check if ANY royal piece of current player is attacked
-        for ((x, y), piece) in &self.board.pieces {
-            if piece.color == self.turn && piece.piece_type.is_royal() {
-                let pos = Coordinate::new(*x, *y);
-                if is_square_attacked(&self.board, &pos, attacker_color, Some(indices)) {
-                    return true;
+        // Check if ANY royal piece of current player is attacked
+        if let Some(active) = &self.board.active_coords {
+            for (x, y) in active {
+                let piece = match self.board.get_piece(x, y) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if piece.color == self.turn && piece.piece_type.is_royal() {
+                    let pos = Coordinate::new(*x, *y);
+                    if is_square_attacked(&self.board, &pos, attacker_color, Some(indices)) {
+                        return true;
+                    }
+                }
+            }
+        } else {
+            for ((x, y), piece) in &self.board.pieces {
+                if piece.color == self.turn && piece.piece_type.is_royal() {
+                    let pos = Coordinate::new(*x, *y);
+                    if is_square_attacked(&self.board, &pos, attacker_color, Some(indices)) {
+                        return true;
+                    }
                 }
             }
         }

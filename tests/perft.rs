@@ -372,6 +372,11 @@ fn perft_fairy_piece_mix() {
     game.board
         .set_piece(5, 4, Piece::new(PieceType::RoyalQueen, PlayerColor::White));
 
+    // place obstacles across the 3rd rank
+    for x in -50..=50 {
+        game.board
+            .set_piece(x, 5, Piece::new(PieceType::Obstacle, PlayerColor::Neutral));
+    }
     // Keep a clean copy of the fairy position so we can reuse it for search tests.
     let base_game = game.clone();
 
