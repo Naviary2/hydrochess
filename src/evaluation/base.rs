@@ -176,7 +176,7 @@ const KNIGHTRIDER_RAY_BONUS: i32 = 3; // Per square of knight-ray mobility
 // Pawns far from promotion are worth less
 const PAWN_FULL_VALUE_THRESHOLD: i64 = 8; // Within 8 ranks = full value
 const PAWN_DISTANCE_PENALTY_PER_RANK: i32 = 5; // -5cp per rank beyond threshold
-const PAWN_MIN_VALUE_FRACTION: i32 = 40; // Never penalize below 40% of base (40cp)
+// const PAWN_MIN_VALUE_FRACTION: i32 = 40; // Never penalize below 40% of base (40cp)
 
 /// Compute the centroid of all non-obstacle, non-void pieces on the board.
 /// Used for piece cloud calculations. (Made public for variant modules.)

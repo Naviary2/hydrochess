@@ -559,38 +559,38 @@ impl Engine {
         //     web_sys::console::debug_1(&JsValue::from(line));
         // }
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            use crate::log;
-            let variant = self
-                .game
-                .variant
-                .map_or("unknown".to_string(), |v| format!("{:?}", v));
-            if let Some(clock) = self.clock {
-                let side = match self.game.turn {
-                    PlayerColor::White => "w",
-                    PlayerColor::Black => "b",
-                    PlayerColor::Neutral => "n",
-                };
-                log(&format!(
-                    "info timealloc side {} wtime {} btime {} winc {} binc {} limit {} variant {}",
-                    side,
-                    clock.wtime,
-                    clock.btime,
-                    clock.winc,
-                    clock.binc,
-                    effective_limit,
-                    variant
-                ));
-            } else {
-                log(&format!(
-                    "info timealloc no_clock requested_limit {} effective_limit {} variant {}",
-                    time_limit_ms, effective_limit, variant
-                ));
-            }
-        }
+        // #[cfg(target_arch = "wasm32")]
+        // {
+        //     use crate::log;
+        //     let variant = self
+        //         .game
+        //         .variant
+        //         .map_or("unknown".to_string(), |v| format!("{:?}", v));
+        //     if let Some(clock) = self.clock {
+        //         let side = match self.game.turn {
+        //             PlayerColor::White => "w",
+        //             PlayerColor::Black => "b",
+        //             PlayerColor::Neutral => "n",
+        //         };
+        //         log(&format!(
+        //             "info timealloc side {} wtime {} btime {} winc {} binc {} limit {} variant {}",
+        //             side,
+        //             clock.wtime,
+        //             clock.btime,
+        //             clock.winc,
+        //             clock.binc,
+        //             effective_limit,
+        //             variant
+        //         ));
+        //     } else {
+        //         log(&format!(
+        //             "info timealloc no_clock requested_limit {} effective_limit {} variant {}",
+        //             time_limit_ms, effective_limit, variant
+        //         ));
+        //     }
+        // }
         if let Some((best_move, eval)) =
-            search::get_best_move_timed_with_eval(&mut self.game, 50, effective_limit, false)
+            search::get_best_move_timed_with_eval(&mut self.game, 50, effective_limit, true)
         {
             let js_move = JsMoveWithEval {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),

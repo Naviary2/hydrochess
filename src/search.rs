@@ -341,7 +341,7 @@ impl Searcher {
 /// Uses the default THINK_TIME_MS and returns only the best move; the
 /// underlying implementation is shared with the timed-with-eval helper.
 pub fn get_best_move(game: &mut GameState, max_depth: usize) -> Option<Move> {
-    get_best_move_timed_with_eval(game, max_depth, THINK_TIME_MS, false).map(|(m, _)| m)
+    get_best_move_timed_with_eval(game, max_depth, THINK_TIME_MS, true).map(|(m, _)| m)
 }
 
 /// Time-limited search that also returns the final root score (cp from side-to-move's perspective).
