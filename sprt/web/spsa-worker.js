@@ -170,6 +170,11 @@ async function playSingleGame(thetaPlus, thetaMinus, plusPlaysWhite, timePerMove
         const gameInput = clonePosition(startPosition);
         gameInput.move_history = moveHistory.slice();
 
+        // Debug: log every 10th move to track progress
+        if (i % 10 === 0) {
+            console.log(`[Game] Move ${i}, pieces: ${position.board.pieces.length}`);
+        }
+
         const engine = new Engine(gameInput);
 
         // Apply search params if engine supports it
@@ -177,7 +182,7 @@ async function playSingleGame(thetaPlus, thetaMinus, plusPlaysWhite, timePerMove
             engine.set_search_params(JSON.stringify(paramsToUse));
         }
 
-        const move = engine.get_best_move_with_time(timePerMove);
+        const move = engine.get_best_move_with_time(timePerMove, true);
         engine.free();
 
         if (!move || !move.from || !move.to) {

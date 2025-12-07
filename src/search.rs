@@ -2,6 +2,7 @@ use crate::board::PieceType;
 use crate::evaluation::evaluate;
 use crate::game::GameState;
 use crate::moves::{get_quiescence_captures, Move};
+use std::cell::RefCell;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -90,6 +91,68 @@ impl Timer {
             self.start.elapsed().as_millis()
         }
     }
+}
+
+/// Lightweight statistics about the transposition table after a search.
+pub struct SearchStats {
+	pub tt_capacity: usize,
+	pub tt_used: usize,
+	pub tt_fill_permille: u32,
+}
+
+thread_local! {
+	static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = RefCell::new(None);
+}
+
+fn with_global_searcher<F, R>(
+	time_limit_ms: u128,
+	silent: bool,
+	f: F,
+) -> R
+where
+	F: FnOnce(&mut Searcher) -> R,
+{
+	// Disable persistent searcher: create a fresh one per call so TT does not persist across searches.
+	let mut searcher = Searcher::new(time_limit_ms);
+	searcher.time_limit_ms = time_limit_ms;
+	searcher.silent = silent;
+	searcher.stopped = false;
+	searcher.timer.reset();
+
+	f(&mut searcher)
+}
+
+fn build_search_stats(searcher: &Searcher) -> SearchStats {
+	SearchStats {
+		tt_capacity: searcher.tt.capacity(),
+		tt_used: searcher.tt.used_entries(),
+		tt_fill_permille: searcher.tt.fill_permille(),
+	}
+}
+
+/// Return current TT statistics from the persistent global searcher, if any.
+/// When no global searcher exists yet, this returns zeros.
+pub fn get_current_tt_stats() -> SearchStats {
+	GLOBAL_SEARCHER.with(|cell| {
+		let opt = cell.borrow();
+		if let Some(ref searcher) = *opt {
+			build_search_stats(searcher)
+		} else {
+			SearchStats {
+				tt_capacity: 0,
+				tt_used: 0,
+				tt_fill_permille: 0,
+			}
+		}
+	})
+}
+
+/// Reset the global search state, including the transposition table and heuristics.
+/// Call this when starting a brand new game so old entries don't carry over.
+pub fn reset_search_state() {
+	GLOBAL_SEARCHER.with(|cell| {
+		*cell.borrow_mut() = None;
+	});
 }
 
 /// Search state that persists across the search
@@ -337,39 +400,25 @@ impl Searcher {
     }
 }
 
-/// Main entry point - iterative deepening search with aspiration windows.
-/// Uses the default THINK_TIME_MS and returns only the best move; the
-/// underlying implementation is shared with the timed-with-eval helper.
-pub fn get_best_move(game: &mut GameState, max_depth: usize) -> Option<Move> {
-    get_best_move_timed_with_eval(game, max_depth, THINK_TIME_MS, true).map(|(m, _)| m)
-}
-
-/// Time-limited search that also returns the final root score (cp from side-to-move's perspective).
-pub fn get_best_move_timed_with_eval(
+/// Core timed search implementation using a provided searcher.
+fn search_with_searcher(
+    searcher: &mut Searcher,
     game: &mut GameState,
     max_depth: usize,
-    time_limit_ms: u128,
-    silent: bool,
 ) -> Option<(Move, i32)> {
-    // Ensure fast per-color piece counts are in sync with the board
-    game.recompute_piece_counts();
-
-    let mut searcher = Searcher::new(time_limit_ms);
-    searcher.silent = silent;
-
     let moves = game.get_legal_moves();
     if moves.is_empty() {
         return None;
     }
 
-    // If only one move, return immediately with a simple static eval as score
+    // If only one move, return immediately with a simple static eval as score.
     if moves.len() == 1 {
         let single = moves[0].clone();
         let score = evaluate(game);
         return Some((single, score));
     }
 
-    // Find first legal move as ultimate fallback
+    // Find first legal move as ultimate fallback.
     // CRITICAL: We must ALWAYS check legality, even under time pressure.
     // Accepting an illegal move (one that leaves our king in check) is never acceptable.
     let fallback_move = moves
@@ -402,7 +451,7 @@ pub fn get_best_move_timed_with_eval(
 
         let score = if depth == 1 {
             // First iteration: full window
-            negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY)
+            negamax_root(searcher, game, depth, -INFINITY, INFINITY)
         } else {
             // Aspiration window search
             let asp_win = aspiration_window();
@@ -413,7 +462,7 @@ pub fn get_best_move_timed_with_eval(
             let mut retries = 0;
 
             loop {
-                result = negamax_root(&mut searcher, game, depth, alpha, beta);
+                result = negamax_root(searcher, game, depth, alpha, beta);
                 retries += 1;
 
                 if searcher.stopped {
@@ -435,7 +484,7 @@ pub fn get_best_move_timed_with_eval(
 
                 // Fallback to full window if window gets too large or too many retries
                 if window_size > 1000 || retries >= 4 {
-                    result = negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY);
+                    result = negamax_root(searcher, game, depth, -INFINITY, INFINITY);
                     break;
                 }
             }
@@ -524,37 +573,27 @@ pub fn get_best_move_timed_with_eval(
     // Increment TT age for next search
     searcher.tt.increment_age();
 
-    if let Some(m) = best_move {
-        Some((m, best_score))
-    } else {
-        None
-    }
+    best_move.map(|m| (m, best_score))
 }
 
-/// Time-limited search that also returns the final root score (cp from side-to-move's perspective).
-// pub fn get_best_move_timed_with_eval(
-//     game: &mut GameState,
-//     max_depth: usize,
-//     time_limit_ms: u128,
-//     silent: bool,
-// ) -> Option<(Move, i32)> {
-//     game.recompute_piece_counts();
-
-//     let mut searcher = Searcher::new(time_limit_ms);
-//     searcher.silent = silent;
-
-//     search_with_searcher(&mut searcher, game, max_depth)
-// }
-
-/// Time-limited search entry point. Delegates to the core
-/// get_best_move_timed_with_eval implementation and discards the eval.
-pub fn get_best_move_timed(
+/// Time-limited search that returns the best move, its evaluation (cp from side-to-move's
+/// perspective), and simple TT statistics. This is the main public search entry point.
+pub fn get_best_move(
     game: &mut GameState,
     max_depth: usize,
     time_limit_ms: u128,
     silent: bool,
-) -> Option<Move> {
-    get_best_move_timed_with_eval(game, max_depth, time_limit_ms, silent).map(|(m, _)| m)
+) -> Option<(Move, i32, SearchStats)> {
+    // Ensure fast per-color piece counts are in sync with the board
+    game.recompute_piece_counts();
+
+    // Use a fresh searcher per call (no persistent TT/state between searches).
+    let mut searcher = Searcher::new(time_limit_ms);
+    searcher.time_limit_ms = time_limit_ms;
+    searcher.silent = silent;
+    let result = search_with_searcher(&mut searcher, game, max_depth);
+    let stats = build_search_stats(&searcher);
+    result.map(|(m, eval)| (m, eval, stats))
 }
 
 pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
@@ -577,6 +616,9 @@ fn negamax_root(
     mut alpha: i32,
     beta: i32,
 ) -> i32 {
+    // Save original alpha for TT flag determination
+    let alpha_orig = alpha;
+
     searcher.pv_length[0] = 0;
 
     let hash = TranspositionTable::generate_hash(game);
@@ -682,17 +724,17 @@ fn negamax_root(
     // Swap back move buffer for reuse in future searches
     std::mem::swap(&mut searcher.move_buffers[0], &mut moves);
 
-    // Store in TT
-    let flag = if best_score >= beta {
-        TTFlag::LowerBound
-    } else if best_score <= alpha {
+    // Store in TT with correct flag based on original alpha
+    let tt_flag = if best_score <= alpha_orig {
         TTFlag::UpperBound
+    } else if best_score >= beta {
+        TTFlag::LowerBound
     } else {
         TTFlag::Exact
     };
     searcher
         .tt
-        .store(hash, depth, flag, best_score, best_move, 0);
+        .store(hash, depth, tt_flag, best_score, best_move, 0);
 
     best_score
 }
@@ -707,6 +749,10 @@ fn negamax(
     mut beta: i32,
     allow_null: bool,
 ) -> i32 {
+    // Save original alpha/beta for TT flag determination (per Wikipedia pseudocode)
+    let alpha_orig = alpha;
+    let beta_orig = beta;
+
     searcher.nodes += 1;
     searcher.pv_length[ply] = ply;
 
@@ -868,7 +914,6 @@ fn negamax(
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut legal_moves = 0;
-    let mut hash_flag = TTFlag::UpperBound;
     // Track quiet moves searched at this node for history maluses
     let mut quiets_searched: Vec<Move> = Vec::new();
 
@@ -933,7 +978,15 @@ fn negamax(
         let score;
         if legal_moves == 1 {
             // Full window search for first legal move
-            score = -negamax(searcher, game, depth - 1, ply + 1, -beta, -alpha, true);
+            score = -negamax(
+                searcher,
+                game,
+                depth - 1,
+                ply + 1,
+                -beta,
+                -alpha,
+                true,
+            );
         } else {
             // Late Move Reductions
             let mut reduction = 0;
@@ -1028,7 +1081,6 @@ fn negamax(
 
             if score > alpha {
                 alpha = score;
-                hash_flag = TTFlag::Exact;
 
                 // Update PV
                 searcher.pv_table[ply][ply] = Some(m.clone());
@@ -1041,8 +1093,6 @@ fn negamax(
         }
 
         if alpha >= beta {
-            hash_flag = TTFlag::LowerBound;
-
             if !is_capture {
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
                 let idx = hash_move_dest(m);
@@ -1124,10 +1174,20 @@ fn negamax(
         }
     }
 
-    // Store in TT
+    // Store in TT with correct flag based on original alpha/beta (per Wikipedia pseudocode)
+    // - UPPERBOUND: best_score <= alpha_orig (failed low, didn't improve alpha)
+    // - LOWERBOUND: best_score >= beta_orig (failed high, caused beta cutoff)
+    // - EXACT: alpha_orig < best_score < beta_orig (true minimax value)
+    let tt_flag = if best_score <= alpha_orig {
+        TTFlag::UpperBound
+    } else if best_score >= beta_orig {
+        TTFlag::LowerBound
+    } else {
+        TTFlag::Exact
+    };
     searcher
         .tt
-        .store(hash, depth, hash_flag, best_score, best_move, ply);
+        .store(hash, depth, tt_flag, best_score, best_move, ply);
 
     best_score
 }

@@ -539,7 +539,7 @@ async function initWasm() {
 
         const testPos = getStandardPosition();
         const engine = new EngineNew(testPos);
-        const move = engine.get_best_move_with_time(100);
+        const move = engine.get_best_move_with_time(100, true);
         engine.free();
         log('Quick test: Best move = ' + (move ? move.from + ' to ' + move.to : 'null'), 'info');
     } catch (e) {

@@ -73,6 +73,12 @@ impl TranspositionTable {
         self.table.len()
     }
 
+    /// Number of TT entries currently in use.
+    #[inline]
+    pub fn used_entries(&self) -> usize {
+        self.used
+    }
+
     /// Approximate transposition table fill in permille (0-1000).
     #[inline]
     pub fn fill_permille(&self) -> u32 {
@@ -87,7 +93,12 @@ impl TranspositionTable {
         (hash as usize) & self.mask
     }
 
-    /// Probe the TT for a position
+    /// Probe the TT for a position.
+    ///
+    /// Returns `Some((score, best_move))` where:
+    /// - If `score` is a valid cutoff score (not `INFINITY + 1`), the caller can use it directly.
+    /// - If `score == INFINITY + 1`, the score is not usable but `best_move` may still be valid
+    ///   for move ordering purposes.
     pub fn probe(&self, hash: u64, alpha: i32, beta: i32, depth: usize, ply: usize) -> Option<(i32, Option<Move>)> {
         let idx = self.index(hash);
         if let Some(entry) = &self.table[idx] {
@@ -106,16 +117,20 @@ impl TranspositionTable {
                         score += ply as i32;
                     }
 
-                    let out = match entry.flag {
-                        TTFlag::Exact => (score, best_move),
-                        TTFlag::LowerBound if score >= beta => (beta, best_move),
-                        TTFlag::UpperBound if score <= alpha => (alpha, best_move),
-                        _ => (INFINITY + 1, best_move), // Signal: use move but not score
+                    // Check if we can use this score for a cutoff
+                    let usable_score = match entry.flag {
+                        TTFlag::Exact => Some(score),
+                        TTFlag::LowerBound if score >= beta => Some(score),
+                        TTFlag::UpperBound if score <= alpha => Some(score),
+                        _ => None,
                     };
-                    return Some(out);
+
+                    if let Some(s) = usable_score {
+                        return Some((s, best_move));
+                    }
                 }
 
-                // Depth too shallow: still return move for ordering.
+                // Depth too shallow or bounds don't allow cutoff: still return move for ordering.
                 return Some((INFINITY + 1, best_move));
             }
         }
@@ -134,15 +149,17 @@ impl TranspositionTable {
 
         let idx = self.index(hash);
 
-        // Replacement strategy: replace if slot is empty, different position, deeper,
-        // or older / exact flag is present.
+        // Replacement strategy (depth-preferred with aging):
+        // - Always replace empty slots
+        // - Replace if existing entry is from an older search (different age)
+        // - Replace if new entry has equal or greater depth
+        // - Replace if new entry is exact and existing is not (same depth)
         let replace = match &self.table[idx] {
             None => true,
             Some(existing) => {
-                existing.hash != hash // Different position (collision)
-                    || depth >= existing.depth as usize // Deeper search
-                    || self.age != existing.age // Older entry
-                    || flag == TTFlag::Exact // Exact scores are valuable
+                self.age != existing.age  // Old entry from previous search
+                    || depth > existing.depth as usize  // Deeper search
+                    || (depth == existing.depth as usize && flag == TTFlag::Exact)  // Same depth, prefer exact
             }
         };
 

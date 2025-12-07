@@ -49,13 +49,13 @@ pub const DEFAULT_RFP_MARGIN_PER_DEPTH: i32 = 120;
 pub const DEFAULT_IIR_MIN_DEPTH: usize = 4;
 
 // Move Ordering scores (higher = searched first)
-pub const DEFAULT_SORT_HASH: i32 = 6_000_000;
-pub const DEFAULT_SORT_WINNING_CAPTURE: i32 = 1_000_000;
+pub const DEFAULT_SORT_HASH: i32 = 6000000;
+pub const DEFAULT_SORT_WINNING_CAPTURE: i32 = 1000000;
 pub const DEFAULT_SORT_LOSING_CAPTURE: i32 = 0;
 pub const DEFAULT_SORT_QUIET: i32 = 0;
-pub const DEFAULT_SORT_KILLER1: i32 = 900_000;
-pub const DEFAULT_SORT_KILLER2: i32 = 800_000;
-pub const DEFAULT_SORT_COUNTERMOVE: i32 = 600_000;
+pub const DEFAULT_SORT_KILLER1: i32 = 900000;
+pub const DEFAULT_SORT_KILLER2: i32 = 800000;
+pub const DEFAULT_SORT_COUNTERMOVE: i32 = 600000;
 
 // SEE threshold for "winning" captures
 pub const DEFAULT_SEE_WINNING_THRESHOLD: i32 = -90;

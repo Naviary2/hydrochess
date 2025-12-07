@@ -134,7 +134,8 @@ fn test_mate_in_one() {
     }
 
     // Search with iterative deepening (depth 10)
-    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 10);
+    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 10, u128::MAX, true)
+        .map(|(m, _eval, _stats)| m);
 
     assert!(best_move.is_some(), "Should find a move");
     let m = best_move.unwrap();
@@ -166,7 +167,8 @@ fn test_2queen() {
     }
 
     // Search with iterative deepening (depth 10)
-    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 10);
+    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 10, u128::MAX, true)
+        .map(|(m, _eval, _stats)| m);
 
     assert!(best_move.is_some(), "Should find a move");
     let m = best_move.unwrap();
@@ -182,7 +184,8 @@ fn test_no_wing_rook_opening() {
     let mut game = setup_classical_start_position();
 
     // Use a moderate depth to let opening heuristics and eval influence the choice
-    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 6);
+    let best_move = hydrochess_wasm::search::get_best_move(&mut game, 6, u128::MAX, true)
+        .map(|(m, _eval, _stats)| m);
 
     assert!(
         best_move.is_some(),

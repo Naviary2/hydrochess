@@ -26,6 +26,21 @@ import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import puppeteer from 'puppeteer';
 
+// Try to use native Node.js WASM execution for better performance
+import { NativeWasmRunner, canUseNativeWasm } from './native_runner.mjs';
+
+/**
+ * Check if iwasm is available in PATH
+ */
+function hasIwasm() {
+    try {
+        execSync('iwasm --version', { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 import {
     SPSA_PARAMS,
     SPSA_HYPERPARAMS,
@@ -39,101 +54,351 @@ import {
     validateParams
 } from './spsa_config.mjs';
 
+import yargs from 'yargs';
+import { hideBin } from 'yargs/helpers';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT_DIR = join(__dirname, '..');
 
 // ============================================================================
-// Command Line Parsing
+// Command Line Parsing with yargs
 // ============================================================================
 
 function parseArgs() {
-    const args = process.argv.slice(2);
-    const options = {
-        iterations: 100,
-        games: 60,           // Games per side per iteration (total = games * 2)
-        tc: 200,              // 200ms per move for faster games
-        checkpoint: null,    // Will calculate dynamic default if not set
-        resume: null,
-        autoResume: true,    // Auto-resume is now the default
-        fresh: false,        // Set to true to ignore checkpoints
-        verbose: false,
-        concurrency: 20      // Default to 20 parallel workers
-    };
+    const argv = yargs(hideBin(process.argv))
+        .scriptName('spsa')
+        .usage('$0 [options] [checkpoint.json]')
+        .option('iterations', {
+            alias: 'i',
+            type: 'number',
+            default: 100,
+            description: 'Number of SPSA iterations'
+        })
+        .option('games', {
+            alias: 'g',
+            type: 'number',
+            default: 100,
+            description: 'Games per side per iteration'
+        })
+        .option('tc', {
+            alias: 't',
+            type: 'number',
+            default: 100,
+            description: 'Time control per move in ms'
+        })
+        .option('checkpoint', {
+            alias: 'c',
+            type: 'number',
+            description: 'Save checkpoint every N iterations (default: 5% of total)'
+        })
+        .option('resume', {
+            alias: 'r',
+            type: 'string',
+            description: 'Resume from specific checkpoint JSON file'
+        })
+        .option('fresh', {
+            alias: 'f',
+            type: 'boolean',
+            default: false,
+            description: 'Start fresh, ignore any existing checkpoints'
+        })
+        .option('concurrency', {
+            type: 'number',
+            default: 20,
+            description: 'Number of parallel workers'
+        })
+        .option('verbose', {
+            alias: 'v',
+            type: 'boolean',
+            default: false,
+            description: 'Print detailed progress'
+        })
+        .option('apply', {
+            type: 'string',
+            description: 'Apply tuned params to params.rs (use "latest" or path to JSON)'
+        })
+        .option('revert', {
+            type: 'boolean',
+            default: false,
+            description: 'Revert params.rs to default values from spsa_config.mjs'
+        })
+        .option('native', {
+            type: 'boolean',
+            default: false,
+            description: 'Force native Node.js WASM execution (faster)'
+        })
+        .option('browser', {
+            type: 'boolean',
+            default: false,
+            description: 'Force browser-based execution (Puppeteer)'
+        })
+        .help()
+        .alias('help', 'h')
+        .example('$0', 'Auto-resume or fresh start')
+        .example('$0 --fresh', 'Force fresh start')
+        .example('$0 --native', 'Use fast native WASM execution')
+        .example('$0 --iterations 1000 --games 500 --tc 200', 'Custom settings')
+        .example('$0 --apply latest', 'Apply latest tuned params to params.rs')
+        .example('$0 --apply checkpoints/spsa_50.json', 'Apply specific checkpoint')
+        .example('$0 --revert', 'Revert params.rs to defaults')
+        .parseSync();
 
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        // Handle positional argument (resume file without --resume flag)
-        if (!arg.startsWith('--') && arg.endsWith('.json')) {
-            options.resume = arg;
-            options.autoResume = false;  // Explicit file takes precedence
-            continue;
-        }
-        switch (arg) {
-            case '--iterations':
-                options.iterations = parseInt(args[++i], 10);
-                break;
-            case '--games':
-                options.games = parseInt(args[++i], 10);
-                break;
-            case '--tc':
-                options.tc = parseInt(args[++i], 10);
-                break;
-            case '--checkpoint':
-                options.checkpoint = parseInt(args[++i], 10);
-                break;
-            case '--resume':
-                options.resume = args[++i];
-                options.autoResume = false;
-                break;
-            case '--auto-resume':
-                options.autoResume = true;
-                options.fresh = false;
-                break;
-            case '--fresh':
-                options.fresh = true;
-                options.autoResume = false;
-                break;
-            case '--verbose':
-                options.verbose = true;
-                break;
-            case '--concurrency':
-                options.concurrency = parseInt(args[++i], 10);
-                break;
-            case '--help':
-                console.log(`SPSA Tuner for HydroChess
-
-Usage: node spsa.mjs [options] [checkpoint.json]
-
-Options:
-  --iterations <n>    Number of SPSA iterations (default: 100)
-  --games <n>         Games per side per iteration (default: 60)
-  --tc <ms>           Time control per move in ms (default: 200)
-  --checkpoint <n>    Save checkpoint every N iterations (default: 5% of total)
-  --resume <file>     Resume from specific checkpoint JSON file
-  --fresh             Start fresh, ignore any existing checkpoints
-  --concurrency <n>   Number of parallel workers (default: 20)
-  --verbose           Print detailed progress
-
-Notes:
-  By default, the tuner auto-resumes from the latest checkpoint.
-  Use --fresh to start a new tuning session from scratch.
-
-Examples:
-  node spsa.mjs                          # Auto-resume or fresh start
-  node spsa.mjs --fresh                  # Force fresh start
-  node spsa.mjs checkpoints/spsa_5.json  # Resume from specific file
-`);
-                process.exit(0);
-        }
+    // Handle positional argument as resume file
+    if (argv._.length > 0 && String(argv._[0]).endsWith('.json')) {
+        argv.resume = String(argv._[0]);
     }
 
+    // Build options object
+    const options = {
+        iterations: argv.iterations,
+        games: argv.games,
+        tc: argv.tc,
+        checkpoint: argv.checkpoint,
+        resume: argv.resume || null,
+        autoResume: !argv.fresh && !argv.resume,
+        fresh: argv.fresh,
+        verbose: argv.verbose,
+        concurrency: argv.concurrency,
+        apply: argv.apply,
+        revert: argv.revert,
+        native: argv.native,
+        browser: argv.browser
+    };
+
     // Dynamic default for checkpoint: 5% of total iterations, min 1
-    if (options.checkpoint === null) {
+    if (options.checkpoint === undefined || options.checkpoint === null) {
         options.checkpoint = Math.max(1, Math.floor(options.iterations * 0.05));
     }
 
     return options;
+}
+
+// ============================================================================
+// Apply/Revert Parameters to params.rs
+// ============================================================================
+
+const PARAMS_RS_PATH = join(ROOT_DIR, 'src', 'search', 'params.rs');
+
+// Mapping from SPSA param names to DEFAULT_* constant names in params.rs
+const PARAM_TO_CONST = {
+    nmp_reduction: 'DEFAULT_NMP_REDUCTION',
+    nmp_min_depth: 'DEFAULT_NMP_MIN_DEPTH',
+    lmr_min_depth: 'DEFAULT_LMR_MIN_DEPTH',
+    lmr_min_moves: 'DEFAULT_LMR_MIN_MOVES',
+    lmr_divisor: 'DEFAULT_LMR_DIVISOR',
+    hlp_max_depth: 'DEFAULT_HLP_MAX_DEPTH',
+    hlp_min_moves: 'DEFAULT_HLP_MIN_MOVES',
+    hlp_history_reduce: 'DEFAULT_HLP_HISTORY_REDUCE',
+    hlp_history_leaf: 'DEFAULT_HLP_HISTORY_LEAF',
+    aspiration_window: 'DEFAULT_ASPIRATION_WINDOW',
+    aspiration_fail_mult: 'DEFAULT_ASPIRATION_FAIL_MULT',
+    rfp_max_depth: 'DEFAULT_RFP_MAX_DEPTH',
+    rfp_margin_per_depth: 'DEFAULT_RFP_MARGIN_PER_DEPTH',
+    sort_hash: 'DEFAULT_SORT_HASH',
+    sort_winning_capture: 'DEFAULT_SORT_WINNING_CAPTURE',
+    sort_killer1: 'DEFAULT_SORT_KILLER1',
+    sort_killer2: 'DEFAULT_SORT_KILLER2',
+    sort_countermove: 'DEFAULT_SORT_COUNTERMOVE',
+    see_winning_threshold: 'DEFAULT_SEE_WINNING_THRESHOLD',
+    max_history: 'DEFAULT_MAX_HISTORY',
+    history_bonus_base: 'DEFAULT_HISTORY_BONUS_BASE',
+    history_bonus_sub: 'DEFAULT_HISTORY_BONUS_SUB',
+    history_bonus_cap: 'DEFAULT_HISTORY_BONUS_CAP',
+    repetition_penalty: 'DEFAULT_REPETITION_PENALTY',
+    delta_margin: 'DEFAULT_DELTA_MARGIN',
+    // Array-based params need special handling
+    lmp_threshold_1: 'DEFAULT_LMP_THRESHOLD[1]',
+    lmp_threshold_2: 'DEFAULT_LMP_THRESHOLD[2]',
+    lmp_threshold_3: 'DEFAULT_LMP_THRESHOLD[3]',
+    lmp_threshold_4: 'DEFAULT_LMP_THRESHOLD[4]',
+    futility_margin_1: 'DEFAULT_FUTILITY_MARGIN[1]',
+    futility_margin_2: 'DEFAULT_FUTILITY_MARGIN[2]',
+    futility_margin_3: 'DEFAULT_FUTILITY_MARGIN[3]',
+};
+
+/**
+ * Apply tuned parameters to params.rs by replacing constant values
+ */
+function applyParams(paramsFile) {
+    // Find the params file if "latest" or empty
+    let jsonPath;
+    if (!paramsFile || paramsFile === 'latest' || paramsFile === '') {
+        // Try spsa_final.json first, then latest checkpoint
+        const finalPath = join(__dirname, 'spsa_final.json');
+        if (existsSync(finalPath)) {
+            jsonPath = finalPath;
+        } else {
+            jsonPath = findLatestCheckpoint();
+            if (!jsonPath) {
+                console.error('❌ No tuned parameters found. Run SPSA first or specify a JSON file.');
+                process.exit(1);
+            }
+        }
+    } else {
+        jsonPath = paramsFile;
+        if (!existsSync(jsonPath)) {
+            // Try relative to sprt directory
+            jsonPath = join(__dirname, paramsFile);
+            if (!existsSync(jsonPath)) {
+                console.error(`❌ File not found: ${paramsFile}`);
+                process.exit(1);
+            }
+        }
+    }
+
+    console.log(`📂 Loading parameters from: ${jsonPath}`);
+    const data = JSON.parse(readFileSync(jsonPath, 'utf-8'));
+
+    // Extract theta from checkpoint or use directly if it's a final file
+    const theta = data.theta || data;
+
+    if (!theta || Object.keys(theta).length === 0) {
+        console.error('❌ No parameters found in JSON file');
+        process.exit(1);
+    }
+
+    // Read params.rs
+    if (!existsSync(PARAMS_RS_PATH)) {
+        console.error(`❌ params.rs not found at: ${PARAMS_RS_PATH}`);
+        process.exit(1);
+    }
+    let content = readFileSync(PARAMS_RS_PATH, 'utf-8');
+
+    let changedCount = 0;
+
+    // Collect array parameter values
+    const lmpThresholds = { 1: null, 2: null, 3: null, 4: null };
+    const futilityMargins = { 1: null, 2: null, 3: null };
+
+    // First pass: collect array values and apply scalar params
+    for (const [paramName, value] of Object.entries(theta)) {
+        const constName = PARAM_TO_CONST[paramName];
+        if (!constName) {
+            console.warn(`  ⚠️  Unknown parameter: ${paramName}`);
+            continue;
+        }
+
+        // Handle array-based params - collect values
+        if (constName.startsWith('DEFAULT_LMP_THRESHOLD[')) {
+            const idx = parseInt(constName.match(/\[(\d+)\]/)[1], 10);
+            lmpThresholds[idx] = Math.round(value);
+            continue;
+        }
+        if (constName.startsWith('DEFAULT_FUTILITY_MARGIN[')) {
+            const idx = parseInt(constName.match(/\[(\d+)\]/)[1], 10);
+            futilityMargins[idx] = Math.round(value);
+            continue;
+        }
+
+        // Match patterns like: pub const DEFAULT_NAME: usize = VALUE;
+        const regex = new RegExp(
+            `(pub const ${constName}:\\s*(?:usize|i32|f64)\\s*=\\s*)(-?[\\d_]+(?:\\.\\d+)?)(\\s*;)`,
+            'g'
+        );
+
+        const newValue = Number.isInteger(value) ? String(Math.round(value)) : value.toFixed(2);
+        const newContent = content.replace(regex, `$1${newValue}$3`);
+
+        if (newContent !== content) {
+            console.log(`  ✓ ${constName}: ${newValue}`);
+            content = newContent;
+            changedCount++;
+        }
+    }
+
+    // Apply LMP thresholds array if we have any values
+    if (Object.values(lmpThresholds).some(v => v !== null)) {
+        // Get current array values first
+        const lmpMatch = content.match(/pub const DEFAULT_LMP_THRESHOLD:\s*\[usize;\s*5\]\s*=\s*\[([^\]]+)\]/);
+        if (lmpMatch) {
+            const currentValues = lmpMatch[1].split(',').map(v => parseInt(v.trim(), 10));
+            const newValues = [
+                currentValues[0], // Keep index 0 as-is
+                lmpThresholds[1] !== null ? lmpThresholds[1] : currentValues[1],
+                lmpThresholds[2] !== null ? lmpThresholds[2] : currentValues[2],
+                lmpThresholds[3] !== null ? lmpThresholds[3] : currentValues[3],
+                lmpThresholds[4] !== null ? lmpThresholds[4] : currentValues[4],
+            ];
+            const newArrayStr = `pub const DEFAULT_LMP_THRESHOLD: [usize; 5] = [${newValues.join(', ')}]`;
+            content = content.replace(/pub const DEFAULT_LMP_THRESHOLD:\s*\[usize;\s*5\]\s*=\s*\[[^\]]+\]/, newArrayStr);
+            console.log(`  ✓ DEFAULT_LMP_THRESHOLD: [${newValues.join(', ')}]`);
+            changedCount++;
+        }
+    }
+
+    // Apply futility margins array if we have any values
+    if (Object.values(futilityMargins).some(v => v !== null)) {
+        const futMatch = content.match(/pub const DEFAULT_FUTILITY_MARGIN:\s*\[i32;\s*4\]\s*=\s*\[([^\]]+)\]/);
+        if (futMatch) {
+            const currentValues = futMatch[1].split(',').map(v => parseInt(v.trim(), 10));
+            const newValues = [
+                currentValues[0], // Keep index 0 as-is
+                futilityMargins[1] !== null ? futilityMargins[1] : currentValues[1],
+                futilityMargins[2] !== null ? futilityMargins[2] : currentValues[2],
+                futilityMargins[3] !== null ? futilityMargins[3] : currentValues[3],
+            ];
+            const newArrayStr = `pub const DEFAULT_FUTILITY_MARGIN: [i32; 4] = [${newValues.join(', ')}]`;
+            content = content.replace(/pub const DEFAULT_FUTILITY_MARGIN:\s*\[i32;\s*4\]\s*=\s*\[[^\]]+\]/, newArrayStr);
+            console.log(`  ✓ DEFAULT_FUTILITY_MARGIN: [${newValues.join(', ')}]`);
+            changedCount++;
+        }
+    }
+
+    if (changedCount === 0) {
+        console.log('⚠️  No parameters were changed');
+        return;
+    }
+
+    // Write back
+    writeFileSync(PARAMS_RS_PATH, content, 'utf-8');
+    console.log(`\n✅ Applied ${changedCount} parameters to params.rs`);
+    console.log('🔨 Rebuild the engine to use the new parameters');
+}
+
+/**
+ * Revert params.rs to default values from spsa_config.mjs
+ */
+function revertParams() {
+    console.log('🔄 Reverting params.rs to default values...');
+
+    if (!existsSync(PARAMS_RS_PATH)) {
+        console.error(`❌ params.rs not found at: ${PARAMS_RS_PATH}`);
+        process.exit(1);
+    }
+    let content = readFileSync(PARAMS_RS_PATH, 'utf-8');
+
+    let changedCount = 0;
+
+    // Apply default values from SPSA_PARAMS
+    for (const [paramName, config] of Object.entries(SPSA_PARAMS)) {
+        const constName = PARAM_TO_CONST[paramName];
+        if (!constName || constName.includes('[')) continue;
+
+        const defaultValue = config.default;
+        const regex = new RegExp(
+            `(pub const ${constName}:\\s*(?:usize|i32|f64)\\s*=\\s*)(-?[\\d_]+(?:\\.\\d+)?)(\\s*;)`,
+            'g'
+        );
+
+        const newValue = Number.isInteger(defaultValue) ? String(defaultValue) : defaultValue.toFixed(2);
+        const newContent = content.replace(regex, `$1${newValue}$3`);
+
+        if (newContent !== content) {
+            console.log(`  ✓ ${constName}: ${newValue}`);
+            content = newContent;
+            changedCount++;
+        }
+    }
+
+    if (changedCount === 0) {
+        console.log('⚠️  No parameters were changed (already at defaults)');
+        return;
+    }
+
+    writeFileSync(PARAMS_RS_PATH, content, 'utf-8');
+    console.log(`\n✅ Reverted ${changedCount} parameters to defaults`);
+    console.log('🔨 Rebuild the engine to use the default parameters');
 }
 
 /**
@@ -160,12 +425,15 @@ function findLatestCheckpoint() {
 // Build Engine with search_tuning Feature
 // ============================================================================
 
-function buildEngine() {
-    console.log('🔨 Building engine with search_tuning feature...');
+function buildEngine(forNodejs = false) {
+    const target = forNodejs ? 'nodejs' : 'web';
+    const outDir = forNodejs ? 'sprt/pkg-nodejs' : 'sprt/web/pkg-spsa';
+
+    console.log(`🔨 Building engine with search_tuning feature (target: ${target})...`);
 
     try {
         execSync(
-            'wasm-pack build --target web --release --out-name hydrochess --out-dir sprt/web/pkg-spsa -- --features search_tuning',
+            `wasm-pack build --target ${target} --release --out-name hydrochess --out-dir ${outDir} -- --features search_tuning`,
             { cwd: ROOT_DIR, stdio: 'inherit' }
         );
         console.log('✅ Build complete');
@@ -185,6 +453,7 @@ class SPSAGameRunner {
         this.options = options;
         this.browser = null;
         this.page = null;
+        this.consecutiveTimeouts = 0;
     }
 
     async init() {
@@ -195,13 +464,15 @@ class SPSAGameRunner {
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--allow-file-access-from-files'
+                '--allow-file-access-from-files',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
             ]
         });
         this.page = await this.browser.newPage();
         this.page.setDefaultTimeout(0);
 
-        // Forward browser console to Node console for debugging
+        // Forward ALL browser console messages to Node console for debugging
         this.page.on('console', msg => {
             const type = msg.type();
             const text = msg.text();
@@ -209,9 +480,9 @@ class SPSAGameRunner {
                 console.error('  [browser error]', text);
             } else if (type === 'warning') {
                 console.warn('  [browser warn]', text);
+            } else if (type === 'log' || type === 'info') {
+                // console.log('  [browser]', text);
             }
-            // Uncomment below for verbose logging:
-            // else { console.log('  [browser]', text); }
         });
 
         // Log page errors
@@ -229,44 +500,62 @@ class SPSAGameRunner {
         console.log('✅ Browser ready');
     }
 
+    async forceClose() {
+        // Force kill the browser process
+        if (this.browser) {
+            try {
+                const browserProcess = this.browser.process();
+                if (browserProcess) {
+                    browserProcess.kill('SIGKILL');
+                }
+            } catch (e) {
+                // Ignore errors during force kill
+            }
+            try {
+                await this.browser.close();
+            } catch (e) {
+                // Ignore errors during close
+            }
+            this.browser = null;
+            this.page = null;
+        }
+    }
+
     async close() {
         if (this.browser) {
-            await this.browser.close();
+            try {
+                await this.browser.close();
+            } catch (e) {
+                // Ignore
+            }
+            this.browser = null;
+            this.page = null;
         }
     }
 
     /**
-     * Run games between θ+ and θ- configurations with timeout
+     * Run games between θ+ and θ- configurations
+     * Browser-side stall detection will return partial results if stuck
      * Returns { plusWins, minusWins, draws }
      */
     async runGames(thetaPlus, thetaMinus, numGames) {
-        const BATCH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+        try {
+            const results = await this.page.evaluate(async (plus, minus, games, tc, concurrency) => {
+                return await window.runSPSAGames(plus, minus, games, tc, concurrency);
+            }, thetaPlus, thetaMinus, numGames, this.options.tc, this.options.concurrency);
 
-        const gamePromise = this.page.evaluate(async (plus, minus, games, tc, concurrency) => {
-            return await window.runSPSAGames(plus, minus, games, tc, concurrency);
-        }, thetaPlus, thetaMinus, numGames, this.options.tc, this.options.concurrency);
+            return results;
 
-        // Create timeout with ability to cancel it
-        let timeoutId;
-        const timeoutPromise = new Promise((resolve) => {
-            timeoutId = setTimeout(() => {
-                console.error('  ⚠️  Batch timeout reached (5 min), forcing completion...');
-                resolve({ plusWins: 0, minusWins: 0, draws: numGames * 2, timedOut: true });
-            }, BATCH_TIMEOUT_MS);
-        });
+        } catch (error) {
+            console.error(`  ❌ Error during games: ${error.message}`);
+            console.error(`  Stack: ${error.stack}`);
 
-        const results = await Promise.race([gamePromise, timeoutPromise]);
-
-        // IMPORTANT: Clear the timeout to prevent it from firing later
-        clearTimeout(timeoutId);
-
-        if (results.timedOut) {
-            console.log('  Restarting browser to recover from stuck state...');
-            await this.close();
+            await this.forceClose();
+            await new Promise(r => setTimeout(r, 1000));
             await this.init();
-        }
 
-        return results;
+            return { plusWins: 0, minusWins: 0, draws: 0, stalled: true };
+        }
     }
 }
 
@@ -312,13 +601,32 @@ async function runSPSA(options) {
         }
     }
 
-    // Build engine
-    if (!buildEngine()) {
+    // Determine execution mode before building
+    let useNative = false;
+    if (options.browser) {
+        console.log('🌐 Using browser-based execution (--browser flag)');
+        useNative = false;
+    } else if (options.native) {
+        console.log('🚀 Using native Node.js WASM execution (--native flag)');
+        useNative = true;
+    } else {
+        // Default to browser-based for now (native requires separate build)
+        console.log('🌐 Using browser-based execution');
+        useNative = false;
+    }
+
+    // Build engine with appropriate target
+    if (!buildEngine(useNative)) {
         process.exit(1);
     }
 
     // Initialize game runner
-    const runner = new SPSAGameRunner(options);
+    let runner;
+    if (useNative) {
+        runner = new NativeWasmRunner(options);
+    } else {
+        runner = new SPSAGameRunner(options);
+    }
 
     try {
         await runner.init();
@@ -345,8 +653,20 @@ async function runSPSA(options) {
             console.log(`🎮 Running ${options.games} games per side...`);
             const results = await runner.runGames(thetaPlus, thetaMinus, options.games);
 
-            // Compute win rates (from θ+'s perspective)
+            // Compute win rates based on COMPLETED games only (from θ+'s perspective)
             const totalGames = results.plusWins + results.minusWins + results.draws;
+
+            // Skip this iteration if we got no usable data
+            if (totalGames === 0 || results.stalled) {
+                console.log('   ⚠️  No games completed this iteration, skipping update');
+                continue;
+            }
+
+            // Log if we got partial results
+            if (totalGames < options.games * 2) {
+                console.log(`   ⚠️  Partial results: ${totalGames}/${options.games * 2} games completed`);
+            }
+
             const plusWinRate = (results.plusWins + 0.5 * results.draws) / totalGames;
             const minusWinRate = (results.minusWins + 0.5 * results.draws) / totalGames;
 
@@ -448,6 +768,19 @@ async function runSPSA(options) {
 // ============================================================================
 
 const options = parseArgs();
+
+// Handle --apply and --revert commands (exit after)
+if (options.revert) {
+    revertParams();
+    process.exit(0);
+}
+
+if (options.apply !== undefined) {
+    applyParams(options.apply);
+    process.exit(0);
+}
+
+// Normal SPSA tuning
 runSPSA(options).catch(e => {
     console.error('❌ Fatal error:', e);
     process.exit(1);

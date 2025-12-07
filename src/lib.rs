@@ -191,6 +191,12 @@ impl Engine {
     pub fn new(json_state: JsValue) -> Result<Engine, JsValue> {
         let js_game: JsFullGame = serde_wasm_bindgen::from_value(json_state)?;
 
+        // If this looks like a fresh game (no move history and starting fullmove number),
+        // clear any persistent search/TT state so we don't carry information across games.
+        if js_game.move_history.is_empty() && js_game.fullmove_number <= 1 {
+            crate::search::reset_search_state();
+        }
+
         // Apply world bounds from playableRegion if provided
         if let Some(wb) = &js_game.world_bounds {
             let left = wb.left.parse::<i64>().unwrap_or(-1_000_000_000_000_000);
@@ -401,7 +407,9 @@ impl Engine {
             );
             web_sys::console::debug_1(&JsValue::from(line));
         }
-        if let Some(best_move) = search::get_best_move(&mut self.game, 50) {
+        if let Some((best_move, _eval, _stats)) =
+            search::get_best_move(&mut self.game, 50, u128::MAX, false)
+        {
             let js_move = JsMove {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),
@@ -540,58 +548,67 @@ impl Engine {
 
     /// Timed search. This also exposes the search evaluation as an `eval` field alongside the move,
     /// so callers can reuse the same search for adjudication.
-    pub fn get_best_move_with_time(&mut self, time_limit_ms: u32) -> JsValue {
+    #[wasm_bindgen]
+    pub fn get_best_move_with_time(&mut self, time_limit_ms: u32, silent: Option<bool>) -> JsValue {
         let effective_limit = self.effective_time_limit_ms(time_limit_ms);
+        let silent = silent.unwrap_or(false);
 
-        // // console log all legal moves in the position
-        // let moves = self.game.get_legal_moves();
-        // for m in &moves {
-        //     let piece_code = m.piece.piece_type.to_str();
-        //     let color_code = m.piece.color.to_str();
-        //     let promo_part = match m.promotion {
-        //         Some(p) => format!(" promo={}", p.to_str()),
-        //         None => String::new(),
-        //     };
-        //     let line = format!(
-        //         "{}{}: ({},{}) -> ({},{}){}",
-        //         color_code, piece_code, m.from.x, m.from.y, m.to.x, m.to.y, promo_part,
-        //     );
-        //     web_sys::console::debug_1(&JsValue::from(line));
-        // }
+        // Snapshot TT stats *before* starting the timed search so logs reflect the
+        // state at the beginning of the move.
+        let pre_stats = crate::search::get_current_tt_stats();
 
-        // #[cfg(target_arch = "wasm32")]
-        // {
-        //     use crate::log;
-        //     let variant = self
-        //         .game
-        //         .variant
-        //         .map_or("unknown".to_string(), |v| format!("{:?}", v));
-        //     if let Some(clock) = self.clock {
-        //         let side = match self.game.turn {
-        //             PlayerColor::White => "w",
-        //             PlayerColor::Black => "b",
-        //             PlayerColor::Neutral => "n",
-        //         };
-        //         log(&format!(
-        //             "info timealloc side {} wtime {} btime {} winc {} binc {} limit {} variant {}",
-        //             side,
-        //             clock.wtime,
-        //             clock.btime,
-        //             clock.winc,
-        //             clock.binc,
-        //             effective_limit,
-        //             variant
-        //         ));
-        //     } else {
-        //         log(&format!(
-        //             "info timealloc no_clock requested_limit {} effective_limit {} variant {}",
-        //             time_limit_ms, effective_limit, variant
-        //         ));
-        //     }
-        // }
-        if let Some((best_move, eval)) =
-            search::get_best_move_timed_with_eval(&mut self.game, 50, effective_limit, true)
+        #[cfg(target_arch = "wasm32")]
         {
+            if !silent {
+                use crate::log;
+                let variant = self
+                    .game
+                    .variant
+                    .map_or("unknown".to_string(), |v| format!("{:?}", v));
+
+                let tt_cap = pre_stats.tt_capacity;
+                let tt_used = pre_stats.tt_used;
+                let tt_fill = pre_stats.tt_fill_permille;
+
+                if let Some(clock) = self.clock {
+                    let side = match self.game.turn {
+                        PlayerColor::White => "w",
+                        PlayerColor::Black => "b",
+                        PlayerColor::Neutral => "n",
+                    };
+                    log(&format!(
+                        "info timealloc side {} wtime {} btime {} winc {} binc {} limit {} variant {} tt_cap {} tt_used {} tt_fill {}",
+                        side,
+                        clock.wtime,
+                        clock.btime,
+                        clock.winc,
+                        clock.binc,
+                        effective_limit,
+                        variant,
+                        tt_cap,
+                        tt_used,
+                        tt_fill,
+                    ));
+                } else {
+                    log(&format!(
+                        "info timealloc no_clock requested_limit {} effective_limit {} variant {} tt_cap {} tt_used {} tt_fill {}",
+                        time_limit_ms,
+                        effective_limit,
+                        variant,
+                        tt_cap,
+                        tt_used,
+                        tt_fill,
+                    ));
+                }
+            }
+        }
+
+        if let Some((best_move, eval, _stats)) = search::get_best_move(
+            &mut self.game,
+            50,
+            effective_limit,
+            silent,
+        ) {
             let js_move = JsMoveWithEval {
                 from: format!("{},{}", best_move.from.x, best_move.from.y),
                 to: format!("{},{}", best_move.to.x, best_move.to.y),

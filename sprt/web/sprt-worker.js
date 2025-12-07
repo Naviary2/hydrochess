@@ -468,7 +468,7 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
             }
         }
 
-        const move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs);
+        const move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true);
         engine.free();
         if (haveClocks) {
             const elapsed = Math.max(0, Math.round(nowMs() - startMs));
