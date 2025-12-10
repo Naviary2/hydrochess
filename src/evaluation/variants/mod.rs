@@ -6,7 +6,8 @@
 pub mod chess;
 pub mod confined_classical;
 pub mod obstocean;
+pub mod palace;
+pub mod pawn_horde;
 
 // Future variants can be added here:
-// pub mod pawn_horde;
 // pub mod space;

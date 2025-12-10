@@ -83,6 +83,12 @@ pub struct GameState {
     pub white_piece_count: u16,
     #[serde(skip)]
     pub black_piece_count: u16,
+    /// Starting piece counts (non-pawn) for game phase calculation
+    /// Set once when game is initialized, never changes
+    #[serde(skip)]
+    pub starting_white_pieces: u16,
+    #[serde(skip)]
+    pub starting_black_pieces: u16,
     /// Piece coordinates per color for fast iteration (avoid scanning full HashMap)
     #[serde(skip)]
     pub white_pieces: Vec<(i64, i64)>,
@@ -153,6 +159,8 @@ impl GameState {
             null_moves: 0,
             white_piece_count: 0,
             black_piece_count: 0,
+            starting_white_pieces: 0,
+            starting_black_pieces: 0,
             white_pieces: Vec::new(),
             black_pieces: Vec::new(),
             spatial_indices: SpatialIndices::default(),
@@ -180,6 +188,8 @@ impl GameState {
             null_moves: 0,
             white_piece_count: 0,
             black_piece_count: 0,
+            starting_white_pieces: 0,
+            starting_black_pieces: 0,
             white_pieces: Vec::new(),
             black_pieces: Vec::new(),
             spatial_indices: SpatialIndices::default(),
@@ -248,6 +258,25 @@ impl GameState {
                 self.starting_squares.insert(Coordinate::new(*x, *y));
             }
         }
+    }
+
+    /// Initialize starting piece counts for game phase calculation.
+    /// Should be called once when the game is created before move history replay.
+    /// Counts non-pawn pieces (since pawns don't contribute to game phase).
+    pub fn init_starting_piece_counts(&mut self) {
+        let mut white: u16 = 0;
+        let mut black: u16 = 0;
+        for piece in self.board.pieces.values() {
+            if piece.piece_type() != PieceType::Pawn && piece.color() != PlayerColor::Neutral {
+                match piece.color() {
+                    PlayerColor::White => white += 1,
+                    PlayerColor::Black => black += 1,
+                    PlayerColor::Neutral => {}
+                }
+            }
+        }
+        self.starting_white_pieces = white;
+        self.starting_black_pieces = black;
     }
 
     #[inline]

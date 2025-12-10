@@ -350,6 +350,8 @@ impl Engine {
             null_moves: 0,
             white_piece_count: 0,
             black_piece_count: 0,
+            starting_white_pieces: 0,
+            starting_black_pieces: 0,
             white_pieces: Vec::new(),
             black_pieces: Vec::new(),
             spatial_indices: SpatialIndices::default(),
@@ -362,8 +364,9 @@ impl Engine {
 
         game.material_score = calculate_initial_material(&game.board);
         game.recompute_piece_counts(); // Rebuild piece lists and counts
-                                       // Initialize development starting squares from the initial board
-                                       // before replaying move history.
+        game.init_starting_piece_counts(); // Cache starting non-pawn piece counts for phase detection
+                                           // Initialize development starting squares from the initial board
+                                           // before replaying move history.
         game.init_starting_squares();
         game.recompute_hash(); // Compute initial hash from position
 

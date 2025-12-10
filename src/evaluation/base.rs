@@ -145,9 +145,8 @@ const FAR_BISHOP_PENALTY: i32 = 2;
 const FAR_ROOK_PENALTY: i32 = 2;
 const PIECE_CLOUD_CHEB_RADIUS: i64 = 16;
 const PIECE_CLOUD_CHEB_MAX_EXCESS: i64 = 64;
-const QUEEN_CLOUD_PENALTY: i32 = 1;
-const ROOK_CLOUD_PENALTY: i32 = 1;
-const BISHOP_CLOUD_PENALTY: i32 = 1;
+// Cloud penalty now scaled by piece value
+const CLOUD_PENALTY_PER_100_VALUE: i32 = 1; // 1cp penalty per 100 piece value per excess square
 
 // Pawn structure
 const DOUBLED_PAWN_PENALTY: i32 = 8;
@@ -167,16 +166,65 @@ const CHANCELLOR_ROOK_SCALE: i32 = 90; // 90% of rook eval
 const ARCHBISHOP_BISHOP_SCALE: i32 = 90; // 90% of bishop eval
 const AMAZON_ROOK_SCALE: i32 = 50; // 50% of rook eval (also has queen)
 const AMAZON_QUEEN_SCALE: i32 = 70; // 70% of queen eval
+const CENTAUR_KNIGHT_SCALE: i32 = 80; // 80% of knight eval
+const CENTAUR_GUARD_SCALE: i32 = 50; // 50% of guard/leaper eval
 
 // Knightrider specific
 const KNIGHTRIDER_RAY_BONUS: i32 = 3; // Per square of knight-ray mobility
 
 // ==================== Pawn Distance Scaling ====================
 
-// Pawns far from promotion are worth less
-const PAWN_FULL_VALUE_THRESHOLD: i64 = 8; // Within 8 ranks = full value
-const PAWN_DISTANCE_PENALTY_PER_RANK: i32 = 5; // -5cp per rank beyond threshold
-// const PAWN_MIN_VALUE_FRACTION: i32 = 40; // Never penalize below 40% of base (40cp)
+// Pawns far from promotion are worth much less in infinite chess
+const PAWN_FULL_VALUE_THRESHOLD: i64 = 6; // Within 6 ranks = full value
+const PAWN_PAST_PROMO_PENALTY: i32 = 80; // Massive penalty for pawns that can't promote
+const PAWN_FAR_FROM_PROMO_PENALTY: i32 = 50; // Flat penalty for back pawns (no benefit from advancing)
+
+// ==================== King Infinite Exposure ====================
+
+// ==================== Development ====================
+
+// Minimum starting square penalty for minors
+const MIN_DEVELOPMENT_PENALTY: i32 = 6; // Moderate - not too aggressive
+
+// King exposure: penalize kings with too many open directions
+const KING_OPEN_DIRECTION_THRESHOLD: i32 = 4;
+const KING_EXPOSURE_PENALTY_PER_DIR: i32 = 8;
+
+// King defender bonuses/penalties
+// Low-value pieces near own king = good (defense)
+// High-value pieces near own king = bad (should be attacking)
+const KING_DEFENDER_VALUE_THRESHOLD: i32 = 400; // Pieces below this value are defensive
+const KING_DEFENDER_BONUS: i32 = 6; // Reduced - prefer center activity over defensive huddle
+const KING_ATTACKER_NEAR_OWN_KING_PENALTY: i32 = 8; // Penalty for high-value pieces near own king
+
+// ==================== Game Phase ====================
+
+// Phase based on piece count (excluding pawns)
+// Opening: >= 70% of pieces remain -> no pawn advancement bonus, development focus
+// Middlegame: 30-70% of pieces remain -> partial pawn advancement bonus
+// Endgame: < 30% of pieces remain -> full pawn evaluation
+const ENDGAME_PIECE_THRESHOLD: i32 = 30; // Less than 30% = endgame
+const MIDDLEGAME_PIECE_THRESHOLD: i32 = 70; // More than 70% = opening
+
+// Development thresholds - for attack scaling only
+const UNDEVELOPED_MINORS_THRESHOLD: i32 = 2;
+const DEVELOPMENT_PHASE_ATTACK_SCALE: i32 = 50;
+const DEVELOPED_PHASE_ATTACK_SCALE: i32 = 100;
+
+/// Returns game phase as percentage (100 = opening, 0 = pure endgame)
+/// Uses cached piece counts for O(1) performance
+#[inline]
+fn calculate_game_phase(game: &GameState) -> i32 {
+    // Use the cached counts from GameState (set at game start, updated by make/undo)
+    let current_pieces = (game.white_piece_count + game.black_piece_count) as i32;
+    let starting_pieces = (game.starting_white_pieces + game.starting_black_pieces) as i32;
+
+    if starting_pieces == 0 {
+        return 50; // Default to middlegame
+    }
+
+    ((current_pieces * 100) / starting_pieces).min(100)
+}
 
 /// Compute the centroid of all non-obstacle, non-void pieces on the board.
 /// Used for piece cloud calculations. (Made public for variant modules.)
@@ -186,7 +234,10 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     let mut count: i64 = 0;
 
     for ((x, y), piece) in &board.pieces {
-        if piece.piece_type() != PieceType::Void && piece.piece_type() != PieceType::Obstacle {
+        if piece.piece_type() != PieceType::Void
+            && piece.piece_type() != PieceType::Obstacle
+            && piece.piece_type() != PieceType::Pawn
+        {
             sum_x += *x;
             sum_y += *y;
             count += 1;
@@ -221,8 +272,15 @@ pub fn evaluate(game: &GameState) -> i32 {
     let white_only_king = is_lone_king(&game.board, PlayerColor::White);
     let black_only_king = is_lone_king(&game.board, PlayerColor::Black);
 
-    // Handle lone king endgames - also works when one side has no king (practice positions)
-    if black_only_king && black_king.is_some() {
+    // Check if attacking side has promotable pawns - if so, prioritize promotion over mating net
+    let white_has_promotable_pawn =
+        has_promotable_pawn(&game.board, PlayerColor::White, game.white_promo_rank);
+    let black_has_promotable_pawn =
+        has_promotable_pawn(&game.board, PlayerColor::Black, game.black_promo_rank);
+
+    // Handle lone king endgames - but NOT if attacker has a promotable pawn
+    // (prioritize pawn promotion over building mating net)
+    if black_only_king && black_king.is_some() && !white_has_promotable_pawn {
         let our_king = white_king
             .as_ref()
             .cloned()
@@ -233,7 +291,7 @@ pub fn evaluate(game: &GameState) -> i32 {
             black_king.as_ref().unwrap(),
             PlayerColor::White,
         );
-    } else if white_only_king && white_king.is_some() {
+    } else if white_only_king && white_king.is_some() && !black_has_promotable_pawn {
         let our_king = black_king
             .as_ref()
             .cloned()
@@ -261,6 +319,25 @@ pub fn evaluate(game: &GameState) -> i32 {
 
 // ==================== Piece Evaluation ====================
 
+/// Count undeveloped minor pieces (knights/bishops) for a color
+fn count_undeveloped_minors(game: &GameState, color: PlayerColor) -> i32 {
+    let mut count = 0;
+    for ((x, y), piece) in &game.board.pieces {
+        if piece.color() != color {
+            continue;
+        }
+        match piece.piece_type() {
+            PieceType::Knight | PieceType::Bishop => {
+                if game.starting_squares.contains(&Coordinate::new(*x, *y)) {
+                    count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
 pub fn evaluate_pieces(
     game: &GameState,
     white_king: &Option<Coordinate>,
@@ -272,6 +349,26 @@ pub fn evaluate_pieces(
     // let black_back_rank = game.black_back_rank;
     let white_promo_rank = game.white_promo_rank;
     let black_promo_rank = game.black_promo_rank;
+
+    // Calculate GAME PHASE based on piece count (not pawns)
+    // 100 = opening (full pieces), 0 = pure endgame
+    let game_phase = calculate_game_phase(game);
+    let is_opening = game_phase >= MIDDLEGAME_PIECE_THRESHOLD; // >= 70%
+    let is_endgame = game_phase < ENDGAME_PIECE_THRESHOLD; // < 30%
+
+    // Determine development status for attack scaling
+    let white_undeveloped = count_undeveloped_minors(game, PlayerColor::White);
+    let black_undeveloped = count_undeveloped_minors(game, PlayerColor::Black);
+    let white_attack_scale = if white_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
+        DEVELOPMENT_PHASE_ATTACK_SCALE
+    } else {
+        DEVELOPED_PHASE_ATTACK_SCALE
+    };
+    let black_attack_scale = if black_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
+        DEVELOPMENT_PHASE_ATTACK_SCALE
+    } else {
+        DEVELOPED_PHASE_ATTACK_SCALE
+    };
 
     let mut white_bishops = 0;
     let mut black_bishops = 0;
@@ -303,31 +400,110 @@ pub fn evaluate_pieces(
                 evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king)
             }
             PieceType::Pawn => {
-                evaluate_pawn_position(*x, *y, piece.color(), white_promo_rank, black_promo_rank)
+                // Phase-based pawn evaluation:
+                // Opening: NO advancement bonus, only central pawn preference
+                // Middlegame: Partial advancement bonus
+                // Endgame: Full pawn evaluation
+                let pawn_eval = evaluate_pawn_position(
+                    *x,
+                    *y,
+                    piece.color(),
+                    white_promo_rank,
+                    black_promo_rank,
+                );
+
+                if is_opening {
+                    // In opening: only value central pawns, no advancement bonus
+                    // The central pawn bonus is applied in evaluate_pawn_position
+                    // Just check if pawn is central
+                    if *x >= 3 && *x <= 6 {
+                        5 // Small bonus for central pawns only
+                    } else {
+                        0 // Side pawns get NO value in opening
+                    }
+                } else if is_endgame {
+                    pawn_eval // Full pawn value in endgame
+                } else {
+                    // Middlegame: scale pawn eval by phase
+                    // phase 70 -> 0%, phase 30 -> 100%
+                    let scale = 100
+                        - ((game_phase - ENDGAME_PIECE_THRESHOLD) * 100
+                            / (MIDDLEGAME_PIECE_THRESHOLD - ENDGAME_PIECE_THRESHOLD));
+                    pawn_eval * scale / 100
+                }
             }
 
             // ===== Fairy Pieces =====
 
-            // Chancellor (R+N): Inherit rook logic scaled
+            // Chancellor (R+N): High-value attacking piece
+            // Uses rook eval for slider attacks, plus bonus for being near enemy king
+            // Does NOT get knight defensive bonus - should be attacking!
             PieceType::Chancellor => {
                 let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
-                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
-                (rook_eval * CHANCELLOR_ROOK_SCALE / 100) + (knight_eval / 2)
+                // Only enemy king tropism, no defensive bonus
+                let enemy_king = if piece.color() == PlayerColor::White {
+                    black_king
+                } else {
+                    white_king
+                };
+                let mut attack_bonus = 0;
+                if let Some(ek) = enemy_king {
+                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
+                    if dist <= 4 {
+                        attack_bonus = 15; // Near enemy king = fork potential
+                    } else if dist <= 8 {
+                        attack_bonus = 8;
+                    }
+                }
+                (rook_eval * CHANCELLOR_ROOK_SCALE / 100) + attack_bonus
             }
 
-            // Archbishop (B+N): Inherit bishop logic scaled
+            // Archbishop (B+N): High-value attacking piece
+            // Uses bishop eval for slider attacks, plus bonus for being near enemy king
             PieceType::Archbishop => {
                 let bishop_eval =
                     evaluate_bishop(game, *x, *y, piece.color(), white_king, black_king);
-                let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
-                (bishop_eval * ARCHBISHOP_BISHOP_SCALE / 100) + (knight_eval / 2)
+                let enemy_king = if piece.color() == PlayerColor::White {
+                    black_king
+                } else {
+                    white_king
+                };
+                let mut attack_bonus = 0;
+                if let Some(ek) = enemy_king {
+                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
+                    if dist <= 4 {
+                        attack_bonus = 15;
+                    } else if dist <= 8 {
+                        attack_bonus = 8;
+                    }
+                }
+                (bishop_eval * ARCHBISHOP_BISHOP_SCALE / 100) + attack_bonus
             }
 
-            // Amazon (Q+N): Inherit both queen and rook logic
+            // Amazon (Q+N): Highest value attacking piece
+            // Only attacking bonuses, no defensive knight logic
             PieceType::Amazon => {
-                let queen_eval = evaluate_queen(game, *x, *y, piece.color(), white_king, black_king);
+                let queen_eval =
+                    evaluate_queen(game, *x, *y, piece.color(), white_king, black_king);
                 let rook_eval = evaluate_rook(game, *x, *y, piece.color(), white_king, black_king);
-                (queen_eval * AMAZON_QUEEN_SCALE / 100) + (rook_eval * AMAZON_ROOK_SCALE / 100)
+                // Extra bonus for being near enemy king (massive fork potential)
+                let enemy_king = if piece.color() == PlayerColor::White {
+                    black_king
+                } else {
+                    white_king
+                };
+                let mut attack_bonus = 0;
+                if let Some(ek) = enemy_king {
+                    let dist = (*x - ek.x).abs() + (*y - ek.y).abs();
+                    if dist <= 4 {
+                        attack_bonus = 20;
+                    } else if dist <= 8 {
+                        attack_bonus = 10;
+                    }
+                }
+                (queen_eval * AMAZON_QUEEN_SCALE / 100)
+                    + (rook_eval * AMAZON_ROOK_SCALE / 100)
+                    + attack_bonus
             }
 
             // RoyalQueen: Same as queen
@@ -355,7 +531,7 @@ pub fn evaluate_pieces(
                 get_piece_value(piece.piece_type()),
             ),
 
-            // Centaur / RoyalCentaur: Knight + King movement, use knight eval + leaper positioning
+            // Centaur / RoyalCentaur: Knight + Guard components
             PieceType::Centaur | PieceType::RoyalCentaur => {
                 let knight_eval = evaluate_knight(*x, *y, piece.color(), black_king, white_king);
                 let leaper_eval = evaluate_leaper_positioning(
@@ -367,7 +543,8 @@ pub fn evaluate_pieces(
                     cloud_center.as_ref(),
                     get_piece_value(piece.piece_type()),
                 );
-                (knight_eval * 80 / 100) + leaper_eval
+                (knight_eval * CENTAUR_KNIGHT_SCALE / 100)
+                    + (leaper_eval * CENTAUR_GUARD_SCALE / 100)
             }
 
             // Huygen: Prime-distance slider, use tropism
@@ -396,33 +573,85 @@ pub fn evaluate_pieces(
         };
 
         // Cloud penalty: pieces too far from piece centroid
+        // Scale by piece value - high value pieces far from action are worse
         if let Some(center) = &cloud_center {
             let cheb = (*x - center.x).abs().max((*y - center.y).abs());
-            if cheb > PIECE_CLOUD_CHEB_RADIUS {
-                let excess =
-                    (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
-                let penalty = match piece.piece_type() {
-                    PieceType::Queen | PieceType::RoyalQueen => QUEEN_CLOUD_PENALTY,
-                    PieceType::Rook | PieceType::Chancellor | PieceType::Amazon => {
-                        ROOK_CLOUD_PENALTY
-                    }
-                    PieceType::Bishop | PieceType::Archbishop => BISHOP_CLOUD_PENALTY,
-                    _ => 0,
-                };
-                piece_score -= excess * penalty;
+
+            if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                if cheb > PIECE_CLOUD_CHEB_RADIUS {
+                    // Far from action - penalty scaled by piece value
+                    let piece_val = get_piece_value(piece.piece_type());
+                    let value_factor = (piece_val / 100).max(1);
+                    let excess =
+                        (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
+                    let penalty = excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
+                    piece_score -= penalty;
+                }
             }
         }
 
-        // Development penalty: only penalize non-pawn, non-royal pieces that
-        // have never left their original starting square. This encourages
-        // getting pieces out at least once, without over-penalizing pieces
-        // that operate from the back rank later.
+        // Starting square penalty: encourage developing minors early
+        // Rooks and queens are exempt - they develop later (rooks via castling, queens after minors)
         if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
             if game.starting_squares.contains(&Coordinate::new(*x, *y)) {
-                let base_val = get_piece_value(piece.piece_type()).max(0);
-                let penalty = base_val / 100;
+                // Only minors should be penalized for not developing
+                let penalty = match piece.piece_type() {
+                    PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
+                    // Rooks develop via castling or when files open - no starting square penalty
+                    PieceType::Rook | PieceType::Queen => 0,
+                    // Fairy pieces with knight or bishop component should develop
+                    PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
+                    // Others exempt (they're handled by cloud penalty if too far)
+                    _ => 0,
+                };
                 piece_score -= penalty;
             }
+        }
+
+        // King defender logic: low-value pieces near own king = good, high-value = bad
+        let own_king = if piece.color() == PlayerColor::White {
+            &white_king
+        } else {
+            &black_king
+        };
+        if let Some(ok) = own_king {
+            if !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn {
+                let dist = (*x - ok.x).abs().max((*y - ok.y).abs()); // Chebyshev distance
+                let piece_val = get_piece_value(piece.piece_type());
+
+                if dist <= 3 {
+                    // Near own king
+                    if piece_val < KING_DEFENDER_VALUE_THRESHOLD {
+                        // Low-value piece = defensive, good
+                        piece_score += KING_DEFENDER_BONUS;
+                    } else {
+                        // High-value piece = should be attacking, not babysitting
+                        piece_score -= KING_ATTACKER_NEAR_OWN_KING_PENALTY;
+                    }
+                }
+            }
+        }
+
+        // Scale attack-focused pieces based on development phase
+        // When undeveloped, reduce attack bonuses to prioritize getting pieces into the game
+        let is_attacking_piece = matches!(
+            piece.piece_type(),
+            PieceType::Rook
+                | PieceType::Queen
+                | PieceType::RoyalQueen
+                | PieceType::Bishop
+                | PieceType::Chancellor
+                | PieceType::Archbishop
+                | PieceType::Amazon
+        );
+        if is_attacking_piece && piece_score > 0 {
+            // Only scale positive eval - we still want penalties to apply fully
+            let attack_scale = if piece.color() == PlayerColor::White {
+                white_attack_scale
+            } else {
+                black_attack_scale
+            };
+            piece_score = piece_score * attack_scale / 100;
         }
 
         if piece.color() == PlayerColor::White {
@@ -578,25 +807,24 @@ pub fn evaluate_queen(
         if same_file || same_rank || same_diag {
             // Reward only if the line is clear between queen and king (direct pressure).
             if is_clear_line_between(&game.board, &from, ek) {
-                // Base line-attack bonus for directly targeting the king.
-                let mut line_bonus: i32 = 30;
-                // Distance sweet spot along the checking line: prefer being around
-                // QUEEN_IDEAL_LINE_DIST squares away from the king rather than too close.
+                // Base line-attack bonus - reduced to avoid queen chasing king too eagerly
+                let mut line_bonus: i32 = 15;
                 let lin_dist = dx.abs().max(dy.abs()) as i32;
                 let max_lin: i32 = 20;
                 let clamped = lin_dist.min(max_lin);
                 let diff = (clamped - QUEEN_IDEAL_LINE_DIST).abs();
-                let base = (max_lin - diff * 2).max(0); // sharp peak around the ideal distance
-                let distance_score = base * KING_TROPISM_BONUS.max(1);
+                let base = (max_lin - diff * 2).max(0);
+                // Reduce the distance score weight
+                let distance_score = base * (KING_TROPISM_BONUS / 2).max(1);
 
                 line_bonus += distance_score;
                 bonus += line_bonus;
 
-                // Extra reward for being "behind" the king relative to color, encouraging deep raids.
+                // Small bonus for being "behind" the king - reduced from 30 to avoid backrank obsession
                 if (color == PlayerColor::White && y > ek.y)
                     || (color == PlayerColor::Black && y < ek.y)
                 {
-                    bonus += 30;
+                    bonus += 10;
                 }
             }
         }
@@ -797,32 +1025,37 @@ pub fn evaluate_pawn_position(
 ) -> i32 {
     let mut bonus: i32 = 0;
 
-    // Advancement bonus - more advanced pawns (closer to promotion) are better.
-    // Compute progress relative to the promotion rank so we don't assume a
-    // uniform starting rank across variants.
+    // Advancement bonus and distance penalty based on distance to promotion.
+    // In infinite chess, back pawns are nearly worthless - they take many
+    // tempos to promote and don't contribute to the position.
     match color {
         PlayerColor::White => {
             let dist = (white_promo_rank - y).max(0);
-            // Advancement bonus (within 8 ranks)
-            bonus += ((8 - dist.min(8)) as i32) * 3;
 
-            // Distance penalty for pawns far from promotion (beyond 8 ranks)
-            if dist > PAWN_FULL_VALUE_THRESHOLD {
-                let extra_dist = (dist - PAWN_FULL_VALUE_THRESHOLD) as i32;
-                let penalty = (extra_dist * PAWN_DISTANCE_PENALTY_PER_RANK).min(60);
-                bonus -= penalty;
+            // Check if pawn is PAST promotion rank (can't promote - worthless!)
+            if y > white_promo_rank {
+                bonus -= PAWN_PAST_PROMO_PENALTY;
+            } else if dist > PAWN_FULL_VALUE_THRESHOLD {
+                // Far from promotion - flat penalty, NO benefit from advancing
+                // This prevents the engine from wasting tempos pushing back pawns
+                bonus -= PAWN_FAR_FROM_PROMO_PENALTY;
+            } else {
+                // Close to promotion - advancement bonus applies
+                bonus += ((PAWN_FULL_VALUE_THRESHOLD - dist) as i32) * 4;
             }
         }
         PlayerColor::Black => {
             let dist = (y - black_promo_rank).max(0);
-            // Advancement bonus (within 8 ranks)
-            bonus += ((8 - dist.min(8)) as i32) * 3;
 
-            // Distance penalty for pawns far from promotion (beyond 8 ranks)
-            if dist > PAWN_FULL_VALUE_THRESHOLD {
-                let extra_dist = (dist - PAWN_FULL_VALUE_THRESHOLD) as i32;
-                let penalty = (extra_dist * PAWN_DISTANCE_PENALTY_PER_RANK).min(60);
-                bonus -= penalty;
+            // Past promotion rank check
+            if y < black_promo_rank {
+                bonus -= PAWN_PAST_PROMO_PENALTY;
+            } else if dist > PAWN_FULL_VALUE_THRESHOLD {
+                // Far from promotion - flat penalty, NO benefit from advancing
+                bonus -= PAWN_FAR_FROM_PROMO_PENALTY;
+            } else {
+                // Close to promotion - advancement bonus
+                bonus += ((PAWN_FULL_VALUE_THRESHOLD - dist) as i32) * 4;
             }
         }
         PlayerColor::Neutral => {}
@@ -1051,11 +1284,11 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
         // King is safely tucked behind its pawn shield.
         safety += KING_PAWN_SHIELD_BONUS;
     } else if !has_pawn_ahead && has_pawn_behind {
-        // King has walked in front of its pawn chain.
         safety -= KING_PAWN_AHEAD_PENALTY;
     }
 
     // 2. Open rays (more open lines = more vulnerable)
+    // Count how many directions have no friendly piece cover
     let directions: &[(i64, i64)] = &[
         (1, 0),
         (-1, 0),
@@ -1066,6 +1299,7 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
         (-1, 1),
         (-1, -1),
     ];
+    let mut open_direction_count = 0;
     for &(dx, dy) in directions {
         let mut cx = king.x;
         let mut cy = king.y;
@@ -1083,9 +1317,17 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             }
         }
         if ray_open {
+            open_direction_count += 1;
             safety -= KING_OPEN_RAY_PENALTY;
             bump_feat!(king_open_ray_penalty, -1);
         }
+    }
+
+    // Extra penalty for kings exposed in too many directions
+    // This makes it dangerous to leave the king unprotected
+    if open_direction_count >= KING_OPEN_DIRECTION_THRESHOLD {
+        let excess = open_direction_count - KING_OPEN_DIRECTION_THRESHOLD;
+        safety -= excess * KING_EXPOSURE_PENALTY_PER_DIR;
     }
 
     // 3. Enemy sliders attacking king zone
@@ -1241,6 +1483,31 @@ pub fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
         }
     }
     true
+}
+
+/// Check if a side has any pawn that can still promote (not past the promotion rank)
+fn has_promotable_pawn(board: &Board, color: PlayerColor, promo_rank: i64) -> bool {
+    for ((_, y), piece) in &board.pieces {
+        if piece.color() != color || piece.piece_type() != PieceType::Pawn {
+            continue;
+        }
+
+        // Check if pawn is on the correct side of promotion rank
+        match color {
+            PlayerColor::White => {
+                if *y < promo_rank {
+                    return true; // Can still advance toward promotion
+                }
+            }
+            PlayerColor::Black => {
+                if *y > promo_rank {
+                    return true;
+                }
+            }
+            PlayerColor::Neutral => {}
+        }
+    }
+    false
 }
 
 // (Your existing evaluate_lone_king_endgame + needs_king_for_mate here; unchanged)

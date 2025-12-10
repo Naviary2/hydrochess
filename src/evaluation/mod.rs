@@ -26,6 +26,8 @@ pub fn evaluate(game: &GameState) -> i32 {
         Some(Variant::Chess) => variants::chess::evaluate(game),
         Some(Variant::ConfinedClassical) => variants::confined_classical::evaluate(game),
         Some(Variant::Obstocean) => variants::obstocean::evaluate(game),
+        Some(Variant::PawnHorde) => variants::pawn_horde::evaluate(game),
+        Some(Variant::Palace) => variants::palace::evaluate(game),
         // Add new variants here as they get custom evaluators
         _ => base::evaluate(game), // Default: use base for all others
     }
