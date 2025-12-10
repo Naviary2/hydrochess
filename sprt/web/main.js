@@ -807,21 +807,12 @@ async function runSprt() {
     sprtStatusEl.textContent = 'Status: running...';
     sprtStatusEl.className = 'sprt-status';
     log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + CONFIG.tcMode + ', TC=' + displayTcString, 'info');
-    sprtLog('SPRT Test Started (random openings, paired games)');
+    sprtLog('SPRT Test Started (noisy opening moves for first 4 ply, paired games)');
 
     const maxConcurrent = Math.max(1, CONFIG.concurrency | 0);
     const workers = [];
     let activeWorkers = 0;
     let nextGameIndex = 0;
-    // Store opening moves for each pair (pairIndex -> opening move)
-    const pairOpenings = new Map();
-
-    function getOpeningForPair(pairIndex) {
-        if (!pairOpenings.has(pairIndex)) {
-            pairOpenings.set(pairIndex, getRandomOpening());
-        }
-        return pairOpenings.get(pairIndex);
-    }
 
     function startWorker(worker, id) {
         const gameIndex = nextGameIndex++;
@@ -833,8 +824,6 @@ async function runSprt() {
 
         // Games run in pairs: each variant appears twice (both colors)
         const pairIndex = Math.floor(gameIndex / 2);
-        // Only use opening moves for Classical variant to avoid errors with custom positions
-        const openingMove = variantName === 'Classical' ? getOpeningForPair(pairIndex) : null;
 
         const tcParams = getTcParams(CONFIG.tcMode, CONFIG.timeControl, pairIndex);
 
@@ -844,7 +833,6 @@ async function runSprt() {
             timePerMove: tcParams.timePerMove,
             maxMoves: maxMovesPerGame,
             newPlaysWhite,
-            openingMove,
             materialThreshold: CONFIG.materialThreshold,
             baseTimeMs: tcParams.baseTimeMs,
             incrementMs: tcParams.incrementMs,

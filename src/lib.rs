@@ -559,6 +559,7 @@ impl Engine {
         time_limit_ms: u32,
         silent: Option<bool>,
         max_depth: Option<usize>,
+        noise_amp: Option<i32>,
     ) -> JsValue {
         let effective_limit = if time_limit_ms == 0 && max_depth.is_some() {
             // If explicit depth is requested with 0 time, treat as infinite time (fixed depth search)
@@ -569,6 +570,19 @@ impl Engine {
         let silent = silent.unwrap_or(false);
         let depth = max_depth.unwrap_or(50).max(1).min(50);
         let strength = self.strength_level.unwrap_or(3).max(1).min(3);
+
+        // Determine effective noise amplitude:
+        // 1. If explicit noise_amp is provided, use it
+        // 2. Otherwise, derive from strength level
+        let effective_noise: i32 = if let Some(amp) = noise_amp {
+            amp.max(0)
+        } else {
+            match strength {
+                1 => 50,
+                2 => 25,
+                _ => 0, // strength 3 = no noise
+            }
+        };
 
         #[allow(unused_variables)]
         let pre_stats = crate::search::get_current_tt_stats();
@@ -620,25 +634,25 @@ impl Engine {
             }
         }
 
-        // Choose search path based on strength level.
-        let (best_move, eval) = if strength == 3 {
-            if let Some((bm, ev, _stats)) =
-                search::get_best_move(&mut self.game, depth, effective_limit, silent)
-            {
+        // Choose search path based on effective noise.
+        let (best_move, eval) = if effective_noise > 0 {
+            // Use noisy search
+            if let Some((bm, ev, _stats)) = search::get_best_move_with_noise(
+                &mut self.game,
+                depth,
+                effective_limit,
+                effective_noise,
+                silent,
+            ) {
                 (bm, ev)
             } else {
                 return JsValue::NULL;
             }
         } else {
-            // Strength 1/2: run full search with deterministic noisy eval.
-            let noise_amp: i32 = if strength == 2 { 25 } else { 50 };
-            if let Some((bm, ev, _stats)) = search::get_best_move_with_noise(
-                &mut self.game,
-                depth,
-                effective_limit,
-                noise_amp,
-                silent,
-            ) {
+            // Normal search (no noise)
+            if let Some((bm, ev, _stats)) =
+                search::get_best_move(&mut self.game, depth, effective_limit, silent)
+            {
                 (bm, ev)
             } else {
                 return JsValue::NULL;

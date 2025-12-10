@@ -326,7 +326,7 @@ async function ensureInit() {
     }
 }
 
-async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth) {
+async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth) {
     const startPosition = getVariantPosition(variantName);
     let position = clonePosition(startPosition);
     const newColor = newPlaysWhite ? 'w' : 'b';
@@ -359,19 +359,6 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
 
     // Initial position before any moves
     recordRepetition();
-
-    // Apply opening move if provided (always white's first move)
-    if (openingMove) {
-        moveLines.push('W: ' + openingMove.from + '>' + openingMove.to);
-        position = applyMove(position, openingMove);
-        moveHistory.push({
-            from: openingMove.from,
-            to: openingMove.to,
-            promotion: openingMove.promotion || null
-        });
-        halfmoveClock = 0;
-        recordRepetition();
-    }
 
     for (let i = 0; i < maxMoves; i++) {
         const sideToMove = position.turn;
@@ -480,7 +467,12 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, openingMove,
             }
         }
 
-        const move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true, maxDepth);
+        // For the first 4 ply (2 moves each side), use a slight noise (+/-5cp)
+        // to create opening variety. After ply 4, use normal search.
+        const currentPly = moveHistory.length;
+        const noiseAmp = currentPly < 4 ? 5 : null;
+
+        const move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true, maxDepth, noiseAmp);
         engine.free();
 
         const elapsed = Math.max(0, Math.round(nowMs() - startMs));
@@ -736,7 +728,6 @@ self.onmessage = async (e) => {
                 msg.timePerMove,
                 msg.maxMoves,
                 msg.newPlaysWhite,
-                msg.openingMove,
                 msg.materialThreshold,
                 msg.baseTimeMs,
                 msg.incrementMs,
