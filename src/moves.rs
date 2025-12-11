@@ -37,12 +37,12 @@ fn generate_knightrider_moves(board: &Board, from: &Coordinate, piece: &Piece) -
         (-2, -1),
     ];
 
-    let piece_count = board.pieces.len();
+    let piece_count = board.len();
     let mut moves = Vec::with_capacity(piece_count * 4);
 
     // Pre-collect piece data once
     let mut pieces_data: Vec<(i64, i64, bool)> = Vec::with_capacity(piece_count);
-    for ((px, py), p) in &board.pieces {
+    for ((px, py), p) in board.iter() {
         let is_enemy = is_enemy_piece(p, piece.color());
         pieces_data.push((*px, *py, is_enemy));
     }
@@ -145,7 +145,7 @@ impl SpatialIndices {
         let mut diag1: HashMap<i64, Vec<i64>> = HashMap::new();
         let mut diag2: HashMap<i64, Vec<i64>> = HashMap::new();
 
-        for ((x, y), _) in &board.pieces {
+        for ((x, y), _) in board.iter() {
             rows.entry(*y).or_default().push(*x);
             cols.entry(*x).or_default().push(*y);
             diag1.entry(x - y).or_default().push(*x);
@@ -309,7 +309,7 @@ pub fn get_legal_moves_into(
             out.extend(piece_moves);
         }
     } else {
-        for ((x, y), piece) in &board.pieces {
+        for ((x, y), piece) in board.iter() {
             if piece.color() != turn || piece.color() == PlayerColor::Neutral {
                 continue;
             }
@@ -405,7 +405,7 @@ pub fn get_quiescence_captures(
             );
         }
     } else {
-        for ((x, y), piece) in &board.pieces {
+        for ((x, y), piece) in board.iter() {
             if piece.color() != turn || piece.color() == PlayerColor::Neutral {
                 continue;
             }
@@ -1564,7 +1564,7 @@ pub fn generate_sliding_moves(
     // Fallback limit for short-range slider moves
     const FALLBACK_LIMIT: i64 = 10;
 
-    let piece_count = board.pieces.len();
+    let piece_count = board.len();
     let mut moves = Vec::with_capacity(piece_count * 4);
     let our_color = piece.color();
 
@@ -1638,7 +1638,7 @@ pub fn generate_sliding_moves(
             }
 
             // Process ALL pieces for interception (needed for tactics)
-            for ((px, py), p) in &board.pieces {
+            for ((px, py), p) in board.iter() {
                 let is_enemy = p.color() != our_color && p.color() != PlayerColor::Neutral;
                 let wiggle = if is_enemy {
                     ENEMY_WIGGLE
@@ -2026,7 +2026,7 @@ fn generate_huygen_moves(
             }
 
             if !found_via_indices {
-                for ((px, py), target_piece) in &board.pieces {
+                for ((px, py), target_piece) in board.iter() {
                     let dx = px - from.x;
                     let dy = py - from.y;
                     let k = if dir_x != 0 {

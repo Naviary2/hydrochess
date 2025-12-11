@@ -308,7 +308,9 @@ impl Piece {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BoardRaw", into = "BoardRaw")]
 pub struct Board {
-    pub pieces: HashMap<(i64, i64), Piece>,
+    // Pure sorted Vec implementation
+    // We keep 'pieces_vec' private to enforce sorted invariant
+    pieces: Vec<((i64, i64), Piece)>,
     #[serde(skip)]
     pub active_coords: Option<HashSet<(i64, i64)>>,
 }
@@ -325,6 +327,7 @@ impl From<BoardRaw> for Board {
             .pieces
             .values()
             .any(|p| p.piece_type().is_neutral_type());
+
         let active_coords = if has_neutral {
             let mut set = HashSet::new();
             for (pos, piece) in &raw.pieces {
@@ -337,8 +340,11 @@ impl From<BoardRaw> for Board {
             None
         };
 
+        let mut v: Vec<_> = raw.pieces.into_iter().collect();
+        v.sort_by_key(|(k, _)| *k);
+
         Board {
-            pieces: raw.pieces,
+            pieces: v,
             active_coords,
         }
     }
@@ -347,26 +353,63 @@ impl From<BoardRaw> for Board {
 impl From<Board> for BoardRaw {
     fn from(board: Board) -> Self {
         BoardRaw {
-            pieces: board.pieces,
+            pieces: board.pieces.into_iter().collect(),
         }
     }
 }
 
+pub struct BoardIter<'a> {
+    iter: std::slice::Iter<'a, ((i64, i64), Piece)>,
+}
+
+impl<'a> Iterator for BoardIter<'a> {
+    type Item = (&'a (i64, i64), &'a Piece);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|(k, v)| (k, v))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl ExactSizeIterator for BoardIter<'_> {}
+
 impl Board {
     pub fn new() -> Self {
         Board {
-            pieces: HashMap::new(),
+            pieces: Vec::new(),
             active_coords: None,
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.pieces.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    pub fn iter(&self) -> BoardIter<'_> {
+        BoardIter {
+            iter: self.pieces.iter(),
         }
     }
 
     pub fn set_piece(&mut self, x: i64, y: i64, piece: Piece) {
         let pos = (x, y);
 
-        // If we find a neutral piece and we aren't already tracking active coords, start tracking
+        // Active coords tracking
         if piece.piece_type().is_neutral_type() && self.active_coords.is_none() {
+            // Need to initialize active_coords by scanning current pieces
             let mut set = HashSet::new();
-            for (p_pos, p) in &self.pieces {
+            for (p_pos, p) in self.iter() {
                 if !p.piece_type().is_neutral_type() {
                     set.insert(*p_pos);
                 }
@@ -374,7 +417,14 @@ impl Board {
             self.active_coords = Some(set);
         }
 
-        self.pieces.insert(pos, piece);
+        match self.pieces.binary_search_by_key(&pos, |(p, _)| *p) {
+            Ok(index) => {
+                self.pieces[index].1 = piece;
+            }
+            Err(index) => {
+                self.pieces.insert(index, (pos, piece));
+            }
+        }
 
         if let Some(ref mut active) = self.active_coords {
             if !piece.piece_type().is_neutral_type() {
@@ -385,20 +435,36 @@ impl Board {
         }
     }
 
+    #[inline]
     pub fn get_piece(&self, x: &i64, y: &i64) -> Option<&Piece> {
-        self.pieces.get(&(*x, *y))
+        let pos = (*x, *y);
+        self.pieces
+            .binary_search_by_key(&pos, |(p, _)| *p)
+            .ok()
+            .map(|i| &self.pieces[i].1)
     }
 
     pub fn remove_piece(&mut self, x: &i64, y: &i64) -> Option<Piece> {
-        let p = self.pieces.remove(&(*x, *y));
-        if let Some(ref piece) = p {
+        let pos = (*x, *y);
+        let removed = if let Ok(index) = self.pieces.binary_search_by_key(&pos, |(p, _)| *p) {
+            Some(self.pieces.remove(index).1)
+        } else {
+            None
+        };
+
+        if let Some(ref piece) = removed {
             if let Some(ref mut active) = self.active_coords {
                 if !piece.piece_type().is_neutral_type() {
                     active.remove(&(*x, *y));
                 }
             }
         }
-        p
+        removed
+    }
+
+    pub fn clear(&mut self) {
+        self.pieces.clear();
+        self.active_coords = None;
     }
 }
 

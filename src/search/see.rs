@@ -22,7 +22,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
 
     // For very large boards (> SEE_MAX_PIECES), use approximate SEE
     // based on simple MVV-LVA rather than full exchange sequence
-    if game.board.pieces.len() > SEE_MAX_PIECES {
+    if game.board.len() > SEE_MAX_PIECES {
         let victim_val = get_piece_value(captured.piece_type());
         let attacker_val = get_piece_value(m.piece.piece_type());
         // Simple approximation: gain if victim > attacker, otherwise assume even exchange
@@ -44,7 +44,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
 
     // Build piece list from the board HashMap - now stack-allocated
     let mut pieces: ArrayVec<PieceInfo, SEE_MAX_PIECES> = ArrayVec::new();
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         pieces.push(PieceInfo {
             x: *x,
             y: *y,

@@ -98,7 +98,7 @@ fn evaluate_pieces_confined(
     let mut white_queen_out = false;
     let mut black_queen_out = false;
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() == PlayerColor::Neutral {
             continue;
         }
@@ -342,7 +342,7 @@ fn evaluate_development_confined(game: &GameState) -> i32 {
     let mut white_back_obstacles = 0;
     let mut black_back_obstacles = 0;
 
-    for ((_, y), piece) in &game.board.pieces {
+    for ((_, y), piece) in game.board.iter() {
         if piece.piece_type() == PieceType::Obstacle {
             if *y == 0 {
                 white_back_obstacles += 1;

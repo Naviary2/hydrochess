@@ -1243,7 +1243,7 @@ fn negamax(
         // Null Move Pruning
         if allow_null && depth >= nmp_min_depth() && static_eval >= beta {
             // Check if we have non-pawn material (avoid zugzwang)
-            let has_pieces = game.board.pieces.iter().any(|(_, p)| {
+            let has_pieces = game.board.iter().any(|(_, p)| {
                 p.color() == game.turn
                     && p.piece_type() != PieceType::Pawn
                     && p.piece_type() != PieceType::King

@@ -103,7 +103,7 @@ fn setup_classical_start_position() -> GameState {
 
     // Set material score to the sum of piece values (white minus black)
     let mut score = 0;
-    for (_, piece) in &game.board.pieces {
+    for (_, piece) in game.board.iter() {
         let val = hydrochess_wasm::evaluation::get_piece_value(piece.piece_type());
         match piece.color() {
             PlayerColor::White => score += val,

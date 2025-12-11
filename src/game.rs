@@ -249,7 +249,7 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 // Track king positions (any royal piece)
                 if piece.piece_type().is_royal() {
                     if piece.color() == PlayerColor::White {
@@ -283,7 +283,7 @@ impl GameState {
     /// from an initial position before replaying move history.
     pub fn init_starting_squares(&mut self) {
         self.starting_squares.clear();
-        for ((x, y), piece) in &self.board.pieces {
+        for ((x, y), piece) in self.board.iter() {
             if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
                 self.starting_squares.insert(Coordinate::new(*x, *y));
             }
@@ -296,7 +296,7 @@ impl GameState {
     pub fn init_starting_piece_counts(&mut self) {
         let mut white: u16 = 0;
         let mut black: u16 = 0;
-        for piece in self.board.pieces.values() {
+        for (_, piece) in self.board.iter() {
             if piece.piece_type() != PieceType::Pawn && piece.color() != PlayerColor::Neutral {
                 match piece.color() {
                     PlayerColor::White => white += 1,
@@ -379,7 +379,7 @@ impl GameState {
                 }
             }
         } else {
-            for (_, piece) in &self.board.pieces {
+            for (_, piece) in self.board.iter() {
                 if piece.piece_type() != PieceType::King {
                     if piece.color() == PlayerColor::White {
                         white_has_non_king = true;
@@ -463,7 +463,7 @@ impl GameState {
                 h ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
@@ -560,7 +560,7 @@ impl GameState {
                 }
             }
         } else {
-            for (_, piece) in &self.board.pieces {
+            for (_, piece) in self.board.iter() {
                 if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
@@ -597,7 +597,7 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 if piece.color() == our_color && piece.piece_type().is_royal() {
                     if royal_pos.is_some() {
                         self.get_legal_moves_into(out);
@@ -859,7 +859,7 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 if piece.color() != our_color {
                     continue;
                 }
@@ -1004,7 +1004,7 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 if piece.color() == moved_color && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, self.turn, indices) {
@@ -1065,7 +1065,7 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in &self.board.pieces {
+            for ((x, y), piece) in self.board.iter() {
                 if piece.color() == self.turn && piece.piece_type().is_royal() {
                     let pos = Coordinate::new(*x, *y);
                     if is_square_attacked(&self.board, &pos, attacker_color, indices) {

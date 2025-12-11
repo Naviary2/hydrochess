@@ -46,7 +46,7 @@ pub fn evaluate(game: &GameState) -> i32 {
     let mut white_targets: Vec<Coordinate> = Vec::new();
     let mut black_targets: Vec<Coordinate> = Vec::new();
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         let coord = Coordinate::new(*x, *y);
         if piece.color() == PlayerColor::White {
             white_targets.push(coord);

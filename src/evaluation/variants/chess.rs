@@ -157,7 +157,7 @@ fn on_board(x: i64, y: i64) -> bool {
 /// Calculate game phase (24 = full pieces = middlegame, 0 = endgame)
 fn get_phase(game: &GameState) -> i32 {
     let mut phase = 0;
-    for (_, piece) in &game.board.pieces {
+    for (_, piece) in game.board.iter() {
         match piece.piece_type() {
             PieceType::Knight | PieceType::Bishop => phase += 1,
             PieceType::Rook => phase += 2,
@@ -185,7 +185,7 @@ pub fn evaluate(game: &GameState) -> i32 {
     let mut black_king_pos = (5i64, 8i64);
 
     // Main piece loop
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() == PlayerColor::Neutral || !on_board(*x, *y) {
             continue;
         }

@@ -81,7 +81,7 @@ fn evaluate_pieces_obstocean(
     let mut white_bishop_colors: (bool, bool) = (false, false);
     let mut black_bishop_colors: (bool, bool) = (false, false);
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() == PlayerColor::Neutral {
             continue;
         }
@@ -217,7 +217,7 @@ fn evaluate_pawn_structure_obstocean(game: &GameState) -> i32 {
     let mut white_pawn_files: Vec<i64> = Vec::new();
     let mut black_pawn_files: Vec<i64> = Vec::new();
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.piece_type() == PieceType::Pawn {
             if piece.color() == PlayerColor::White {
                 white_pawns.push((*x, *y));
@@ -470,7 +470,7 @@ fn get_closest_piece_distance(
     color: PlayerColor,
 ) -> i64 {
     let mut min_dist = 1000i64;
-    for ((x, y), piece) in &board.pieces {
+    for ((x, y), piece) in board.iter() {
         if piece.color() == color {
             let dist = (x - target_x).abs().max((y - target_y).abs());
             if dist < min_dist {

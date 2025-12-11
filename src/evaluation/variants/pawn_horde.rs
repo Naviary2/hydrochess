@@ -48,7 +48,7 @@ pub fn evaluate(game: &GameState) -> i32 {
     // Map for quick lookup of pawn locations
     // Using a simple vector check is fast enough for ~36 items
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         let coord = Coordinate::new(*x, *y);
         match piece.color() {
             PlayerColor::White => {

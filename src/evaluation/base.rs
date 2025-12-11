@@ -233,7 +233,7 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     let mut sum_y: i64 = 0;
     let mut count: i64 = 0;
 
-    for ((x, y), piece) in &board.pieces {
+    for ((x, y), piece) in board.iter() {
         if piece.piece_type() != PieceType::Void
             && piece.piece_type() != PieceType::Obstacle
             && piece.piece_type() != PieceType::Pawn
@@ -322,7 +322,7 @@ pub fn evaluate(game: &GameState) -> i32 {
 /// Count undeveloped minor pieces (knights/bishops) for a color
 fn count_undeveloped_minors(game: &GameState, color: PlayerColor) -> i32 {
     let mut count = 0;
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() != color {
             continue;
         }
@@ -376,7 +376,7 @@ pub fn evaluate_pieces(
     let mut black_bishop_colors: (bool, bool) = (false, false);
 
     let cloud_center: Option<Coordinate> = compute_cloud_center(&game.board);
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         let mut piece_score = match piece.piece_type() {
             PieceType::Rook => evaluate_rook(game, *x, *y, piece.color(), white_king, black_king),
             PieceType::Queen => evaluate_queen(game, *x, *y, piece.color(), white_king, black_king),
@@ -1250,7 +1250,7 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     // We look for pawns roughly on the same files as the king (+/- 2 files) to keep it local.
     let mut has_pawn_ahead = false;
     let mut has_pawn_behind = false;
-    for ((px, py), piece) in &game.board.pieces {
+    for ((px, py), piece) in game.board.iter() {
         if piece.color() != color || piece.piece_type() != PieceType::Pawn {
             continue;
         }
@@ -1332,7 +1332,7 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
 
     // 3. Enemy sliders attacking king zone
     let mut enemy_slider_threats = 0;
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() == color {
             continue;
         }
@@ -1384,7 +1384,7 @@ pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
     let mut white_pawns: Vec<(i64, i64)> = Vec::new();
     let mut black_pawns: Vec<(i64, i64)> = Vec::new();
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.piece_type() == PieceType::Pawn {
             if piece.color() == PlayerColor::White {
                 white_pawn_files.push(*x);
@@ -1462,7 +1462,7 @@ pub fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
     let mut white_king: Option<Coordinate> = None;
     let mut black_king: Option<Coordinate> = None;
 
-    for ((x, y), piece) in &board.pieces {
+    for ((x, y), piece) in board.iter() {
         if piece.piece_type() == PieceType::King {
             if piece.color() == PlayerColor::White {
                 white_king = Some(Coordinate { x: *x, y: *y });
@@ -1477,7 +1477,7 @@ pub fn find_kings(board: &Board) -> (Option<Coordinate>, Option<Coordinate>) {
 
 /// Check if a side only has a king (no other pieces)
 pub fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
-    for (_, piece) in &board.pieces {
+    for (_, piece) in board.iter() {
         if piece.color() == color && piece.piece_type() != PieceType::King {
             return false;
         }
@@ -1487,7 +1487,7 @@ pub fn is_lone_king(board: &Board, color: PlayerColor) -> bool {
 
 /// Check if a side has any pawn that can still promote (not past the promotion rank)
 fn has_promotable_pawn(board: &Board, color: PlayerColor, promo_rank: i64) -> bool {
-    for ((_, y), piece) in &board.pieces {
+    for ((_, y), piece) in board.iter() {
         if piece.color() != color || piece.piece_type() != PieceType::Pawn {
             continue;
         }
@@ -1516,7 +1516,7 @@ pub fn count_pawns_on_file(game: &GameState, file: i64, color: PlayerColor) -> (
     let mut own_pawns = 0;
     let mut enemy_pawns = 0;
 
-    for ((x, _), piece) in &game.board.pieces {
+    for ((x, _), piece) in game.board.iter() {
         if *x == file && piece.piece_type() == PieceType::Pawn {
             if piece.color() == color {
                 own_pawns += 1;
@@ -1570,7 +1570,7 @@ pub fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) 
         return false;
     }
 
-    for ((px, py), _) in &board.pieces {
+    for ((px, py), _) in board.iter() {
         // Skip the endpoints themselves
         if *px == from.x && *py == from.y {
             continue;
@@ -1627,7 +1627,7 @@ pub fn evaluate_lone_king_endgame(
     }
     let mut sliders: Vec<SliderInfo> = Vec::new();
 
-    for ((x, y), piece) in &game.board.pieces {
+    for ((x, y), piece) in game.board.iter() {
         if piece.color() != winning_color || piece.piece_type().is_royal() {
             continue;
         }
@@ -1925,7 +1925,7 @@ pub fn evaluate_lone_king_endgame(
     // the evaluation really wants the short-range pieces to participate.
     let short_base_scale: i32 = if few_sliders { 6 } else { 3 };
 
-    for ((px, py), piece) in &game.board.pieces {
+    for ((px, py), piece) in game.board.iter() {
         if piece.color() != winning_color {
             continue;
         }
@@ -1988,7 +1988,7 @@ fn needs_king_for_mate(board: &Board, color: PlayerColor) -> bool {
     let mut hawks = 0;
     let mut guards = 0;
 
-    for (_, piece) in &board.pieces {
+    for (_, piece) in board.iter() {
         if piece.color() != color {
             continue;
         }
@@ -2092,7 +2092,7 @@ pub fn has_sufficient_mating_material(
     let mut light_bishops = 0;
     let mut dark_bishops = 0;
 
-    for ((x, y), piece) in &board.pieces {
+    for ((x, y), piece) in board.iter() {
         if piece.color() != color {
             continue;
         }
@@ -2473,17 +2473,15 @@ pub fn has_sufficient_mating_material(
 /// Check if the game is a draw due to insufficient material
 pub fn is_insufficient_material(board: &Board) -> bool {
     // Count pieces quickly - if too many pieces, definitely not insufficient
-    let total_pieces = board.pieces.len();
+    let total_pieces = board.len();
     if total_pieces >= 10 {
         return false;
     } // Fast exit for complex positions
 
     let white_has_king = board
-        .pieces
         .iter()
         .any(|(_, p)| p.piece_type().is_royal() && p.color() == PlayerColor::White);
     let black_has_king = board
-        .pieces
         .iter()
         .any(|(_, p)| p.piece_type().is_royal() && p.color() == PlayerColor::Black);
 
@@ -2496,7 +2494,7 @@ pub fn is_insufficient_material(board: &Board) -> bool {
 
 pub fn calculate_initial_material(board: &Board) -> i32 {
     let mut score = 0;
-    for (_, piece) in &board.pieces {
+    for (_, piece) in board.iter() {
         let value = get_piece_value(piece.piece_type());
         match piece.color() {
             PlayerColor::White => score += value,
