@@ -56,6 +56,7 @@ pub const DEFAULT_SORT_QUIET: i32 = 0;
 pub const DEFAULT_SORT_KILLER1: i32 = 900000;
 pub const DEFAULT_SORT_KILLER2: i32 = 800000;
 pub const DEFAULT_SORT_COUNTERMOVE: i32 = 600000;
+pub const DEFAULT_SORT_GIVES_CHECK: i32 = 700000;
 
 // SEE threshold for "winning" captures
 pub const DEFAULT_SEE_WINNING_THRESHOLD: i32 = -80;
@@ -507,6 +508,12 @@ pub fn sort_countermove() -> i32 {
 #[inline]
 pub const fn sort_countermove() -> i32 {
     DEFAULT_SORT_COUNTERMOVE
+}
+
+// Gives Check bonus (not tunable, fixed constant)
+#[inline]
+pub const fn sort_gives_check() -> i32 {
+    DEFAULT_SORT_GIVES_CHECK
 }
 
 #[cfg(feature = "search_tuning")]

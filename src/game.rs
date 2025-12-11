@@ -55,6 +55,9 @@ pub struct UndoMove {
     /// we remove that coordinate from starting_squares. Store it here so
     /// undo_move can restore starting_squares exactly.
     pub starting_square_restored: Option<Coordinate>,
+    /// Old king positions for restoration (only set if a king moved)
+    pub old_white_king_pos: Option<Coordinate>,
+    pub old_black_king_pos: Option<Coordinate>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -115,6 +118,11 @@ pub struct GameState {
     pub white_promo_rank: i64,
     #[serde(skip)]
     pub black_promo_rank: i64,
+    /// Cached king positions for O(1) lookup. Updated incrementally in make/undo.
+    #[serde(skip)]
+    pub white_king_pos: Option<Coordinate>,
+    #[serde(skip)]
+    pub black_king_pos: Option<Coordinate>,
 }
 
 // For backwards compatibility, keep castling_rights as an alias
@@ -169,6 +177,8 @@ impl GameState {
             black_back_rank: 8,
             white_promo_rank: 8,
             black_promo_rank: 1,
+            white_king_pos: None,
+            black_king_pos: None,
         }
     }
 
@@ -198,15 +208,19 @@ impl GameState {
             black_back_rank: 8,
             white_promo_rank: 8,
             black_promo_rank: 1,
+            white_king_pos: None,
+            black_king_pos: None,
         }
     }
 
-    /// Recompute piece counts and rebuild piece lists from the board
+    /// Recompute piece counts, rebuild piece lists, and find king positions from the board
     pub fn recompute_piece_counts(&mut self) {
         let mut white: u16 = 0;
         let mut black: u16 = 0;
         self.white_pieces.clear();
         self.black_pieces.clear();
+        self.white_king_pos = None;
+        self.black_king_pos = None;
 
         if let Some(active) = &self.board.active_coords {
             for (x, y) in active {
@@ -214,6 +228,14 @@ impl GameState {
                     Some(p) => p,
                     None => continue,
                 };
+                // Track king positions (any royal piece)
+                if piece.piece_type().is_royal() {
+                    if piece.color() == PlayerColor::White {
+                        self.white_king_pos = Some(Coordinate::new(*x, *y));
+                    } else if piece.color() == PlayerColor::Black {
+                        self.black_king_pos = Some(Coordinate::new(*x, *y));
+                    }
+                }
                 match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
@@ -228,6 +250,14 @@ impl GameState {
             }
         } else {
             for ((x, y), piece) in &self.board.pieces {
+                // Track king positions (any royal piece)
+                if piece.piece_type().is_royal() {
+                    if piece.color() == PlayerColor::White {
+                        self.white_king_pos = Some(Coordinate::new(*x, *y));
+                    } else if piece.color() == PlayerColor::Black {
+                        self.black_king_pos = Some(Coordinate::new(*x, *y));
+                    }
+                }
                 match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
@@ -1015,6 +1045,15 @@ impl GameState {
         // Update spatial indices: remove piece from source square
         self.spatial_indices.remove(from_x, from_y);
 
+        // Track king position updates (no undo needed for make_move_coords)
+        if piece.piece_type().is_royal() {
+            if piece.color() == PlayerColor::White {
+                self.white_king_pos = Some(Coordinate::new(to_x, to_y));
+            } else if piece.color() == PlayerColor::Black {
+                self.black_king_pos = Some(Coordinate::new(to_x, to_y));
+            }
+        }
+
         // Handle capture
         let captured = self.board.remove_piece(&to_x, &to_y);
         let is_capture = captured.is_some();
@@ -1170,7 +1209,20 @@ impl GameState {
             old_hash: self.hash_stack.last().copied().unwrap_or(0), // Save original hash
             special_rights_removed: Vec::new(),
             starting_square_restored: None,
+            old_white_king_pos: None,
+            old_black_king_pos: None,
         };
+
+        // Track king position updates for undo
+        if piece.piece_type().is_royal() {
+            if piece.color() == PlayerColor::White {
+                undo_info.old_white_king_pos = self.white_king_pos;
+                self.white_king_pos = Some(m.to);
+            } else if piece.color() == PlayerColor::Black {
+                undo_info.old_black_king_pos = self.black_king_pos;
+                self.black_king_pos = Some(m.to);
+            }
+        }
 
         // Once a piece moves from its original square, we no longer treat
         // that coordinate as an undeveloped starting square. Record this so
@@ -1448,6 +1500,13 @@ impl GameState {
         // restore that coordinate in starting_squares.
         if let Some(coord) = undo.starting_square_restored {
             self.starting_squares.insert(coord);
+        }
+        // Restore king positions if they were saved (i.e., a king moved)
+        if let Some(pos) = undo.old_white_king_pos {
+            self.white_king_pos = Some(pos);
+        }
+        if let Some(pos) = undo.old_black_king_pos {
+            self.black_king_pos = Some(pos);
         }
         self.halfmove_clock = undo.old_halfmove_clock;
     }

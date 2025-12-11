@@ -24,8 +24,8 @@ pub fn evaluate(game: &GameState) -> i32 {
     // Start with material score
     let mut score = game.material_score;
 
-    // Find king positions
-    let (white_king, black_king) = base::find_kings(&game.board);
+    // Use cached king positions (O(1) instead of O(n) board scan)
+    let (white_king, black_king) = (game.white_king_pos, game.black_king_pos);
 
     // Check for endgame with lone king
     let white_only_king = base::is_lone_king(&game.board, PlayerColor::White);

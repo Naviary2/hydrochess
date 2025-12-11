@@ -360,6 +360,8 @@ impl Engine {
             black_back_rank,
             white_promo_rank,
             black_promo_rank,
+            white_king_pos: None,
+            black_king_pos: None,
         };
 
         game.material_score = calculate_initial_material(&game.board);

@@ -474,27 +474,37 @@ fn search_with_searcher(
         return None;
     }
 
+    // Filter fully legal moves upfront.
+    // This allows negamax_root to skip legality checks and allows us to reuse the move list
+    // (and its sorting) across iterative deepening depths.
+    let mut legal_moves: Vec<Move> = Vec::with_capacity(moves.len());
+    let mut fallback_move: Option<Move> = None;
+
+    for m in moves {
+        let undo = game.make_move(&m);
+        let legal = !game.is_move_illegal();
+        game.undo_move(&m, undo);
+
+        if legal {
+            if fallback_move.is_none() {
+                fallback_move = Some(m.clone());
+            }
+            legal_moves.push(m);
+        }
+    }
+
+    if legal_moves.is_empty() {
+        return None;
+    }
+
     // If only one move, return immediately with a simple static eval as score.
-    if moves.len() == 1 {
-        let single = moves[0].clone();
+    if legal_moves.len() == 1 {
+        let single = legal_moves[0].clone();
         let score = evaluate(game);
         return Some((single, score));
     }
 
-    // Find first legal move as ultimate fallback.
-    // CRITICAL: We must ALWAYS check legality, even under time pressure.
-    // Accepting an illegal move (one that leaves our king in check) is never acceptable.
-    let fallback_move = moves
-        .iter()
-        .find(|m| {
-            let undo = game.make_move(m);
-            let legal = !game.is_move_illegal();
-            game.undo_move(m, undo);
-            legal
-        })
-        .cloned();
-
-    let mut best_move: Option<Move> = fallback_move.clone();
+    let mut best_move: Option<Move> = fallback_move; // Already cloned above
     let mut best_score = -INFINITY;
     let mut stability: usize = 0;
     let mut prev_iter_score: i32 = 0;
@@ -514,7 +524,7 @@ fn search_with_searcher(
 
         let score = if depth == 1 {
             // First iteration: full window
-            negamax_root(searcher, game, depth, -INFINITY, INFINITY)
+            negamax_root(searcher, game, depth, -INFINITY, INFINITY, &mut legal_moves)
         } else {
             // Aspiration window search
             let asp_win = aspiration_window();
@@ -525,7 +535,7 @@ fn search_with_searcher(
             let mut retries = 0;
 
             loop {
-                result = negamax_root(searcher, game, depth, alpha, beta);
+                result = negamax_root(searcher, game, depth, alpha, beta, &mut legal_moves);
                 retries += 1;
 
                 if searcher.stopped {
@@ -547,7 +557,8 @@ fn search_with_searcher(
 
                 // Fallback to full window if window gets too large or too many retries
                 if window_size > 1000 || retries >= 4 {
-                    result = negamax_root(searcher, game, depth, -INFINITY, INFINITY);
+                    result =
+                        negamax_root(searcher, game, depth, -INFINITY, INFINITY, &mut legal_moves);
                     break;
                 }
             }
@@ -767,7 +778,10 @@ pub fn get_best_moves_multipv(
 
         root_scores.clear();
 
-        // Search each root move
+        // Track the MultiPV alpha threshold incrementally to avoid repeated min() scans
+        let mut multipv_alpha = -INFINITY;
+
+        // Search each root move (ordered by previous iteration's scores)
         for (move_idx, m) in legal_root_moves.iter().enumerate() {
             if searcher.stopped {
                 break;
@@ -781,22 +795,12 @@ pub fn get_best_moves_multipv(
             searcher.prev_move_stack[0] = (prev_from_hash, prev_to_hash);
 
             // For MultiPV, we need to search all moves to get their scores.
-            // First move gets full window, subsequent moves use PVS.
+            // First move gets full window, subsequent moves use PVS with MultiPV-aware alpha.
             let score = if move_idx == 0 {
                 -negamax(&mut searcher, game, depth - 1, 1, -INFINITY, INFINITY, true)
             } else {
-                // Use PVS for efficiency, but we need to re-search with full window
-                // if the move might be in the top-N
-                let alpha = if root_scores.len() >= multi_pv {
-                    // We already have enough candidates; use the worst score as lower bound
-                    root_scores
-                        .iter()
-                        .map(|(_, s, _)| *s)
-                        .min()
-                        .unwrap_or(-INFINITY)
-                } else {
-                    -INFINITY
-                };
+                // Use PVS for efficiency with MultiPV-aware alpha bound
+                let alpha = multipv_alpha;
 
                 let mut s = -negamax(&mut searcher, game, depth - 1, 1, -alpha - 1, -alpha, true);
                 if s > alpha && !searcher.stopped {
@@ -819,6 +823,13 @@ pub fn get_best_moves_multipv(
                     }
                 }
                 root_scores.push((m.clone(), score, pv));
+
+                // Update multipv_alpha incrementally once we have enough candidates
+                if root_scores.len() >= multi_pv {
+                    // Find the minimum score among current candidates
+                    let worst = root_scores.iter().map(|(_, s, _)| *s).min().unwrap();
+                    multipv_alpha = worst;
+                }
             }
         }
 
@@ -828,6 +839,13 @@ pub fn get_best_moves_multipv(
 
         // Sort by score descending
         root_scores.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Reorder legal_root_moves by this iteration's scores for better PVS efficiency
+        // at the next depth - the previous best move will be searched first
+        legal_root_moves.clear();
+        for (mv, _, _) in &root_scores {
+            legal_root_moves.push(mv.clone());
+        }
 
         // Update best_lines with results from this depth
         best_lines.clear();
@@ -948,7 +966,27 @@ pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
     searcher.reset_for_iteration();
     searcher.decay_history();
     searcher.tt.clear();
-    let _ = negamax_root(&mut searcher, game, depth, -INFINITY, INFINITY);
+
+    // Generate and filter legal moves
+    let moves = game.get_legal_moves();
+    let mut legal_moves = Vec::with_capacity(moves.len());
+    for m in moves {
+        let undo = game.make_move(&m);
+        let legal = !game.is_move_illegal();
+        game.undo_move(&m, undo);
+        if legal {
+            legal_moves.push(m);
+        }
+    }
+
+    let _ = negamax_root(
+        &mut searcher,
+        game,
+        depth,
+        -INFINITY,
+        INFINITY,
+        &mut legal_moves,
+    );
     searcher.nodes
 }
 
@@ -959,6 +997,7 @@ fn negamax_root(
     depth: usize,
     mut alpha: i32,
     beta: i32,
+    moves: &mut Vec<Move>,
 ) -> i32 {
     // Save original alpha for TT flag determination
     let alpha_orig = alpha;
@@ -975,20 +1014,16 @@ fn negamax_root(
 
     let in_check = game.is_in_check();
 
-    // Reuse per-ply move buffer at root (ply 0)
-    let mut moves = Vec::new();
-    std::mem::swap(&mut moves, &mut searcher.move_buffers[0]);
-    game.get_legal_moves_into(&mut moves);
-
     // Sort moves at root (TT move first, then by score)
-    sort_moves_root(searcher, game, &mut moves, &tt_move);
+    // This reorders the `moves` vec in-place, preserving this ordering
+    // for the next iteration.
+    sort_moves_root(searcher, game, moves, &tt_move);
 
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
-    let mut fallback_move: Option<Move> = None; // First legal move as fallback
     let mut legal_moves = 0;
 
-    for m in &moves {
+    for m in moves {
         // Skip excluded moves (for MultiPV subsequent passes)
         if !searcher.excluded_moves.is_empty() {
             let coords = (m.from.x, m.from.y, m.to.x, m.to.y);
@@ -999,11 +1034,6 @@ fn negamax_root(
 
         let undo = game.make_move(m);
 
-        // Check if move is illegal (leaves our king in check)
-        if game.is_move_illegal() {
-            game.undo_move(m, undo);
-            continue;
-        }
 
         // At the root, this move becomes the previous move for child ply 1,
         // stored as (from_hash, to_hash).
@@ -1013,11 +1043,6 @@ fn negamax_root(
         searcher.prev_move_stack[0] = (prev_from_hash, prev_to_hash);
 
         legal_moves += 1;
-
-        // Save first legal move as fallback
-        if fallback_move.is_none() {
-            fallback_move = Some(m.clone());
-        }
 
         let score;
         if legal_moves == 1 {
@@ -1074,9 +1099,6 @@ fn negamax_root(
             0
         };
     }
-
-    // Swap back move buffer for reuse in future searches
-    std::mem::swap(&mut searcher.move_buffers[0], &mut moves);
 
     // Store in TT with correct flag based on original alpha
     let tt_flag = if best_score <= alpha_orig {
