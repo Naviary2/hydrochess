@@ -1034,7 +1034,6 @@ fn negamax_root(
 
         let undo = game.make_move(m);
 
-
         // At the root, this move becomes the previous move for child ply 1,
         // stored as (from_hash, to_hash).
         let prev_entry_backup = searcher.prev_move_stack[0];

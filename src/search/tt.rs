@@ -255,7 +255,12 @@ pub struct TranspositionTable {
 
 impl TranspositionTable {
     /// Create a new TT with approximately `size_mb` megabytes of storage.
+    /// For WASM builds, the size is capped at 64MB to avoid browser memory limits.
     pub fn new(size_mb: usize) -> Self {
+        // Cap size for WASM to stay within browser memory constraints
+        #[cfg(target_arch = "wasm32")]
+        let size_mb = size_mb.min(64);
+
         let bytes = size_mb.max(1) * 1024 * 1024;
         let bucket_size = std::mem::size_of::<TTBucket>();
         let num_buckets = (bytes / bucket_size).max(1);

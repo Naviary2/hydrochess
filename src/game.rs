@@ -958,8 +958,38 @@ impl GameState {
         let moved_color = self.turn.opponent();
         let indices = &self.spatial_indices;
 
-        // Find ALL royal pieces of the side that just moved and check if any are attacked
-        // Find ALL royal pieces of the side that just moved and check if any are attacked
+        // Fast path: use cached king position for the side that just moved
+        let cached_king = match moved_color {
+            PlayerColor::White => self.white_king_pos,
+            PlayerColor::Black => self.black_king_pos,
+            PlayerColor::Neutral => None,
+        };
+
+        if let Some(king_pos) = cached_king {
+            // Most common case: single royal piece with cached position
+            if is_square_attacked(&self.board, &king_pos, self.turn, indices) {
+                return true;
+            }
+            // For standard variants with just a King, we're done
+            if let Some(piece) = self.board.get_piece(&king_pos.x, &king_pos.y) {
+                if piece.piece_type() == PieceType::King {
+                    return false;
+                }
+            }
+        }
+
+        // Fallback: full scan for variants with multiple royals or no cached position
+        self.is_move_illegal_full_scan(moved_color, indices)
+    }
+
+    /// Full board scan for illegal move detection. Used as fallback for variants
+    /// with multiple royal pieces or when cached king position is unavailable.
+    #[inline(never)]
+    fn is_move_illegal_full_scan(
+        &self,
+        moved_color: PlayerColor,
+        indices: &SpatialIndices,
+    ) -> bool {
         if let Some(active) = &self.board.active_coords {
             for (x, y) in active {
                 let piece = match self.board.get_piece(x, y) {
@@ -990,8 +1020,37 @@ impl GameState {
         let indices = &self.spatial_indices;
         let attacker_color = self.turn.opponent();
 
-        // Check if ANY royal piece of current player is attacked
-        // Check if ANY royal piece of current player is attacked
+        // Fast path: use cached king position for the side to move
+        let cached_king = match self.turn {
+            PlayerColor::White => self.white_king_pos,
+            PlayerColor::Black => self.black_king_pos,
+            PlayerColor::Neutral => None,
+        };
+
+        if let Some(king_pos) = cached_king {
+            // Most common case: single royal piece with cached position
+            if is_square_attacked(&self.board, &king_pos, attacker_color, indices) {
+                return true;
+            }
+            // For standard variants, we're done. But for variants with multiple royals
+            // (e.g., RoyalQueen, RoyalCentaur), we need to check all of them.
+            // We can skip the full scan if the piece at cached position is the only royal.
+            if let Some(piece) = self.board.get_piece(&king_pos.x, &king_pos.y) {
+                // If it's a standard King, there's typically only one - skip full scan
+                if piece.piece_type() == PieceType::King {
+                    return false;
+                }
+            }
+        }
+
+        // Fallback: full scan for variants with multiple royals or no cached position
+        self.is_in_check_full_scan(attacker_color, indices)
+    }
+
+    /// Full board scan for check detection. Used as fallback for variants with
+    /// multiple royal pieces or when cached king position is unavailable.
+    #[inline(never)]
+    fn is_in_check_full_scan(&self, attacker_color: PlayerColor, indices: &SpatialIndices) -> bool {
         if let Some(active) = &self.board.active_coords {
             for (x, y) in active {
                 let piece = match self.board.get_piece(x, y) {

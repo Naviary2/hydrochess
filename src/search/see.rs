@@ -2,6 +2,11 @@ use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
 use crate::moves::Move;
+use arrayvec::ArrayVec;
+
+/// Maximum pieces we support for full SEE calculation.
+/// 128 covers virtually all realistic positions while staying on the stack.
+const SEE_MAX_PIECES: usize = 128;
 
 /// Static Exchange Evaluation implementation for a capture move on a single square.
 ///
@@ -10,8 +15,22 @@ use crate::moves::Move;
 pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
     // Only meaningful for captures; quiet moves (or moves to empty squares)
     // have no immediate material swing.
-    if game.board.get_piece(&m.to.x, &m.to.y).is_none() {
-        return 0;
+    let captured = match game.board.get_piece(&m.to.x, &m.to.y) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // For very large boards (> SEE_MAX_PIECES), use approximate SEE
+    // based on simple MVV-LVA rather than full exchange sequence
+    if game.board.pieces.len() > SEE_MAX_PIECES {
+        let victim_val = get_piece_value(captured.piece_type());
+        let attacker_val = get_piece_value(m.piece.piece_type());
+        // Simple approximation: gain if victim > attacker, otherwise assume even exchange
+        return if victim_val >= attacker_val {
+            victim_val - attacker_val
+        } else {
+            victim_val - attacker_val // Could be negative, which is correct
+        };
     }
 
     #[derive(Clone, Copy)]
@@ -23,8 +42,8 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
         alive: bool,
     }
 
-    // Build piece list from the board HashMap.
-    let mut pieces: Vec<PieceInfo> = Vec::with_capacity(game.board.pieces.len());
+    // Build piece list from the board HashMap - now stack-allocated
+    let mut pieces: ArrayVec<PieceInfo, SEE_MAX_PIECES> = ArrayVec::new();
     for ((x, y), piece) in &game.board.pieces {
         pieces.push(PieceInfo {
             x: *x,
