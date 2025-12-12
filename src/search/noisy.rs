@@ -42,9 +42,12 @@ pub fn get_best_move_with_noise(
     silent: bool,
 ) -> Option<(Move, i32, SearchStats)> {
     game.recompute_piece_counts();
+    // Initialize correction history hashes
+    game.recompute_correction_hashes();
     let mut searcher = Searcher::new(time_limit_ms);
     searcher.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
+    searcher.set_corrhist_mode(game);
 
     if noise_amp <= 0 {
         let result = super::get_best_move(game, max_depth, time_limit_ms, silent);

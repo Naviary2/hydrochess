@@ -362,6 +362,9 @@ impl Engine {
             black_promo_rank,
             white_king_pos: None,
             black_king_pos: None,
+            pawn_hash: 0,
+            nonpawn_hash: 0,
+            material_hash: 0,
         };
 
         game.material_score = calculate_initial_material(&game.board);

@@ -123,6 +123,15 @@ pub struct GameState {
     pub white_king_pos: Option<Coordinate>,
     #[serde(skip)]
     pub black_king_pos: Option<Coordinate>,
+    /// Pawn structure hash for correction history (helps CoaIP variants).
+    #[serde(skip)]
+    pub pawn_hash: u64,
+    /// Non-pawn piece position hash for correction history.
+    #[serde(skip)]
+    pub nonpawn_hash: u64,
+    /// Material configuration hash for correction history.
+    #[serde(skip)]
+    pub material_hash: u64,
 }
 
 // For backwards compatibility, keep castling_rights as an alias
@@ -179,6 +188,9 @@ impl GameState {
             black_promo_rank: 1,
             white_king_pos: None,
             black_king_pos: None,
+            pawn_hash: 0,
+            nonpawn_hash: 0,
+            material_hash: 0,
         }
     }
 
@@ -210,6 +222,9 @@ impl GameState {
             black_promo_rank: 1,
             white_king_pos: None,
             black_king_pos: None,
+            pawn_hash: 0,
+            nonpawn_hash: 0,
+            material_hash: 0,
         }
     }
 
@@ -487,6 +502,38 @@ impl GameState {
         }
 
         self.hash = h;
+    }
+
+    /// Recompute pawn_hash, nonpawn_hash, and material_hash from scratch.
+    /// These are used by correction history for indexing.
+    /// All three are computed for comprehensive variant coverage.
+    pub fn recompute_correction_hashes(&mut self) {
+        use crate::search::zobrist::{material_key, pawn_key, piece_key};
+
+        let mut ph: u64 = 0; // Pawn structure hash
+        let mut nph: u64 = 0; // Non-pawn piece hash
+        let mut mh: u64 = 0; // Material hash
+
+        for ((x, y), piece) in self.board.iter() {
+            if piece.color() == PlayerColor::Neutral {
+                continue;
+            }
+
+            // Material hash: XOR for each piece type
+            mh ^= material_key(piece.piece_type(), piece.color());
+
+            if piece.piece_type() == PieceType::Pawn {
+                // Pawn hash: only pawns (helps CoaIP variants)
+                ph ^= pawn_key(piece.color(), *x, *y);
+            } else {
+                // Non-pawn hash: all pieces except pawns
+                nph ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+            }
+        }
+
+        self.pawn_hash = ph;
+        self.nonpawn_hash = nph;
+        self.material_hash = mh;
     }
 
     /// Returns pseudo-legal moves. Legality (not leaving king in check)

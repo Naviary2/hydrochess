@@ -31,6 +31,27 @@ pub const MATE_VALUE: i32 = 900_000;
 pub const MATE_SCORE: i32 = 800_000;
 pub const THINK_TIME_MS: u128 = 3000; // 3 seconds per move (default, may be overridden by caller)
 
+// Correction History constants (adapted for Infinite Chess)
+// Size of correction history tables (power of 2 for fast masking)
+pub const CORRHIST_SIZE: usize = 16384; // 16K entries per color (for piece/material hashes)
+pub const CORRHIST_MASK: u64 = (CORRHIST_SIZE - 1) as u64;
+// Last move correction uses smaller table indexed by move from-to hash
+pub const LASTMOVE_CORRHIST_SIZE: usize = 4096; // 4K entries
+pub const LASTMOVE_CORRHIST_MASK: usize = LASTMOVE_CORRHIST_SIZE - 1;
+pub const CORRHIST_GRAIN: i32 = 256; // Scaling factor for correction values
+pub const CORRHIST_LIMIT: i32 = 1024 * 32; // Max absolute correction value
+pub const CORRHIST_WEIGHT_SCALE: i32 = 256; // Weight scaling for updates
+
+/// Determines which correction history tables to use.
+/// Set once at search start for zero runtime overhead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CorrHistMode {
+    /// For CoaIP variants + Classical + Chess: pawn + material (original approach that worked)
+    PawnBased,
+    /// For all other variants: non-pawn + material + last-move
+    NonPawnBased,
+}
+
 // ============================================================================
 // Tunable search parameters - accessed via param accessor functions
 // ============================================================================
@@ -54,7 +75,7 @@ mod see;
 pub(crate) use see::static_exchange_eval_impl as static_exchange_eval;
 
 pub mod zobrist;
-pub use zobrist::{en_passant_key, piece_key, special_right_key, SIDE_KEY};
+pub use zobrist::{en_passant_key, material_key, pawn_key, piece_key, special_right_key, SIDE_KEY};
 
 mod noisy;
 pub use noisy::get_best_move_with_noise;
@@ -249,6 +270,16 @@ pub struct Searcher {
     // MultiPV: moves to exclude from root search (for finding 2nd, 3rd, etc. best moves)
     // Stored as (from_x, from_y, to_x, to_y) tuples for fast comparison without cloning
     pub excluded_moves: Vec<(i64, i64, i64, i64)>,
+
+    // Correction History - variant-aware for optimal performance:
+    // - PawnBased mode: pawn + material (for CoaIP/Classical/Chess variants)
+    // - NonPawnBased mode: non-pawn + material + last-move (for other variants)
+    // Mode is set once at search start for zero runtime overhead.
+    pub corrhist_mode: CorrHistMode,
+    pub pawn_corrhist: Box<[[i32; CORRHIST_SIZE]; 2]>,
+    pub nonpawn_corrhist: Box<[[i32; CORRHIST_SIZE]; 2]>,
+    pub material_corrhist: Box<[[i32; CORRHIST_SIZE]; 2]>,
+    pub lastmove_corrhist: Box<[i32; LASTMOVE_CORRHIST_SIZE]>,
 }
 
 impl Searcher {
@@ -290,6 +321,11 @@ impl Searcher {
             moved_piece_history: vec![0; MAX_PLY],
             cont_history: vec![[[[0i32; 32]; 32]; 32]; 16],
             excluded_moves: Vec::new(),
+            corrhist_mode: CorrHistMode::NonPawnBased, // Default, set based on variant at search start
+            pawn_corrhist: Box::new([[0i32; CORRHIST_SIZE]; 2]),
+            nonpawn_corrhist: Box::new([[0i32; CORRHIST_SIZE]; 2]),
+            material_corrhist: Box::new([[0i32; CORRHIST_SIZE]; 2]),
+            lastmove_corrhist: Box::new([0i32; LASTMOVE_CORRHIST_SIZE]),
         }
     }
 
@@ -303,6 +339,24 @@ impl Searcher {
         // Reset PV lengths only - much faster than clearing entire array
         // The PV entries will be overwritten as needed during search
         self.pv_length = [0; MAX_PLY];
+    }
+
+    /// Set correction history mode based on variant.
+    /// Called once at search start for zero runtime overhead.
+    #[inline]
+    pub fn set_corrhist_mode(&mut self, game: &GameState) {
+        use crate::Variant;
+        self.corrhist_mode = match game.variant {
+            // PawnBased mode for variants where pawn correction showed positive Elo
+            Some(Variant::CoaIP)
+            | Some(Variant::CoaIPHO)
+            | Some(Variant::CoaIPRO)
+            | Some(Variant::CoaIPNO)
+            | Some(Variant::Classical)
+            | Some(Variant::Chess) => CorrHistMode::PawnBased,
+            // NonPawnBased mode for all other variants
+            _ => CorrHistMode::NonPawnBased,
+        };
     }
 
     /// Decay history scores at the start of each iteration
@@ -350,6 +404,109 @@ impl Searcher {
             }
         }
         self.stopped
+    }
+
+    /// Apply correction history to raw static evaluation.
+    /// Uses variant-specific mode set at search start for zero overhead.
+    #[inline]
+    pub fn adjusted_eval(&self, game: &GameState, raw_eval: i32, prev_move_idx: usize) -> i32 {
+        let color_idx = (game.turn as usize).min(1);
+
+        let total_correction = match self.corrhist_mode {
+            CorrHistMode::PawnBased => {
+                // Pawn + Material (for CoaIP/Classical/Chess)
+                let pawn_idx = (game.pawn_hash & CORRHIST_MASK) as usize;
+                let pawn_corr = self.pawn_corrhist[color_idx][pawn_idx];
+
+                let mat_idx = (game.material_hash & CORRHIST_MASK) as usize;
+                let mat_corr = self.material_corrhist[color_idx][mat_idx];
+
+                // 60% pawn, 40% material (pawn structure was key in these variants)
+                (pawn_corr * 60 + mat_corr * 40) / (CORRHIST_GRAIN * 100 / 100)
+            }
+            CorrHistMode::NonPawnBased => {
+                // Non-pawn + Material + Last-move (for other variants)
+                let nonpawn_idx = (game.nonpawn_hash & CORRHIST_MASK) as usize;
+                let nonpawn_corr = self.nonpawn_corrhist[color_idx][nonpawn_idx];
+
+                let mat_idx = (game.material_hash & CORRHIST_MASK) as usize;
+                let mat_corr = self.material_corrhist[color_idx][mat_idx];
+
+                let lastmove_idx = prev_move_idx & LASTMOVE_CORRHIST_MASK;
+                let lastmove_corr = self.lastmove_corrhist[lastmove_idx];
+
+                // 50% non-pawn, 30% material, 20% last-move
+                (nonpawn_corr * 50 + mat_corr * 30 + lastmove_corr * 20)
+                    / (CORRHIST_GRAIN * 100 / 100)
+            }
+        };
+
+        let corrected = raw_eval + total_correction;
+        corrected.clamp(-MATE_SCORE + 1, MATE_SCORE - 1)
+    }
+
+    /// Update correction history based on search result.
+    /// Updates only the tables relevant for the current mode.
+    #[inline]
+    pub fn update_correction_history(
+        &mut self,
+        game: &GameState,
+        depth: usize,
+        static_eval: i32,
+        search_score: i32,
+        best_move_is_quiet: bool,
+        in_check: bool,
+        prev_move_idx: usize,
+    ) {
+        if in_check || !best_move_is_quiet {
+            return;
+        }
+
+        let diff = search_score - static_eval;
+        let color_idx = (game.turn as usize).min(1);
+        let weight = ((depth * depth + 2 * depth + 1) as i32).min(128).max(1);
+        let scaled_diff = diff * CORRHIST_GRAIN;
+
+        match self.corrhist_mode {
+            CorrHistMode::PawnBased => {
+                // Update pawn + material only
+                let pawn_idx = (game.pawn_hash & CORRHIST_MASK) as usize;
+                let pawn_entry = &mut self.pawn_corrhist[color_idx][pawn_idx];
+                *pawn_entry = (*pawn_entry * (CORRHIST_WEIGHT_SCALE - weight)
+                    + scaled_diff * weight)
+                    / CORRHIST_WEIGHT_SCALE;
+                *pawn_entry = (*pawn_entry).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+
+                let mat_idx = (game.material_hash & CORRHIST_MASK) as usize;
+                let mat_entry = &mut self.material_corrhist[color_idx][mat_idx];
+                *mat_entry = (*mat_entry * (CORRHIST_WEIGHT_SCALE - weight) + scaled_diff * weight)
+                    / CORRHIST_WEIGHT_SCALE;
+                *mat_entry = (*mat_entry).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+            }
+            CorrHistMode::NonPawnBased => {
+                // Update non-pawn + material + last-move
+                let nonpawn_idx = (game.nonpawn_hash & CORRHIST_MASK) as usize;
+                let nonpawn_entry = &mut self.nonpawn_corrhist[color_idx][nonpawn_idx];
+                *nonpawn_entry = (*nonpawn_entry * (CORRHIST_WEIGHT_SCALE - weight)
+                    + scaled_diff * weight)
+                    / CORRHIST_WEIGHT_SCALE;
+                *nonpawn_entry = (*nonpawn_entry).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+
+                let mat_idx = (game.material_hash & CORRHIST_MASK) as usize;
+                let mat_entry = &mut self.material_corrhist[color_idx][mat_idx];
+                *mat_entry = (*mat_entry * (CORRHIST_WEIGHT_SCALE - weight) + scaled_diff * weight)
+                    / CORRHIST_WEIGHT_SCALE;
+                *mat_entry = (*mat_entry).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+
+                let lastmove_idx = prev_move_idx & LASTMOVE_CORRHIST_MASK;
+                let lm_weight = weight.min(64);
+                let lm_entry = &mut self.lastmove_corrhist[lastmove_idx];
+                *lm_entry = (*lm_entry * (CORRHIST_WEIGHT_SCALE - lm_weight)
+                    + scaled_diff * lm_weight)
+                    / CORRHIST_WEIGHT_SCALE;
+                *lm_entry = (*lm_entry).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+            }
+        }
     }
 
     /// Format PV line as string
@@ -661,11 +818,15 @@ pub fn get_best_move(
 ) -> Option<(Move, i32, SearchStats)> {
     // Ensure fast per-color piece counts are in sync with the board
     game.recompute_piece_counts();
+    // Initialize correction history hashes
+    game.recompute_correction_hashes();
 
     // Use a fresh searcher per call (no persistent TT/state between searches).
     let mut searcher = Searcher::new(time_limit_ms);
     searcher.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
+    // Set correction mode based on variant (zero overhead during search)
+    searcher.set_corrhist_mode(game);
     let result = search_with_searcher(&mut searcher, game, max_depth);
     let stats = build_search_stats(&searcher);
     result.map(|(m, eval)| (m, eval, stats))
@@ -684,6 +845,8 @@ pub fn get_best_moves_multipv(
 ) -> MultiPVResult {
     // Ensure fast per-color piece counts are in sync with the board
     game.recompute_piece_counts();
+    // Initialize correction history hashes
+    game.recompute_correction_hashes();
 
     let multi_pv = multi_pv.max(1);
 
@@ -692,6 +855,7 @@ pub fn get_best_moves_multipv(
         let mut searcher = Searcher::new(time_limit_ms);
         searcher.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
+        searcher.set_corrhist_mode(game);
 
         let mut lines: Vec<PVLine> = Vec::with_capacity(1);
         if let Some((best_move, score)) = search_with_searcher(&mut searcher, game, max_depth) {
@@ -712,6 +876,7 @@ pub fn get_best_moves_multipv(
     let mut searcher = Searcher::new(time_limit_ms);
     searcher.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
+    searcher.set_corrhist_mode(game);
 
     // Get all legal moves upfront
     let moves = game.get_legal_moves();
@@ -961,8 +1126,11 @@ fn extract_pv(searcher: &Searcher) -> Vec<Move> {
 pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
     // Ensure fast per-color piece counts are in sync with the board
     game.recompute_piece_counts();
+    // Initialize correction history hashes
+    game.recompute_correction_hashes();
 
     let mut searcher = Searcher::new(u128::MAX);
+    searcher.set_corrhist_mode(game);
     searcher.reset_for_iteration();
     searcher.decay_history();
     searcher.tt.clear();
@@ -1207,10 +1375,23 @@ fn negamax(
     }
 
     // Static evaluation for pruning decisions
-    let static_eval = if in_check {
+    // First get raw eval, then apply correction history adjustment
+    let raw_eval = if in_check {
         -MATE_VALUE + ply as i32
     } else {
         evaluate(game)
+    };
+    // Get previous move index for last-move correction (combines from/to hashes)
+    let prev_move_idx = if ply > 0 {
+        let (from_hash, to_hash) = searcher.prev_move_stack[ply - 1];
+        from_hash ^ to_hash
+    } else {
+        0
+    };
+    let static_eval = if in_check {
+        raw_eval
+    } else {
+        searcher.adjusted_eval(game, raw_eval, prev_move_idx)
     };
 
     // Store eval for "improving" heuristic
@@ -1560,6 +1741,43 @@ fn negamax(
     searcher
         .tt
         .store(hash, depth, tt_flag, best_score, best_move, ply);
+
+    // Update correction history when conditions are met:
+    // - Not in check
+    // - Best move is quiet or doesn't exist
+    // - Score respects bound constraints relative to static eval
+    if !in_check {
+        let best_move_is_quiet = match &best_move {
+            Some(m) => {
+                let captured = game.board.get_piece(&m.to.x, &m.to.y);
+                let is_capture = captured.map_or(false, |p| !p.piece_type().is_neutral_type());
+                !is_capture && m.promotion.is_none()
+            }
+            None => true, // No best move counts as "quiet"
+        };
+
+        // Stockfish conditions:
+        // - If lower bound (failed high), score should not be below static eval
+        // - If upper bound (failed low), score should not be above static eval
+        let should_update = match tt_flag {
+            TTFlag::LowerBound => best_score >= raw_eval,
+            TTFlag::UpperBound => best_score <= raw_eval,
+            TTFlag::Exact => true,
+            TTFlag::None => false, // Should never happen, but be safe
+        };
+
+        if best_move_is_quiet && should_update {
+            searcher.update_correction_history(
+                game,
+                depth,
+                raw_eval,
+                best_score,
+                true,
+                false,
+                prev_move_idx,
+            );
+        }
+    }
 
     best_score
 }

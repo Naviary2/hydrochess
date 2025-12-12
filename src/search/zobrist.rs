@@ -1,9 +1,9 @@
 //! Zobrist hashing for infinite chess.
-//! 
+//!
 //! Uses computed hashes based on coordinates since we can't pre-compute a table
 //! for an infinite board. The hash is maintained incrementally in GameState.
 
-use crate::board::{PieceType, PlayerColor, Coordinate};
+use crate::board::{Coordinate, PieceType, PlayerColor};
 
 /// Number of piece types (used for indexing into piece keys)
 const NUM_PIECE_TYPES: usize = 22;
@@ -19,10 +19,10 @@ static PIECE_KEYS: [[u64; NUM_COLORS]; NUM_PIECE_TYPES] = {
         x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
         x ^ (x >> 31)
     }
-    
+
     let mut keys = [[0u64; NUM_COLORS]; NUM_PIECE_TYPES];
     let mut seed = 0x123456789ABCDEF0u64;
-    
+
     let mut i = 0;
     while i < NUM_PIECE_TYPES {
         let mut j = 0;
@@ -73,8 +73,7 @@ pub fn hash_coordinate(x: i64, y: i64) -> u64 {
     let ny = normalize_coord(y) as u64;
 
     // Fast mixing - fewer operations, good enough distribution
-    let h = nx.wrapping_mul(0x517cc1b727220a95)
-        ^ ny.wrapping_mul(0x9e3779b97f4a7c15);
+    let h = nx.wrapping_mul(0x517cc1b727220a95) ^ ny.wrapping_mul(0x9e3779b97f4a7c15);
     h ^ (h >> 32)
 }
 
@@ -98,10 +97,31 @@ pub fn en_passant_key(x: i64, y: i64) -> u64 {
     hash_coordinate(x, y) ^ EN_PASSANT_KEY_MIXER
 }
 
+/// Key for pawn structure hash (used by correction history).
+/// Includes only pawn positions, helps CoaIP variants.
+const PAWN_KEY_MIXER: u64 = 0xABCDEF0123456789;
+
+#[inline(always)]
+pub fn pawn_key(color: PlayerColor, x: i64, y: i64) -> u64 {
+    hash_coordinate(x, y) ^ PAWN_KEY_MIXER ^ (color as u64 * 0x9E3779B97F4A7C15)
+}
+
+/// Key for material configuration hash (used by correction history).
+/// Based on piece type and color counts.
+const MATERIAL_KEY_MIXER: u64 = 0xFEDCBA9876543210;
+
+#[inline(always)]
+pub fn material_key(piece_type: PieceType, color: PlayerColor) -> u64 {
+    // Use piece type as a simple hash - no position dependency
+    let pt = piece_type as u64;
+    let c = color as u64;
+    MATERIAL_KEY_MIXER.wrapping_mul(pt.wrapping_add(1)) ^ (c * 0x517CC1B727220A95)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_piece_keys_unique() {
         // Verify piece keys are reasonably unique
@@ -115,7 +135,7 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), NUM_PIECE_TYPES * NUM_COLORS);
     }
-    
+
     #[test]
     fn test_coordinate_hash_different() {
         let h1 = hash_coordinate(1, 1);
