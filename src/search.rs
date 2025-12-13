@@ -1674,6 +1674,62 @@ fn negamax(
     // Sort moves for better pruning
     sort_moves(searcher, game, &mut moves, ply, &tt_move);
 
+    // Multi-Cut pruning: at expected Cut-nodes with sufficient depth,
+    // if multiple moves fail high at reduced depth, the node is likely not singular.
+    // M = 6 moves to check, C = 3 cutoffs needed, R = 2 depth reduction (less aggressive/safer)
+    const MC_M: usize = 6; // Number of moves to check
+    const MC_C: usize = 3; // Number of cutoffs to trigger pruning
+    const MC_R: usize = 2; // Depth reduction for multi-cut searches
+    const MC_MIN_DEPTH: usize = 5; // Minimum depth to apply multi-cut
+
+    if depth >= MC_MIN_DEPTH && !is_pv && !in_check && cut_node {
+        let mut mc_cutoffs = 0;
+        let mut mc_moves_checked = 0;
+
+        for m in &moves {
+            if mc_moves_checked >= MC_M {
+                break;
+            }
+
+            let undo = game.make_move(m);
+
+            // Skip illegal moves
+            if game.is_move_illegal() {
+                game.undo_move(m, undo);
+                continue;
+            }
+
+            mc_moves_checked += 1;
+
+            // Reduced depth search with null window around beta
+            let mc_score = -negamax(
+                searcher,
+                game,
+                depth.saturating_sub(1 + MC_R),
+                ply + 1,
+                -beta,
+                -beta + 1,
+                false, // disallow null move in multi-cut searches
+            );
+
+            game.undo_move(m, undo);
+
+            if searcher.stopped {
+                std::mem::swap(&mut searcher.move_buffers[ply], &mut moves);
+                return 0;
+            }
+
+            if mc_score >= beta {
+                mc_cutoffs += 1;
+                if mc_cutoffs >= MC_C {
+                    // Multi-Cut prune: multiple moves fail high
+                    std::mem::swap(&mut searcher.move_buffers[ply], &mut moves);
+                    return beta;
+                }
+            }
+        }
+    }
+
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut legal_moves = 0;
