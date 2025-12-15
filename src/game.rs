@@ -140,6 +140,13 @@ pub struct GameState {
     /// Computed during make_move for O(1) is_repetition check.
     #[serde(skip)]
     pub repetition: i32,
+    /// Fast non-pawn material flags for NMP zugzwang detection.
+    /// True if the side has at least one non-pawn, non-king piece.
+    /// Updated incrementally in make_move/undo_move.
+    #[serde(skip)]
+    pub white_non_pawn_material: bool,
+    #[serde(skip)]
+    pub black_non_pawn_material: bool,
 }
 
 // For backwards compatibility, keep castling_rights as an alias
@@ -200,6 +207,8 @@ impl GameState {
             nonpawn_hash: 0,
             material_hash: 0,
             repetition: 0,
+            white_non_pawn_material: true,
+            black_non_pawn_material: true,
         }
     }
 
@@ -235,6 +244,8 @@ impl GameState {
             nonpawn_hash: 0,
             material_hash: 0,
             repetition: 0,
+            white_non_pawn_material: true,
+            black_non_pawn_material: true,
         }
     }
 
@@ -242,6 +253,8 @@ impl GameState {
     pub fn recompute_piece_counts(&mut self) {
         let mut white: u16 = 0;
         let mut black: u16 = 0;
+        let mut white_npm = false;
+        let mut black_npm = false;
         self.white_pieces.clear();
         self.black_pieces.clear();
         self.white_king_pos = None;
@@ -265,10 +278,18 @@ impl GameState {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
                         self.white_pieces.push((*x, *y));
+                        // Track non-pawn material
+                        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                            white_npm = true;
+                        }
                     }
                     PlayerColor::Black => {
                         black = black.saturating_add(1);
                         self.black_pieces.push((*x, *y));
+                        // Track non-pawn material
+                        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                            black_npm = true;
+                        }
                     }
                     PlayerColor::Neutral => {}
                 }
@@ -287,10 +308,18 @@ impl GameState {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
                         self.white_pieces.push((*x, *y));
+                        // Track non-pawn material
+                        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                            white_npm = true;
+                        }
                     }
                     PlayerColor::Black => {
                         black = black.saturating_add(1);
                         self.black_pieces.push((*x, *y));
+                        // Track non-pawn material
+                        if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
+                            black_npm = true;
+                        }
                     }
                     PlayerColor::Neutral => {}
                 }
@@ -298,6 +327,8 @@ impl GameState {
         }
         self.white_piece_count = white;
         self.black_piece_count = black;
+        self.white_non_pawn_material = white_npm;
+        self.black_non_pawn_material = black_npm;
         // Rebuild spatial indices from current board
         self.spatial_indices = SpatialIndices::new(&self.board);
     }
@@ -339,6 +370,17 @@ impl GameState {
         match color {
             PlayerColor::White => self.white_piece_count > 0,
             PlayerColor::Black => self.black_piece_count > 0,
+            PlayerColor::Neutral => false,
+        }
+    }
+
+    /// O(1) check for non-pawn material (for NMP zugzwang detection).
+    /// Returns true if the specified color has at least one non-pawn, non-king piece.
+    #[inline]
+    pub fn has_non_pawn_material(&self, color: PlayerColor) -> bool {
+        match color {
+            PlayerColor::White => self.white_non_pawn_material,
+            PlayerColor::Black => self.black_non_pawn_material,
             PlayerColor::Neutral => false,
         }
     }

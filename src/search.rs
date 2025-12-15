@@ -1712,12 +1712,8 @@ fn negamax(
 
         // Null Move Pruning
         if allow_null && depth >= nmp_min_depth() && static_eval >= beta {
-            // Check if we have non-pawn material (avoid zugzwang)
-            let has_pieces = game.board.iter().any(|(_, p)| {
-                p.color() == game.turn
-                    && p.piece_type() != PieceType::Pawn
-                    && p.piece_type() != PieceType::King
-            });
+            // O(1) check for non-pawn material (avoid zugzwang in pawn endgames)
+            let has_pieces = game.has_non_pawn_material(game.turn);
 
             if has_pieces {
                 // Make null move (proper tracking for repetition detection)

@@ -429,6 +429,8 @@ impl Engine {
             nonpawn_hash: 0,
             material_hash: 0,
             repetition: 0,
+            white_non_pawn_material: true,
+            black_non_pawn_material: true,
         };
 
         game.material_score = calculate_initial_material(&game.board);
