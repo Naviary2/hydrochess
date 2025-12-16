@@ -1891,34 +1891,11 @@ fn negamax(
             }
         }
 
-        // Skip Quiet Moves (Stockfish-style FutilityMoveCount)
-        // When we've searched enough moves, stop generating quiets entirely.
-        // Conditions from Stockfish: !rootNode && non_pawn_material && !is_loss(bestValue)
-        // Formula: threshold = (3 + depth*depth) / (2 - improving)
-        // Opponent_worsening also reduces threshold (more aggressive pruning)
-        if ply > 0 && !in_check && best_score > -MATE_SCORE {
-            // Check for piece material (at least one non-pawn piece)
-            // Using cached piece counts from GameState
-            let has_material = match game.turn {
-                crate::board::PlayerColor::White => game.white_piece_count > 0,
-                crate::board::PlayerColor::Black => game.black_piece_count > 0,
-                _ => true,
-            };
-
-            if has_material {
-                // Divisor: 1 if improving, 2 if not
-                // Additional reduction when opponent_worsening
-                let improving_divisor = if improving { 1 } else { 2 };
-                let mut futility_move_count = (3 + depth * depth) / improving_divisor;
-                // When opponent is worsening, reduce threshold by ~25%
-                if opponent_worsening {
-                    futility_move_count = futility_move_count * 3 / 4;
-                }
-                if legal_moves >= futility_move_count {
-                    movegen.skip_quiet_moves();
-                }
-            }
-        }
+        // NOTE: Skip Quiet Moves (FutilityMoveCount) was removed to fix quiet check handling.
+        // Previously this called movegen.skip_quiet_moves() which skipped ALL quiet moves
+        // including quiet checks, causing the engine to miss check-fork tactics.
+        // Individual pruning (LMP, futility pruning, HLP) with gives_check exemptions
+        // now handles quiet move pruning correctly while preserving quiet checks.
 
         // Capture History-based Futility Pruning (Stockfish-style)
         // For captures at shallow depths, use capture history to adjust futility threshold.
@@ -2167,10 +2144,12 @@ fn negamax(
 
             // History Leaf Pruning (Fruit-style)
             // Only in non-PV, quiet, shallow nodes and after enough moves
+            // Exempt checking moves (Stockfish-style) to avoid missing check-fork tactics
             if !in_check
                 && !is_pv
                 && !is_capture
                 && !is_promotion
+                && !gives_check
                 && depth <= hlp_max_depth()
                 && legal_moves >= hlp_min_moves()
                 && best_score > -MATE_SCORE

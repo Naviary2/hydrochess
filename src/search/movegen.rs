@@ -68,10 +68,6 @@ pub struct StagedMoveGen {
     // Excluded move (for singular extension verification)
     excluded_move: Option<Move>,
 
-    // Skip quiet moves flag (for FutilityMoveCount pruning)
-    // When set, the generator will skip generating/returning quiet moves
-    skip_quiets: bool,
-
     // Good quiets (above threshold, tried before bad captures)
     good_quiets: Vec<(Move, i32)>,
     good_quiet_idx: usize,
@@ -118,7 +114,6 @@ impl StagedMoveGen {
             killer1_yielded: false,
             killer2_yielded: false,
             excluded_move: None,
-            skip_quiets: false,
             good_quiets: Vec::with_capacity(48),
             good_quiet_idx: 0,
             bad_quiets: Vec::with_capacity(32),
@@ -138,14 +133,6 @@ impl StagedMoveGen {
         let mut r#gen = Self::new(tt_move, ply, searcher, game);
         r#gen.excluded_move = Some(excluded);
         r#gen
-    }
-
-    /// Skip generating and returning quiet moves.
-    /// Called from search when moveCount exceeds FutilityMoveCount threshold.
-    /// This prevents wasting time generating quiets that will be pruned anyway.
-    #[inline]
-    pub fn skip_quiet_moves(&mut self) {
-        self.skip_quiets = true;
     }
 
     /// Check if a move is the excluded move
@@ -464,10 +451,6 @@ impl StagedMoveGen {
 
                 MoveStage::Killer1 => {
                     self.stage = MoveStage::Killer2;
-                    // Skip killers if we're skipping quiets
-                    if self.skip_quiets {
-                        continue;
-                    }
                     if !self.killer1_yielded {
                         self.killer1_yielded = true;
                         if let Some(ref k) = self.killer1 {
@@ -485,10 +468,6 @@ impl StagedMoveGen {
 
                 MoveStage::Killer2 => {
                     self.stage = MoveStage::GenerateQuiets;
-                    // Skip killers if we're skipping quiets
-                    if self.skip_quiets {
-                        continue;
-                    }
                     if !self.killer2_yielded {
                         self.killer2_yielded = true;
                         if let Some(ref k) = self.killer2 {
@@ -505,12 +484,6 @@ impl StagedMoveGen {
                 }
 
                 MoveStage::GenerateQuiets => {
-                    // Skip quiet generation entirely if we're skipping quiets
-                    if self.skip_quiets {
-                        self.stage = MoveStage::BadCaptures;
-                        continue;
-                    }
-
                     let mut quiets_raw = Vec::with_capacity(64);
                     get_quiet_moves_into(
                         &game.board,
@@ -597,11 +570,6 @@ impl StagedMoveGen {
                 }
 
                 MoveStage::BadQuiets => {
-                    // Skip if we're skipping quiets
-                    if self.skip_quiets {
-                        self.stage = MoveStage::Done;
-                        continue;
-                    }
                     while self.bad_quiet_idx < self.bad_quiets.len() {
                         let m = self.bad_quiets[self.bad_quiet_idx].clone();
                         self.bad_quiet_idx += 1;
