@@ -1,7 +1,7 @@
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
 use crate::evaluation::{calculate_initial_material, get_piece_value};
 use crate::moves::{
-    Move, SpatialIndices, get_legal_moves, get_legal_moves_into, get_pseudo_legal_moves_for_piece,
+    Move, MoveList, SpatialIndices, get_legal_moves, get_legal_moves_into, get_pseudo_legal_moves_for_piece,
     is_square_attacked,
 };
 use arrayvec::ArrayVec;
@@ -575,7 +575,7 @@ impl GameState {
 
     /// Returns pseudo-legal moves. Legality (not leaving king in check)
     /// is checked in the search after making each move.
-    pub fn get_legal_moves(&self) -> Vec<Move> {
+    pub fn get_legal_moves(&self) -> MoveList {
         get_legal_moves(
             &self.board,
             self.turn,
@@ -587,7 +587,7 @@ impl GameState {
     }
 
     /// Fill a pre-allocated buffer with pseudo-legal moves for the current side.
-    pub fn get_legal_moves_into(&self, out: &mut Vec<Move>) {
+    pub fn get_legal_moves_into(&self, out: &mut MoveList) {
         get_legal_moves_into(
             &self.board,
             self.turn,
@@ -613,7 +613,7 @@ impl GameState {
         }
     }
 
-    pub fn get_evasion_moves_into(&self, out: &mut Vec<Move>) {
+    pub fn get_evasion_moves_into(&self, out: &mut MoveList) {
         out.clear();
 
         let our_color = self.turn;
@@ -1691,11 +1691,11 @@ impl GameState {
             return 1;
         }
         // One move buffer per ply so recursion doesn't overwrite
-        let mut bufs: Vec<Vec<Move>> = (0..=depth).map(|_| Vec::with_capacity(128)).collect();
+        let mut bufs: Vec<MoveList> = (0..=depth).map(|_| MoveList::new()).collect();
         self.perft_buf(depth, 0, &mut bufs)
     }
 
-    fn perft_buf(&mut self, depth: usize, ply: usize, bufs: &mut [Vec<Move>]) -> u64 {
+    fn perft_buf(&mut self, depth: usize, ply: usize, bufs: &mut [MoveList]) -> u64 {
         if depth == 0 {
             return 1;
         }

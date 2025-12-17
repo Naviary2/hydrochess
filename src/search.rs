@@ -1,7 +1,7 @@
 use crate::board::PieceType;
 use crate::evaluation::{evaluate, get_piece_value};
 use crate::game::GameState;
-use crate::moves::{Move, get_quiescence_captures};
+use crate::moves::{Move, MoveList, get_quiescence_captures};
 use std::cell::RefCell;
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use wasm_bindgen::prelude::*;
@@ -480,8 +480,8 @@ pub struct Searcher {
     // This distributes work across threads naturally
     pub thread_id: usize,
 
-    // Per-ply reusable move buffers to avoid Vec allocations in the search
-    pub move_buffers: Vec<Vec<Move>>,
+    // Per-ply reusable move buffers using Stack/Heap-allocated MoveList (SmallVec)
+    pub move_buffers: Vec<MoveList>,
 
     // Move history stack for continuation history (move at each ply)
     pub move_history: Vec<Option<Move>>,
@@ -529,9 +529,9 @@ impl Searcher {
             killers.push([None, None]);
         }
 
-        let mut move_buffers = Vec::with_capacity(MAX_PLY);
+        let mut move_buffers: Vec<MoveList> = Vec::with_capacity(MAX_PLY);
         for _ in 0..MAX_PLY {
-            move_buffers.push(Vec::with_capacity(64));
+            move_buffers.push(MoveList::new());
         }
 
         Searcher {
@@ -873,7 +873,7 @@ fn search_with_searcher(
     // Filter fully legal moves upfront.
     // This allows negamax_root to skip legality checks and allows us to reuse the move list
     // (and its sorting) across iterative deepening depths.
-    let mut legal_moves: Vec<Move> = Vec::with_capacity(moves.len());
+    let mut legal_moves: MoveList = MoveList::new();
     let mut fallback_move: Option<Move> = None;
 
     for m in moves {
@@ -1167,7 +1167,7 @@ fn get_best_moves_multipv_impl(
     }
 
     // Find legal moves only (filter pseudo-legal)
-    let mut legal_root_moves: Vec<Move> = Vec::with_capacity(moves.len());
+    let mut legal_root_moves: MoveList = MoveList::new();
     for m in &moves {
         let undo = game.make_move(m);
         let legal = !game.is_move_illegal();
@@ -1426,7 +1426,7 @@ pub fn negamax_node_count_for_depth(game: &mut GameState, depth: usize) -> u64 {
 
     // Generate and filter legal moves
     let moves = game.get_legal_moves();
-    let mut legal_moves = Vec::with_capacity(moves.len());
+    let mut legal_moves: MoveList = MoveList::new();
     for m in moves {
         let undo = game.make_move(&m);
         let legal = !game.is_move_illegal();
@@ -1454,7 +1454,7 @@ fn negamax_root(
     depth: usize,
     mut alpha: i32,
     beta: i32,
-    moves: &mut Vec<Move>,
+    moves: &mut MoveList,
 ) -> i32 {
     // Save original alpha for TT flag determination
     let alpha_orig = alpha;
@@ -1827,7 +1827,7 @@ fn negamax(
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut legal_moves = 0;
-    let mut quiets_searched: Vec<Move> = Vec::new();
+    let mut quiets_searched: MoveList = MoveList::new();
 
     // Singular extension conditions (checked when we reach the TT move in the loop)
     // We cache the TT probe result here to avoid re-probing
@@ -2523,7 +2523,7 @@ fn quiescence(
     // When not in check, use a specialized capture-only generator to avoid creating
     // thousands of quiet moves only to filter them out.
     // Reuse per-ply move buffer to avoid Vec allocations inside quiescence.
-    let mut tactical_moves = Vec::new();
+    let mut tactical_moves: MoveList = MoveList::new();
     std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
 
     if in_check {

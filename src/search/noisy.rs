@@ -242,7 +242,7 @@ fn negamax_root_noisy(
 
     let in_check = game.is_in_check();
 
-    let mut moves = Vec::new();
+    let mut moves: MoveList = MoveList::new();
     std::mem::swap(&mut moves, &mut searcher.move_buffers[0]);
     game.get_legal_moves_into(&mut moves);
 
@@ -535,7 +535,7 @@ fn negamax_noisy(
         }
     }
 
-    let mut moves = Vec::new();
+    let mut moves: MoveList = MoveList::new();
     std::mem::swap(&mut moves, &mut searcher.move_buffers[ply]);
     game.get_legal_moves_into(&mut moves);
 
@@ -544,7 +544,7 @@ fn negamax_noisy(
     let mut best_score = -INFINITY;
     let mut best_move: Option<Move> = None;
     let mut legal_moves = 0;
-    let mut quiets_searched: Vec<Move> = Vec::new();
+    let mut quiets_searched: MoveList = MoveList::new();
 
     // Find enemy king position for check detection
     let enemy_king_pos = match game.turn {
@@ -911,7 +911,7 @@ fn quiescence_noisy(
         }
     }
 
-    let mut tactical_moves = Vec::new();
+    let mut tactical_moves: MoveList = MoveList::new();
     std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
 
     if in_check {

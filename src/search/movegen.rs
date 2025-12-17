@@ -17,7 +17,7 @@ use super::{Searcher, hash_coord_32, hash_move_dest, static_exchange_eval};
 use crate::board::{Coordinate, PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
-use crate::moves::{Move, get_quiescence_captures, get_quiet_moves_into};
+use crate::moves::{Move, MoveList, get_quiescence_captures, get_quiet_moves_into};
 
 /// Good quiet threshold (original -4000, not Stockfish's -14000)
 const GOOD_QUIET_THRESHOLD: i32 = -4000;
@@ -315,7 +315,7 @@ impl StagedMoveGen {
 
                 MoveStage::CaptureInit => {
                     // Generate all captures
-                    let mut captures = Vec::with_capacity(32);
+                    let mut captures: MoveList = MoveList::new();
                     get_quiescence_captures(
                         &game.board,
                         game.turn,
@@ -409,7 +409,7 @@ impl StagedMoveGen {
                     }
 
                     // Generate quiets
-                    let mut quiets = Vec::with_capacity(64);
+                    let mut quiets: MoveList = MoveList::new();
                     get_quiet_moves_into(
                         &game.board,
                         game.turn,

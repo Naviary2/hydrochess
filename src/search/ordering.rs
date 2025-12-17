@@ -1,7 +1,7 @@
 use crate::board::{Coordinate, PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
-use crate::moves::Move;
+use crate::moves::{Move, MoveList};
 
 use super::Searcher;
 use super::params::{
@@ -256,7 +256,7 @@ fn path_clear_to_king(
 pub fn sort_moves(
     searcher: &Searcher,
     game: &GameState,
-    moves: &mut Vec<Move>,
+    moves: &mut MoveList,
     ply: usize,
     tt_move: &Option<Move>,
 ) {
@@ -373,13 +373,13 @@ pub fn sort_moves(
 pub fn sort_moves_root(
     searcher: &Searcher,
     game: &GameState,
-    moves: &mut Vec<Move>,
+    moves: &mut MoveList,
     tt_move: &Option<Move>,
 ) {
     sort_moves(searcher, game, moves, 0, tt_move);
 }
 
-pub fn sort_captures(game: &GameState, moves: &mut Vec<Move>) {
+pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
     moves.sort_by_cached_key(|m| {
         let mut score = 0;
         if let Some(target) = game.board.get_piece(&m.to.x, &m.to.y) {

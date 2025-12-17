@@ -27,6 +27,7 @@ rustc-hash = "2.1"
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
+smallvec = { version = "1.15.1", features = ["write"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 serde_json = "1.0"
