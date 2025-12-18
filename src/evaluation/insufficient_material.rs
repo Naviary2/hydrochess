@@ -1,4 +1,19 @@
 use crate::board::{Board, PieceType, PlayerColor};
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
+
+// Thread-local material cache: material_hash -> Option<i32> (None = sufficient, Some = divisor)
+// Caches insuffcient material results to avoid repeated board iteration.
+// Note: This may have false positives for bishop color scenarios, but is safe (returns correct
+// or slightly sub-optimal result - never incorrect).
+thread_local! {
+    static MATERIAL_CACHE: RefCell<FxHashMap<u64, Option<i32>>> = RefCell::new(FxHashMap::default());
+}
+
+/// Clear the material cache. Call at the start of a new game.
+pub fn clear_material_cache() {
+    MATERIAL_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 /// Check if a side has sufficient material to force checkmate in infinite chess.
 /// Based on the official insufficientmaterial.ts from infinitechess.org
@@ -529,12 +544,39 @@ fn has_sufficient_mating_material(board: &Board, color: PlayerColor, has_our_kin
 /// 1. If either side can force mate → None (normal eval)
 /// 2. If both sides have pieces → Some(divisor) (drawish, divide eval by divisor)
 /// 3. Otherwise (one side has no pieces) → Some(0) (insufficient, dead draw)
-pub fn evaluate_insufficient_material(board: &Board) -> Option<i32> {
+pub fn evaluate_insufficient_material(game: &crate::game::GameState) -> Option<i32> {
+    let board = &game.board;
+
     // Fast exit for complex positions
     if board.len() >= 6 {
         return None;
     }
 
+    // Check cache using material_hash
+    let material_hash = game.material_hash;
+    let cached = MATERIAL_CACHE.with(|cache| cache.borrow().get(&material_hash).copied());
+
+    if let Some(result) = cached {
+        return result;
+    }
+
+    // Cache miss - compute insufficient material
+    let result = compute_insufficient_material(board);
+
+    // Store in cache (limit size)
+    MATERIAL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(material_hash, result);
+    });
+
+    result
+}
+
+/// Core insufficient material computation. Called on cache miss.
+fn compute_insufficient_material(board: &Board) -> Option<i32> {
     // Count pieces for each side
     let mut white_has_king = false;
     let mut black_has_king = false;

@@ -1,5 +1,18 @@
 use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
+
+// Thread-local pawn structure cache: pawn_hash -> evaluation score
+// This avoids recomputing pawn structure for positions with identical pawn configurations.
+thread_local! {
+    static PAWN_CACHE: RefCell<FxHashMap<u64, i32>> = RefCell::new(FxHashMap::default());
+}
+
+/// Clear the pawn structure cache. Call at the start of a new game.
+pub fn clear_pawn_cache() {
+    PAWN_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 #[cfg(feature = "eval_tuning")]
 use once_cell::sync::Lazy;
@@ -258,7 +271,7 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
 
 pub fn evaluate(game: &GameState) -> i32 {
     // Check for insufficient material draw
-    match crate::evaluation::insufficient_material::evaluate_insufficient_material(&game.board) {
+    match crate::evaluation::insufficient_material::evaluate_insufficient_material(game) {
         Some(0) => return 0, // Dead draw
         Some(divisor) => {
             // Drawish - dampen eval
@@ -1387,6 +1400,33 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
 // ==================== Pawn Structure ====================
 
 pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
+    // Check cache first using game's pawn_hash
+    let pawn_hash = game.pawn_hash;
+
+    let cached = PAWN_CACHE.with(|cache| cache.borrow().get(&pawn_hash).copied());
+
+    if let Some(score) = cached {
+        return score;
+    }
+
+    // Cache miss - compute pawn structure
+    let score = compute_pawn_structure(game);
+
+    // Store in cache (limit cache size to avoid unbounded growth)
+    PAWN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        // Clear cache if it grows too large (simple LRU alternative)
+        if cache.len() > 16384 {
+            cache.clear();
+        }
+        cache.insert(pawn_hash, score);
+    });
+
+    score
+}
+
+/// Core pawn structure computation. Called on cache miss.
+fn compute_pawn_structure(game: &GameState) -> i32 {
     let mut score: i32 = 0;
 
     // Track pawns per file for each color

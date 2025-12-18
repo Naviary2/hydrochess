@@ -425,6 +425,12 @@ pub fn reset_search_state() {
 
     let seed = (random() * 1.8446744073709552e19) as u64;
     crate::search::noisy::reset_noise_seed(seed);
+
+    // Clear pawn structure cache for new game
+    crate::evaluation::base::clear_pawn_cache();
+
+    // Clear material cache for new game
+    crate::evaluation::insufficient_material::clear_material_cache();
 }
 
 /// Search state that persists across the search
