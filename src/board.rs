@@ -177,6 +177,13 @@ impl PieceType {
         matches!(self, PieceType::Void | PieceType::Obstacle)
     }
 
+    /// Check if this piece type is truly uncapturable (only Void - blocks and cannot be taken).
+    /// Obstacles CAN be captured despite being neutral.
+    #[inline]
+    pub fn is_uncapturable(&self) -> bool {
+        matches!(self, PieceType::Void)
+    }
+
     /// Check if this piece type is a royal (king-like) piece
     #[inline]
     pub fn is_royal(&self) -> bool {

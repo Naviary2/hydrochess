@@ -1334,10 +1334,8 @@ fn generate_sliding_capture_moves(
                     let packed = tile.piece[local_idx];
                     if packed != 0 {
                         let target = Piece::from_packed(packed);
-                        if target.color() != our_color
-                            && target.color() != PlayerColor::Neutral
-                            && !target.piece_type().is_neutral_type()
-                        {
+                        // Allow capturing obstacles (neutral but capturable), block only Voids
+                        if target.color() != our_color && !target.piece_type().is_uncapturable() {
                             out.push(Move::new(*from, Coordinate::new(x, y), *piece));
                         }
                     }
@@ -1357,7 +1355,8 @@ fn extend_captures_only(
 ) {
     for m in moves_in {
         if let Some(target) = board.get_piece(m.to.x, m.to.y) {
-            if is_enemy_piece(&target, our_color) && !target.piece_type().is_neutral_type() {
+            // Allow capturing obstacles (neutral but capturable), block only Voids
+            if is_enemy_piece(&target, our_color) && !target.piece_type().is_uncapturable() {
                 out.push(m);
             }
         }
