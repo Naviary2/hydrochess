@@ -409,25 +409,23 @@ impl GameState {
     /// Stockfish-style repetition detection for search.
     /// Returns true if the current position should be treated as a draw due to repetition.
     ///
-    /// Two cases:
-    /// 1. Threefold repetition (repetition < 0): Always a draw, regardless of ply.
-    ///    The position has occurred twice before (in game history or search), making this the third time.
-    /// 2. Twofold within search tree (repetition > 0 && repetition <= ply): Effectively a draw
-    ///    because opponent can force threefold by repeating. Only applies if the first occurrence
-    ///    is within the current search tree.
+    /// Matches Stockfish's logic exactly: `repetition != 0 && repetition < ply`
+    ///
+    /// For twofold (repetition > 0): Only a draw if the repetition distance is less than ply,
+    /// meaning the first occurrence is within the search tree.
+    ///
+    /// For threefold (repetition < 0): The negative value is always less than any positive ply,
+    /// so threefold is always detected as a draw at ply > 0.
     #[inline]
     pub fn is_repetition(&self, ply: usize) -> bool {
         // Don't check during null move search
         if self.null_moves > 0 {
             return false;
         }
-        // Threefold: repetition < 0 means position has occurred twice before (this is 3rd time)
-        if self.repetition < 0 {
-            return true;
-        }
-        // Twofold within search tree: repetition > 0 means we found a previous occurrence,
-        // and repetition < ply means it's within the current search tree (opponent can force 3-fold)
-        self.repetition > 0 && (self.repetition as usize) < ply
+        // Stockfish: return st->repetition && st->repetition < ply;
+        // This works for both positive (twofold) and negative (threefold) values.
+        // Negative values are always < positive ply, so threefold always returns true for ply > 0.
+        self.repetition != 0 && self.repetition < (ply as i32)
     }
 
     /// Check if this is a lone king endgame (one side only has a king)
@@ -594,6 +592,14 @@ impl GameState {
         self.material_hash = mh;
     }
 
+    pub fn enemy_king_pos(&self) -> Option<&Coordinate> {
+        if self.turn == PlayerColor::White {
+            self.black_king_pos.as_ref()
+        } else {
+            self.white_king_pos.as_ref()
+        }
+    }
+
     /// Returns pseudo-legal moves. Legality (not leaving king in check)
     /// is checked in the search after making each move.
     pub fn get_legal_moves(&self) -> MoveList {
@@ -604,6 +610,7 @@ impl GameState {
             &self.en_passant,
             &self.game_rules,
             &self.spatial_indices,
+            self.enemy_king_pos(),
         )
     }
 
@@ -618,6 +625,7 @@ impl GameState {
             &self.spatial_indices,
             out,
             false,
+            self.enemy_king_pos(),
         );
 
         if out.is_empty() {
@@ -630,6 +638,7 @@ impl GameState {
                 &self.spatial_indices,
                 out,
                 true,
+                self.enemy_king_pos(),
             );
         }
     }
@@ -839,6 +848,7 @@ impl GameState {
             &self.spatial_indices,
             &self.game_rules,
             false,
+            self.enemy_king_pos(),
         );
         out.extend(king_moves);
 
@@ -954,6 +964,7 @@ impl GameState {
                     &self.spatial_indices,
                     &self.game_rules,
                     true,
+                    self.enemy_king_pos(),
                 );
                 for m in pseudo {
                     for target in &targets {
@@ -1042,6 +1053,7 @@ impl GameState {
                     &self.spatial_indices,
                     &self.game_rules,
                     true,
+                    self.enemy_king_pos(),
                 );
                 for m in pseudo {
                     for target in &targets {

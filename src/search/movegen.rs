@@ -420,6 +420,7 @@ impl StagedMoveGen {
                         &game.game_rules,
                         &game.spatial_indices,
                         &mut quiets,
+                        game.enemy_king_pos(),
                     );
 
                     // Score quiets

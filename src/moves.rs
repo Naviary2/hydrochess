@@ -172,10 +172,10 @@ pub struct SpatialIndices {
     /// Anti-diagonal (x+y constant): key -> [(x, packed_piece), ...] sorted by x
     pub diag2: FxHashMap<i64, Vec<(i64, u8)>>,
     /// Lazily-populated slider interception cache.
-    /// Key: (x, y, dir_index, interception_limit) - includes limit to ensure correctness.
-    /// Value: Sorted list of valid interception distances for that slider position/direction/limit.
+    /// Key: (x, y, dir_index) where dir_index encodes the 8 cardinal/diagonal directions.
+    /// Value: Sorted list of valid interception distances for that slider position/direction.
     #[serde(skip)]
-    pub slider_cache: std::cell::RefCell<FxHashMap<(i64, i64, u8, i64), Vec<i64>>>,
+    pub slider_cache: std::cell::RefCell<FxHashMap<(i64, i64, u8), Vec<i64>>>,
 }
 
 impl SpatialIndices {
@@ -364,6 +364,7 @@ pub fn get_legal_moves_into(
     indices: &SpatialIndices,
     out: &mut MoveList,
     fallback: bool,
+    enemy_king_pos: Option<&Coordinate>, // For check target computation
 ) {
     use crate::tiles::TILE_SIZE;
 
@@ -414,6 +415,7 @@ pub fn get_legal_moves_into(
                 game_rules,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
     }
@@ -426,6 +428,7 @@ pub fn get_legal_moves(
     en_passant: &Option<EnPassantState>,
     game_rules: &GameRules,
     indices: &SpatialIndices,
+    enemy_king_pos: Option<&Coordinate>,
 ) -> MoveList {
     let mut moves = MoveList::new();
     get_legal_moves_into(
@@ -437,6 +440,7 @@ pub fn get_legal_moves(
         indices,
         &mut moves,
         false, // Normal mode
+        enemy_king_pos,
     );
 
     // Fallback: if no pseudo-legal moves found, try short-range slider fallback
@@ -452,6 +456,7 @@ pub fn get_legal_moves(
             indices,
             &mut moves,
             true, // Fallback mode
+            enemy_king_pos,
         );
     }
 
@@ -642,6 +647,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
     game_rules: &GameRules,
     fallback: bool,
     out: &mut MoveList,
+    enemy_king_pos: Option<&Coordinate>,
 ) {
     match piece.piece_type() {
         // Neutral/blocking pieces cannot move
@@ -676,6 +682,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Bishop => {
@@ -687,6 +694,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Queen | PieceType::RoyalQueen => {
@@ -698,6 +706,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
             generate_sliding_moves_into(
                 board,
@@ -707,6 +716,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Chancellor => {
@@ -719,6 +729,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Archbishop => {
@@ -731,6 +742,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Amazon => {
@@ -743,6 +755,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
             generate_sliding_moves_into(
                 board,
@@ -752,6 +765,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                 indices,
                 fallback,
                 out,
+                enemy_king_pos,
             );
         }
         PieceType::Camel => generate_leaper_moves_into(board, from, piece, 1, 3, out),
@@ -783,6 +797,7 @@ pub fn get_pseudo_legal_moves_for_piece(
     indices: &SpatialIndices,
     game_rules: &GameRules,
     fallback: bool,
+    enemy_king_pos: Option<&Coordinate>,
 ) -> MoveList {
     let mut out = MoveList::new();
     get_pseudo_legal_moves_for_piece_into(
@@ -795,6 +810,7 @@ pub fn get_pseudo_legal_moves_for_piece(
         game_rules,
         fallback,
         &mut out,
+        enemy_king_pos,
     );
     out
 }
@@ -1424,6 +1440,7 @@ pub fn get_quiet_moves_into(
     game_rules: &GameRules,
     indices: &SpatialIndices,
     out: &mut MoveList,
+    enemy_king_pos: Option<&Coordinate>, // For check target computation
 ) {
     out.clear();
 
@@ -1444,6 +1461,7 @@ pub fn get_quiet_moves_into(
             game_rules,
             indices,
             out,
+            enemy_king_pos,
         );
     }
 }
@@ -1458,6 +1476,7 @@ fn generate_quiets_for_piece(
     game_rules: &GameRules,
     indices: &SpatialIndices,
     out: &mut MoveList,
+    enemy_king_pos: Option<&Coordinate>,
 ) {
     match piece.piece_type() {
         PieceType::Void | PieceType::Obstacle => {}
@@ -1519,16 +1538,39 @@ fn generate_quiets_for_piece(
 
         // Sliders
         PieceType::Rook => {
-            let m = generate_sliding_moves(board, from, piece, &[(1, 0), (0, 1)], indices, false);
+            let m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             extend_quiets_only(board, m, out);
         }
         PieceType::Bishop => {
-            let m = generate_sliding_moves(board, from, piece, &[(1, 1), (1, -1)], indices, false);
+            let m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             extend_quiets_only(board, m, out);
         }
         PieceType::Queen | PieceType::RoyalQueen => {
-            let mut m =
-                generate_sliding_moves(board, from, piece, &[(1, 0), (0, 1)], indices, false);
+            let mut m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             m.extend(generate_sliding_moves(
                 board,
                 from,
@@ -1536,28 +1578,50 @@ fn generate_quiets_for_piece(
                 &[(1, 1), (1, -1)],
                 indices,
                 false,
+                enemy_king_pos,
             ));
             extend_quiets_only(board, m, out);
         }
         PieceType::Chancellor => {
             let knight_m = generate_leaper_moves(board, from, piece, 1, 2);
             extend_quiets_only(board, knight_m, out);
-            let rook_m =
-                generate_sliding_moves(board, from, piece, &[(1, 0), (0, 1)], indices, false);
+            let rook_m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             extend_quiets_only(board, rook_m, out);
         }
         PieceType::Archbishop => {
             let knight_m = generate_leaper_moves(board, from, piece, 1, 2);
             extend_quiets_only(board, knight_m, out);
-            let bishop_m =
-                generate_sliding_moves(board, from, piece, &[(1, 1), (1, -1)], indices, false);
+            let bishop_m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 1), (1, -1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             extend_quiets_only(board, bishop_m, out);
         }
         PieceType::Amazon => {
             let knight_m = generate_leaper_moves(board, from, piece, 1, 2);
             extend_quiets_only(board, knight_m, out);
-            let mut queen_m =
-                generate_sliding_moves(board, from, piece, &[(1, 0), (0, 1)], indices, false);
+            let mut queen_m = generate_sliding_moves(
+                board,
+                from,
+                piece,
+                &[(1, 0), (0, 1)],
+                indices,
+                false,
+                enemy_king_pos,
+            );
             queen_m.extend(generate_sliding_moves(
                 board,
                 from,
@@ -1565,6 +1629,7 @@ fn generate_quiets_for_piece(
                 &[(1, 1), (1, -1)],
                 indices,
                 false,
+                enemy_king_pos,
             ));
             extend_quiets_only(board, queen_m, out);
         }
@@ -1853,6 +1918,7 @@ pub fn generate_sliding_moves(
     directions: &[(i64, i64)],
     indices: &SpatialIndices,
     fallback: bool,
+    enemy_king_pos: Option<&Coordinate>, // Cached enemy king position for O(1) check target computation
 ) -> MoveList {
     // Original wiggle values - important for tactics
     const ENEMY_WIGGLE: i64 = 2;
@@ -1867,6 +1933,8 @@ pub fn generate_sliding_moves(
     let _piece_count = board.len();
     let mut moves = MoveList::new();
     let our_color = piece.color();
+
+    let ek_ref = enemy_king_pos;
 
     for &(dx_raw, dy_raw) in directions {
         for sign in [1i64, -1i64] {
@@ -1938,29 +2006,30 @@ pub fn generate_sliding_moves(
                 target_dists.push(d);
             }
 
-            // Process pieces for interception using targeted spatial lookups (O(L) where L is limit)
-            let search_range = interception_limit + ENEMY_WIGGLE;
-
-            // Cache key: (x, y, dir_index, interception_limit) - includes limit for correctness
+            // Cache key: (x, y, direction_index) where direction_index encodes (dir_x, dir_y)
+            // Direction encoding: 0=E, 1=NE, 2=N, 3=NW, 4=W, 5=SW, 6=S, 7=SE
             let dir_index: u8 = match (dir_x.signum(), dir_y.signum()) {
-                (1, 0) => 0,
-                (1, 1) => 1,
-                (0, 1) => 2,
-                (-1, 1) => 3,
-                (-1, 0) => 4,
-                (-1, -1) => 5,
-                (0, -1) => 6,
-                (1, -1) => 7,
-                _ => 0,
+                (1, 0) => 0,   // East
+                (1, 1) => 1,   // NE
+                (0, 1) => 2,   // North
+                (-1, 1) => 3,  // NW
+                (-1, 0) => 4,  // West
+                (-1, -1) => 5, // SW
+                (0, -1) => 6,  // South
+                (1, -1) => 7,  // SE
+                _ => 0,        // fallback
             };
-            let cache_key = (from.x, from.y, dir_index, interception_limit);
+            let cache_key = (from.x, from.y, dir_index);
 
             // Check cache first
-            if let Some(cached) = indices.slider_cache.borrow().get(&cache_key).cloned() {
-                target_dists.extend(cached);
+            let cached = indices.slider_cache.borrow().get(&cache_key).cloned();
+            if let Some(cached_dists) = cached {
+                // Use cached interception distances, but still add blocker wiggle room
+                target_dists.extend(cached_dists.iter().filter(|&&d| d <= interception_limit));
             } else {
                 // Compute interception distances
-                let pre_len = target_dists.len();
+                // Process pieces for interception using targeted spatial lookups (O(L) where L is limit)
+                let search_range = interception_limit + ENEMY_WIGGLE;
 
                 if is_horizontal {
                     // Horizontal ray: check only the relevant columns in direction
@@ -2155,15 +2224,13 @@ pub fn generate_sliding_moves(
                 }
 
                 // Store computed distances in cache
-                let to_cache: Vec<i64> = target_dists[pre_len..].to_vec();
                 indices
                     .slider_cache
                     .borrow_mut()
-                    .insert(cache_key, to_cache);
+                    .insert(cache_key, target_dists.clone());
             } // end else (cache miss)
 
             // Add blocker wiggle room (up to max_dist)
-
             if closest_dist < i64::MAX {
                 let wr = if closest_is_enemy {
                     ENEMY_WIGGLE
@@ -2176,6 +2243,64 @@ pub fn generate_sliding_moves(
                         target_dists.push(d);
                     }
                 }
+            }
+
+            // Add check target: if we have enemy king position, compute distance for check
+            // This is O(1) per direction - much simpler and faster than scanning
+            if let Some(ek) = ek_ref {
+                let kx = ek.x;
+                let ky = ek.y;
+                let piece_type = piece.piece_type();
+
+                // For orthogonal rays, check if we can give diagonal check
+                if is_horizontal {
+                    // Horizontal ray: find column where diagonal check is possible
+                    // From (tx, from.y), can attack (kx, ky) diagonally if |tx - kx| == |from.y - ky|
+                    if from.y != ky {
+                        if matches!(
+                            piece_type,
+                            crate::board::PieceType::Queen
+                                | crate::board::PieceType::Bishop
+                                | crate::board::PieceType::Archbishop
+                                | crate::board::PieceType::Amazon
+                        ) {
+                            let diff = (from.y - ky).abs();
+                            for target_x in [kx + diff, kx - diff] {
+                                let dx = target_x - from.x;
+                                if dx != 0 && dx.signum() == dir_x.signum() {
+                                    let d = dx.abs();
+                                    if d <= max_dist && d <= MAX_INTERCEPTION_DIST {
+                                        target_dists.push(d);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if is_vertical {
+                    // Vertical ray: find row where diagonal check is possible
+                    // From (from.x, ty), can attack (kx, ky) diagonally if |from.x - kx| == |ty - ky|
+                    if from.x != kx {
+                        if matches!(
+                            piece_type,
+                            crate::board::PieceType::Queen
+                                | crate::board::PieceType::Bishop
+                                | crate::board::PieceType::Archbishop
+                                | crate::board::PieceType::Amazon
+                        ) {
+                            let diff = (from.x - kx).abs();
+                            for target_y in [ky + diff, ky - diff] {
+                                let dy = target_y - from.y;
+                                if dy != 0 && dy.signum() == dir_y.signum() {
+                                    let d = dy.abs();
+                                    if d <= max_dist && d <= MAX_INTERCEPTION_DIST {
+                                        target_dists.push(d);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // TODO: diagonal rays could check for orthogonal attacks if needed
             }
 
             // Sort and deduplicate
@@ -2718,9 +2843,18 @@ pub fn generate_sliding_moves_into(
     indices: &SpatialIndices,
     fallback: bool,
     out: &mut MoveList,
+    enemy_king_pos: Option<&Coordinate>,
 ) {
     // Reuse implementation by delegating to existing function and extending
-    let moves = generate_sliding_moves(board, from, piece, directions, indices, fallback);
+    let moves = generate_sliding_moves(
+        board,
+        from,
+        piece,
+        directions,
+        indices,
+        fallback,
+        enemy_king_pos,
+    );
     out.extend(moves);
 }
 
