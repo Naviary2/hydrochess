@@ -592,6 +592,7 @@ impl GameState {
         self.material_hash = mh;
     }
 
+    #[inline(always)]
     pub fn enemy_king_pos(&self) -> Option<&Coordinate> {
         if self.turn == PlayerColor::White {
             self.black_king_pos.as_ref()
@@ -1206,116 +1207,31 @@ impl GameState {
         to_y: i64,
         promotion: Option<&str>,
     ) {
-        // Push current position hash BEFORE making the move
-        let current_hash = self.generate_hash();
-        self.hash_stack.push(current_hash);
-
-        // Once a piece moves from its original square, we no longer treat
-        // that coordinate as an undeveloped starting square.
-        self.starting_squares
-            .remove(&Coordinate::new(from_x, from_y));
-
-        let piece = match self.board.remove_piece(&from_x, &from_y) {
-            Some(p) => p,
+        let piece = match self.board.get_piece(from_x, from_y) {
+            Some(p) => *p,
             None => return, // No piece at from - invalid move, just skip
         };
-        // Update spatial indices: remove piece from source square
-        self.spatial_indices.remove(from_x, from_y);
 
-        // Track king position updates (no undo needed for make_move_coords)
-        if piece.piece_type().is_royal() {
-            if piece.color() == PlayerColor::White {
-                self.white_king_pos = Some(Coordinate::new(to_x, to_y));
-            } else if piece.color() == PlayerColor::Black {
-                self.black_king_pos = Some(Coordinate::new(to_x, to_y));
-            }
-        }
+        let mut m = Move {
+            from: Coordinate::new(from_x, from_y),
+            to: Coordinate::new(to_x, to_y),
+            piece,
+            promotion: promotion.and_then(PieceType::from_str),
+            rook_coord: None,
+        };
 
-        // Handle capture
-        let captured = self.board.remove_piece(&to_x, &to_y);
-        let is_capture = captured.is_some();
-
-        if let Some(ref cap) = captured {
-            let value = get_piece_value(cap.piece_type());
-            if cap.color() == PlayerColor::White {
-                self.material_score -= value;
-                self.white_piece_count = self.white_piece_count.saturating_sub(1);
-            } else {
-                self.material_score += value;
-                self.black_piece_count = self.black_piece_count.saturating_sub(1);
-            }
-        }
-
-        // Handle en passant capture
-        let mut is_ep_capture = false;
-        if piece.piece_type() == PieceType::Pawn {
-            if let Some(ep) = &self.en_passant {
-                if to_x == ep.square.x && to_y == ep.square.y {
-                    if let Some(captured_pawn) = self
-                        .board
-                        .remove_piece(&ep.pawn_square.x, &ep.pawn_square.y)
-                    {
-                        is_ep_capture = true;
-                        // Update spatial indices for EP captured pawn
-                        self.spatial_indices
-                            .remove(ep.pawn_square.x, ep.pawn_square.y);
-
-                        let value = get_piece_value(captured_pawn.piece_type());
-                        if captured_pawn.color() == PlayerColor::White {
-                            self.material_score -= value;
-                            self.white_piece_count = self.white_piece_count.saturating_sub(1);
-                            self.white_pawn_count = self.white_pawn_count.saturating_sub(1);
-                        } else {
-                            self.material_score += value;
-                            self.black_piece_count = self.black_piece_count.saturating_sub(1);
-                            self.black_pawn_count = self.black_pawn_count.saturating_sub(1);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Handle promotion material
-        if let Some(promo_str) = promotion {
-            let pawn_val = get_piece_value(PieceType::Pawn);
-            if piece.color() == PlayerColor::White {
-                self.material_score -= pawn_val;
-            } else {
-                self.material_score += pawn_val;
-            }
-
-            let promo_type = PieceType::from_str(promo_str).unwrap_or(PieceType::Queen);
-            let promo_val = get_piece_value(promo_type);
-            if piece.color() == PlayerColor::White {
-                self.material_score += promo_val;
-            } else {
-                self.material_score -= promo_val;
-            }
-        }
-
-        // Update special rights - moving piece loses its rights
-        self.special_rights.remove(&Coordinate::new(from_x, from_y));
-        // Captured piece (if any) loses its rights
-        if is_capture {
-            self.special_rights.remove(&Coordinate::new(to_x, to_y));
-        }
-
-        // Handle castling (king moves more than 1 square horizontally)
-        if piece.piece_type() == PieceType::King || piece.piece_type() == PieceType::RoyalCentaur {
+        // Detect if this is a castling move to populate rook_coord
+        if piece.piece_type() == PieceType::King {
             let dx = to_x - from_x;
             if dx.abs() > 1 {
                 // Find the rook BEYOND the king's destination (rook is outside the path)
                 // e.g., kingside: king 5,1->7,1, rook at 8,1 moves to 6,1
                 let rook_dir = if dx > 0 { 1 } else { -1 };
                 let mut rook_x = to_x + rook_dir; // Start searching past king's destination
-                while rook_x >= -1_000_000 && rook_x <= 1_000_000 {
+                while rook_x >= -100 && rook_x <= 100 {
                     if let Some(r) = self.board.get_piece(rook_x, from_y) {
                         if r.piece_type() == PieceType::Rook && r.color() == piece.color() {
-                            // Found the rook - move it to the square the king jumped over
-                            let rook = self.board.remove_piece(&rook_x, &from_y).unwrap();
-                            let rook_to_x = to_x - rook_dir; // Rook goes on the other side of king
-                            self.board.set_piece(rook_to_x, from_y, rook);
-                            self.special_rights.remove(&Coordinate::new(rook_x, from_y));
+                            m.rook_coord = Some(Coordinate::new(rook_x, from_y));
                             break;
                         }
                         break; // Hit a non-rook piece, stop searching
@@ -1325,45 +1241,8 @@ impl GameState {
             }
         }
 
-        // Place the piece (with promotion if applicable)
-        let final_piece = if let Some(promo_str) = promotion {
-            if let Some(promo_type) = PieceType::from_str(promo_str) {
-                Piece::new(promo_type, piece.color())
-            } else {
-                piece.clone()
-            }
-        } else {
-            piece.clone()
-        };
-        self.board.set_piece(to_x, to_y, final_piece);
-        // Update spatial indices for piece on destination square
-        self.spatial_indices.add(to_x, to_y, final_piece.packed());
-
-        // Update en passant state
-        self.en_passant = None;
-        if piece.piece_type() == PieceType::Pawn {
-            let dy = to_y - from_y;
-            if dy.abs() == 2 {
-                let ep_y = from_y + (dy / 2);
-                self.en_passant = Some(EnPassantState {
-                    square: Coordinate::new(from_x, ep_y),
-                    pawn_square: Coordinate::new(to_x, to_y),
-                });
-            }
-        }
-
-        // Update clocks
-        if piece.piece_type() == PieceType::Pawn || is_capture || is_ep_capture {
-            self.halfmove_clock = 0;
-        } else {
-            self.halfmove_clock += 1;
-        }
-
-        if self.turn == PlayerColor::Black {
-            self.fullmove_number += 1;
-        }
-
-        self.turn = self.turn.opponent();
+        // Execute the move using the centralized logic
+        self.make_move(&m);
     }
 
     pub fn make_move(&mut self, m: &Move) -> UndoMove {

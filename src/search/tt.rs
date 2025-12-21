@@ -30,17 +30,16 @@ pub fn value_to_tt(value: i32, ply: usize) -> i32 {
 /// - value: The score stored in TT
 /// - ply: Current search ply
 /// - rule50_count: Current halfmove clock (NOT remaining moves)
+/// - rule_limit: Current move rule limit (e.g. 100 for 50-move rule)
 #[inline]
-pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32) -> i32 {
+pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32, rule_limit: i32) -> i32 {
     // Handle winning mate scores (we are giving mate)
     if value > MATE_SCORE {
         // mate_distance = how many plies until mate from the stored position
         let mate_distance = MATE_VALUE - value;
 
-        // Stockfish: if (VALUE_MATE - v > 100 - r50c)
-        // Which is: mate_distance > 100 - rule50_count
-        // Or: mate_distance + rule50_count > 100
-        if mate_distance + rule50_count as i32 > 100 {
+        // Or: mate_distance + rule50_count > rule_limit
+        if mate_distance + rule50_count as i32 > rule_limit {
             // Downgrade to non-mate winning score (just below mate threshold)
             return MATE_SCORE - 1;
         }
@@ -53,7 +52,7 @@ pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32) -> i32 {
     if value < -MATE_SCORE {
         let mate_distance = MATE_VALUE + value;
 
-        if mate_distance + rule50_count as i32 > 100 {
+        if mate_distance + rule50_count as i32 > rule_limit {
             // Downgrade to non-mate losing score
             return -MATE_SCORE + 1;
         }
@@ -407,6 +406,7 @@ impl TranspositionTable {
         depth: usize,
         ply: usize,
         rule50_count: u32,
+        rule_limit: i32,
     ) -> Option<(i32, Option<Move>)> {
         let idx = self.bucket_index(hash);
         let bucket = &self.buckets[idx];
@@ -424,7 +424,7 @@ impl TranspositionTable {
             // Only use score if depth is sufficient
             if entry.depth as usize >= depth {
                 // Adjust score from TT to search value, handling 50-move rule
-                let score = value_from_tt(entry.score, ply, rule50_count);
+                let score = value_from_tt(entry.score, ply, rule50_count, rule_limit);
 
                 // Check if we can use this score for a cutoff
                 let usable_score = match entry.flag() {
@@ -638,7 +638,7 @@ mod tests {
         let hash = 0x123456789ABCDEF0u64;
         tt.store(hash, 5, TTFlag::Exact, 100, None, 0);
 
-        let result = tt.probe(hash, -1000, 1000, 5, 0, 100);
+        let result = tt.probe(hash, -1000, 1000, 5, 0, 0, 100);
         assert!(result.is_some());
         let (score, _) = result.unwrap();
         assert_eq!(score, 100);

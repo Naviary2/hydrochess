@@ -243,7 +243,8 @@ impl SharedTT {
         beta: i32,
         depth: usize,
         ply: usize,
-        _generation: u8,
+        rule50_count: u32,
+        rule_limit: i32,
     ) -> Option<(i32, Option<Move>)> {
         let bucket_idx = self.bucket_index(hash);
         let offset = self.bucket_offset(bucket_idx);
@@ -270,12 +271,9 @@ impl SharedTT {
             let best_move = Self::unpack_move(w1, w2);
             let flag = SharedTTFlag::from_u8(gen_bound);
 
-            // Adjust mate scores for ply
-            if score > MATE_SCORE {
-                score -= ply as i32;
-            } else if score < -MATE_SCORE {
-                score += ply as i32;
-            }
+            // Adjust score from TT to search value, handling 50-move rule
+            // We'll use the logic from tt.rs:value_from_tt
+            let score = crate::search::tt::value_from_tt(score, ply, rule50_count, rule_limit);
 
             // Check if score is usable
             if stored_depth as usize >= depth {
@@ -471,6 +469,8 @@ impl SharedTTView {
         beta: i32,
         depth: usize,
         ply: usize,
+        rule50_count: u32,
+        rule_limit: i32,
     ) -> Option<(i32, Option<Move>)> {
         let bucket_idx = self.bucket_index(hash);
         let base_offset = self.bucket_offset(bucket_idx);
@@ -494,12 +494,8 @@ impl SharedTTView {
             let best_move = SharedTT::unpack_move(w1, w2);
             let flag = SharedTTFlag::from_u8(gen_bound);
 
-            // Adjust mate scores
-            if score > MATE_SCORE {
-                score -= ply as i32;
-            } else if score < -MATE_SCORE {
-                score += ply as i32;
-            }
+            // Adjust score from TT to search value, handling 50-move rule
+            let score = crate::search::tt::value_from_tt(score, ply, rule50_count, rule_limit);
 
             if stored_depth as usize >= depth {
                 let usable = match flag {

@@ -210,13 +210,14 @@ pub fn probe_tt_with_shared(
     depth: usize,
     ply: usize,
     rule50_count: u32,
+    rule_limit: i32,
 ) -> Option<(i32, Option<Move>)> {
     // On WASM with shared TT configured, use SharedTTView
     #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
     {
         if let Some(shared_tt) = create_shared_tt_view() {
             // SAFETY: SharedTTView uses atomic operations for thread-safety
-            let result = unsafe { shared_tt.probe(hash, alpha, beta, depth, ply) };
+            let result = unsafe { shared_tt.probe(hash, alpha, beta, depth, ply, rule_limit) };
             return result;
         }
     }
@@ -224,7 +225,7 @@ pub fn probe_tt_with_shared(
     // Fall back to local TT
     searcher
         .tt
-        .probe(hash, alpha, beta, depth, ply, rule50_count)
+        .probe(hash, alpha, beta, depth, ply, rule50_count, rule_limit)
 }
 
 /// Store to the TT, using SharedTTView when available for Lazy SMP.
@@ -529,6 +530,9 @@ pub struct Searcher {
     /// Stores the LMR reduction applied at each ply.
     /// Used to adjust depth based on prior search decisions.
     pub reduction_stack: Vec<i32>,
+
+    /// Dynamic move rule limit (e.g. 100 for 50-move rule)
+    pub move_rule_limit: i32,
 }
 
 impl Searcher {
@@ -580,6 +584,7 @@ impl Searcher {
             lastmove_corrhist: Box::new([0i32; LASTMOVE_CORRHIST_SIZE]),
             tt_move_history: 0,
             reduction_stack: vec![0; MAX_PLY],
+            move_rule_limit: 100, // Default, will be updated from GameState
         }
     }
 
@@ -1122,6 +1127,7 @@ pub fn get_best_moves_multipv(
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
         searcher.set_corrhist_mode(game);
+        searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
 
         let mut lines: Vec<PVLine> = Vec::with_capacity(1);
         if let Some((best_move, score)) = search_with_searcher(&mut searcher, game, max_depth) {
@@ -1143,6 +1149,7 @@ pub fn get_best_moves_multipv(
     searcher.hot.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
     searcher.set_corrhist_mode(game);
+    searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
 
     get_best_moves_multipv_impl(&mut searcher, game, max_depth, multi_pv, silent)
 }
@@ -1481,9 +1488,16 @@ fn negamax_root(
     // Probe TT for best move from previous search (uses shared TT if configured)
     // Stockfish passes rule50_count (halfmove_clock) directly to value_from_tt
     let rule50_count = game.halfmove_clock;
-    if let Some((_, best)) =
-        probe_tt_with_shared(searcher, hash, alpha, beta, depth, 0, rule50_count)
-    {
+    if let Some((_, best)) = probe_tt_with_shared(
+        searcher,
+        hash,
+        alpha,
+        beta,
+        depth,
+        0,
+        rule50_count,
+        searcher.move_rule_limit,
+    ) {
         tt_move = best;
     }
 
@@ -1693,15 +1707,27 @@ fn negamax(
 
     // Stockfish passes rule50_count (halfmove_clock) directly to value_from_tt
     let rule50_count = game.halfmove_clock;
-    if let Some((score, best)) =
-        probe_tt_with_shared(searcher, hash, alpha, beta, depth, ply, rule50_count)
-    {
+    if let Some((score, best)) = probe_tt_with_shared(
+        searcher,
+        hash,
+        alpha,
+        beta,
+        depth,
+        ply,
+        rule50_count,
+        searcher.move_rule_limit,
+    ) {
         tt_move = best;
         // In non-PV nodes, use TT cutoff if valid score returned
         // Stockfish's "graph history interaction" workaround:
         // - Don't produce TT cutoffs when rule50 is high (>= 96)
         // - Don't produce TT cutoffs when position has repetition history
-        if !is_pv && score != INFINITY + 1 && game.halfmove_clock < 96 && game.repetition == 0 {
+        let rule_limit = searcher.move_rule_limit as u32;
+        if !is_pv
+            && score != INFINITY + 1
+            && game.halfmove_clock < rule_limit.saturating_sub(4)
+            && game.repetition == 0
+        {
             return score;
         }
     }

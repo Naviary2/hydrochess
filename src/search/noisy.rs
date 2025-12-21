@@ -48,6 +48,7 @@ pub fn get_best_move_with_noise(
     searcher.hot.time_limit_ms = time_limit_ms;
     searcher.silent = silent;
     searcher.set_corrhist_mode(game);
+    searcher.move_rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
 
     if noise_amp <= 0 {
         let result = super::get_best_move(game, max_depth, time_limit_ms, silent);
@@ -234,9 +235,16 @@ fn negamax_root_noisy(
 
     // Probe TT for best move from previous search (uses shared TT if configured)
     let rule50_count = game.halfmove_clock;
-    if let Some((_, best)) =
-        super::probe_tt_with_shared(searcher, hash, alpha, beta, depth, 0, rule50_count)
-    {
+    if let Some((_, best)) = super::probe_tt_with_shared(
+        searcher,
+        hash,
+        alpha,
+        beta,
+        depth,
+        0,
+        rule50_count,
+        searcher.move_rule_limit,
+    ) {
         tt_move = best;
     }
 
@@ -423,12 +431,24 @@ fn negamax_noisy(
     let mut tt_move: Option<Move> = None;
 
     let rule50_count = game.halfmove_clock;
-    if let Some((score, best)) =
-        super::probe_tt_with_shared(searcher, hash, alpha, beta, depth, ply, rule50_count)
-    {
+    if let Some((score, best)) = super::probe_tt_with_shared(
+        searcher,
+        hash,
+        alpha,
+        beta,
+        depth,
+        ply,
+        rule50_count,
+        searcher.move_rule_limit,
+    ) {
         tt_move = best;
         // Stockfish's "graph history interaction" workaround:
-        if !is_pv && score != INFINITY + 1 && game.halfmove_clock < 96 && game.repetition == 0 {
+        let rule_limit = searcher.move_rule_limit as u32;
+        if !is_pv
+            && score != super::INFINITY + 1
+            && game.halfmove_clock < rule_limit.saturating_sub(4)
+            && game.repetition == 0
+        {
             return score;
         }
     }

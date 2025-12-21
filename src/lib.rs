@@ -406,8 +406,8 @@ impl Engine {
             turn: js_turn,
             special_rights,
             en_passant: None,
-            halfmove_clock: 0,
-            fullmove_number: 1,
+            halfmove_clock: js_game.halfmove_clock,
+            fullmove_number: 1, // Final value set from JS after history replay
             material_score: 0,
             game_rules,
             variant: js_game
@@ -475,13 +475,9 @@ impl Engine {
                     game.make_move_coords(from_x, from_y, to_x, to_y, promo);
                 }
             }
-            // After replay, GameState.turn, clocks, and en_passant have been
-            // updated naturally by make_move_coords.
         }
 
-        // Always use the clocks passed from JS, as they reflect the authoritative state
-        // (e.g. edited counters in board editor, or simple synchronization).
-        game.halfmove_clock = js_game.halfmove_clock;
+        // Apply target fullmove number from JS (the "end" value)
         game.fullmove_number = if js_game.fullmove_number == 0 {
             1
         } else {
