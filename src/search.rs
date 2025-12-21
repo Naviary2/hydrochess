@@ -650,14 +650,7 @@ impl Searcher {
             return false;
         }
 
-        // Check time only every N nodes to keep the hot path cheap, especially
-        // on wasm where elapsed_ms() crosses the JS boundary.
-        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-        const TIME_CHECK_MASK: u64 = 8191; // every 8192 nodes
-        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
-        const TIME_CHECK_MASK: u64 = 2047; // every 2048 nodes
-
-        if self.hot.nodes & TIME_CHECK_MASK == 0 {
+        if self.hot.nodes & 8191 == 0 {
             if self.hot.timer.elapsed_ms() >= self.hot.time_limit_ms {
                 self.hot.stopped = true;
             }
