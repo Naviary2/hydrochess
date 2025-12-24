@@ -189,7 +189,7 @@ const KNIGHTRIDER_RAY_BONUS: i32 = 3; // Per square of knight-ray mobility
 
 // Pawns far from promotion are worth much less in infinite chess
 const PAWN_FULL_VALUE_THRESHOLD: i64 = 6; // Within 6 ranks = full value
-const PAWN_PAST_PROMO_PENALTY: i32 = 80; // Massive penalty for pawns that can't promote
+const PAWN_PAST_PROMO_PENALTY: i32 = 90; // Massive penalty for pawns that can't promote (worth 10x less)
 const PAWN_FAR_FROM_PROMO_PENALTY: i32 = 50; // Flat penalty for back pawns (no benefit from advancing)
 
 // ==================== King Infinite Exposure ====================
@@ -212,35 +212,10 @@ const KING_ATTACKER_NEAR_OWN_KING_PENALTY: i32 = 8; // Penalty for high-value pi
 
 // ==================== Game Phase ====================
 
-// Phase based on piece count (excluding pawns)
-// Opening: >= 70% of pieces remain -> no pawn advancement bonus, development focus
-// Middlegame: 30-70% of pieces remain -> partial pawn advancement bonus
-// Endgame: < 30% of pieces remain -> full pawn evaluation
-const ENDGAME_PIECE_THRESHOLD: i32 = 30; // Less than 30% = endgame
-const MIDDLEGAME_PIECE_THRESHOLD: i32 = 70; // More than 70% = opening
-
 // Development thresholds - for attack scaling only
 const UNDEVELOPED_MINORS_THRESHOLD: i32 = 2;
 const DEVELOPMENT_PHASE_ATTACK_SCALE: i32 = 50;
 const DEVELOPED_PHASE_ATTACK_SCALE: i32 = 100;
-
-/// Returns game phase as percentage (100 = opening, 0 = pure endgame)
-/// Uses cached piece counts for O(1) performance
-#[inline]
-fn calculate_game_phase(game: &GameState) -> i32 {
-    // Use the cached counts from GameState (set at game start, updated by make/undo)
-    // We only count non-pawn pieces for game phase.
-    let current_pieces = (game.white_piece_count.saturating_sub(game.white_pawn_count)
-        + game.black_piece_count.saturating_sub(game.black_pawn_count))
-        as i32;
-    let starting_pieces = (game.starting_white_pieces + game.starting_black_pieces) as i32;
-
-    if starting_pieces == 0 {
-        return 50; // Default to middlegame
-    }
-
-    ((current_pieces * 100) / starting_pieces).min(100)
-}
 
 /// Compute the centroid of all non-obstacle, non-void pieces on the board.
 /// Used for piece cloud calculations. (Made public for variant modules.)
@@ -374,9 +349,9 @@ fn evaluate_inner(game: &GameState) -> i32 {
     let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
     let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
 
-    // Call optimized single-pass advancement check
-    let (pawn_adv_score, white_has_promo, black_has_promo) = evaluate_all_pawn_advancements(game);
-    score += pawn_adv_score;
+    // Call optimized single-pass pawn evaluation
+    let (pawn_score, white_has_promo, black_has_promo) = evaluate_pawns(game);
+    score += pawn_score;
 
     let mut mop_up_applied = false;
 
@@ -443,13 +418,6 @@ pub fn evaluate_pieces(
     black_king: &Option<Coordinate>,
 ) -> i32 {
     let mut score: i32 = 0;
-
-    let white_promo_rank = game.white_promo_rank;
-    let black_promo_rank = game.black_promo_rank;
-
-    let game_phase = calculate_game_phase(game);
-    let is_opening = game_phase >= MIDDLEGAME_PIECE_THRESHOLD;
-    let is_endgame = game_phase < ENDGAME_PIECE_THRESHOLD;
 
     // BITBOARD: Pass 1 - Single metadata collection
     let mut white_undeveloped = 0;
@@ -569,25 +537,6 @@ pub fn evaluate_pieces(
                 PieceType::Knight => evaluate_knight(x, y, piece.color(), black_king, white_king),
                 PieceType::Bishop => {
                     evaluate_bishop(game, x, y, piece.color(), white_king, black_king)
-                }
-                PieceType::Pawn => {
-                    let pawn_eval = evaluate_pawn_position(
-                        x,
-                        y,
-                        piece.color(),
-                        white_promo_rank,
-                        black_promo_rank,
-                    );
-                    if is_opening {
-                        if x >= 3 && x <= 6 { 5 } else { 0 }
-                    } else if is_endgame {
-                        pawn_eval
-                    } else {
-                        let scale = 100
-                            - ((game_phase - ENDGAME_PIECE_THRESHOLD) * 100
-                                / (MIDDLEGAME_PIECE_THRESHOLD - ENDGAME_PIECE_THRESHOLD));
-                        pawn_eval * scale / 100
-                    }
                 }
                 PieceType::Chancellor => {
                     let rook_eval =
@@ -1127,73 +1076,28 @@ pub fn evaluate_bishop(
     bonus
 }
 
-pub fn evaluate_pawn_position(
-    x: i64,
-    y: i64,
-    color: PlayerColor,
-    white_promo_rank: i64,
-    black_promo_rank: i64,
-) -> i32 {
-    let mut bonus: i32 = 0;
-
-    // Advancement bonus and distance penalty based on distance to promotion.
-    // In infinite chess, back pawns are nearly worthless - they take many
-    // tempos to promote and don't contribute to the position.
-    match color {
-        PlayerColor::White => {
-            let dist = (white_promo_rank - y).max(0);
-
-            // Check if pawn is PAST promotion rank (can't promote - worthless!)
-            if y > white_promo_rank {
-                bonus -= PAWN_PAST_PROMO_PENALTY;
-            } else if dist > PAWN_FULL_VALUE_THRESHOLD {
-                // Far from promotion - flat penalty, NO benefit from advancing
-                // This prevents the engine from wasting tempos pushing back pawns
-                bonus -= PAWN_FAR_FROM_PROMO_PENALTY;
-            } else {
-                // Close to promotion - advancement bonus applies
-                bonus += ((PAWN_FULL_VALUE_THRESHOLD - dist) as i32) * 4;
-            }
-        }
-        PlayerColor::Black => {
-            let dist = (y - black_promo_rank).max(0);
-
-            // Past promotion rank check
-            if y < black_promo_rank {
-                bonus -= PAWN_PAST_PROMO_PENALTY;
-            } else if dist > PAWN_FULL_VALUE_THRESHOLD {
-                // Far from promotion - flat penalty, NO benefit from advancing
-                bonus -= PAWN_FAR_FROM_PROMO_PENALTY;
-            } else {
-                // Close to promotion - advancement bonus
-                bonus += ((PAWN_FULL_VALUE_THRESHOLD - dist) as i32) * 4;
-            }
-        }
-        PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
-    }
-
-    // Central pawns are valuable
-    if x >= 3 && x <= 5 {
-        bonus += 5;
-    }
-
-    bonus
-}
-
-/// Evaluate pawn advancement bonus for endgame positions
-/// One-pass version that handles both colors and returns (score, w_has_promo, b_has_promo)
-/// Only applies bonus to the SINGLE most advanced promotable pawn per color
+/// Evaluate all pawn-related positional terms in a single pass.
+/// Includes advancement bonuses, centering, promotability checks, and the endgame promotion bonus.
+/// The result is scaled based on game phase (non-pawn piece count).
 #[inline(always)]
-fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
-    let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
-    let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
-
-    let w_active = black_pieces < 3 && game.white_pawn_count > 0;
-    let b_active = white_pieces < 3 && game.black_pawn_count > 0;
-
-    if !w_active && !b_active {
+fn evaluate_pawns(game: &GameState) -> (i32, bool, bool) {
+    if game.white_pawn_count == 0 && game.black_pawn_count == 0 {
         return (0, false, false);
     }
+
+    let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
+    let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
+    let total_pieces = white_pieces + black_pieces;
+
+    // Multiplier for pawn positional terms: 20+ pieces -> 10%, <5 pieces -> 100%
+    let multiplier_q = if total_pieces >= 20 {
+        10
+    } else if total_pieces <= 5 {
+        100
+    } else {
+        // Linear interpolation between (5, 100) and (20, 10)
+        100 - (total_pieces - 5) as i32 * 6
+    };
 
     let mut white_max_y = i64::MIN;
     let mut black_min_y = i64::MAX;
@@ -1202,8 +1106,8 @@ fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
 
     let mut w_to_find = game.white_pawn_count as i32;
     let mut b_to_find = game.black_pawn_count as i32;
-    let mut w_done = !w_active;
-    let mut b_done = !b_active;
+
+    let mut raw_score = 0;
 
     for (_cx, cy, tile) in game.board.tiles.iter() {
         let occ_pawns = tile.occ_pawns;
@@ -1214,56 +1118,53 @@ fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
         let base_y = cy * 8;
 
         // Process White pawns
-        let bits_w = occ_pawns & tile.occ_white;
+        let mut bits_w = occ_pawns & tile.occ_white;
         if bits_w != 0 {
-            let count = bits_w.count_ones() as i32;
-            w_to_find -= count;
+            w_to_find -= bits_w.count_ones() as i32;
+            while bits_w != 0 {
+                let idx = bits_w.trailing_zeros() as usize;
+                bits_w &= bits_w - 1;
+                let y = base_y + (idx / 8) as i64;
 
-            if !w_done && base_y + 7 > white_max_y {
-                let mut active_bits = bits_w;
-                if base_y >= w_promo {
-                    active_bits = 0;
-                } else if base_y + 7 >= w_promo {
-                    let local_row_limit = (w_promo - base_y) as usize;
-                    active_bits &= (1u64 << (local_row_limit * 8)).wrapping_sub(1);
-                }
-
-                if active_bits != 0 {
-                    let idx = 63 - active_bits.leading_zeros() as usize;
-                    let y = base_y + (idx / 8) as i64;
+                if y >= w_promo {
+                    // Worthless if already past promotion
+                    raw_score -= PAWN_PAST_PROMO_PENALTY;
+                } else {
+                    let dist = w_promo - y;
+                    if dist > PAWN_FULL_VALUE_THRESHOLD {
+                        raw_score -= PAWN_FAR_FROM_PROMO_PENALTY;
+                    } else {
+                        raw_score += (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                    }
+                    // Track most advanced for special bonus
                     if y > white_max_y {
                         white_max_y = y;
-                        if white_max_y == w_promo - 1 {
-                            w_done = true;
-                        }
                     }
                 }
             }
         }
 
         // Process Black pawns
-        let bits_b = occ_pawns & tile.occ_black;
+        let mut bits_b = occ_pawns & tile.occ_black;
         if bits_b != 0 {
-            let count = bits_b.count_ones() as i32;
-            b_to_find -= count;
+            b_to_find -= bits_b.count_ones() as i32;
+            while bits_b != 0 {
+                let idx = bits_b.trailing_zeros() as usize;
+                bits_b &= bits_b - 1;
+                let y = base_y + (idx / 8) as i64;
 
-            if !b_done && base_y < black_min_y {
-                let mut active_bits = bits_b;
-                if base_y + 7 <= b_promo {
-                    active_bits = 0;
-                } else if base_y <= b_promo {
-                    let local_row_start = (b_promo - base_y + 1) as usize;
-                    active_bits &= !((1u64 << (local_row_start * 8)).wrapping_sub(1));
-                }
-
-                if active_bits != 0 {
-                    let idx = active_bits.trailing_zeros() as usize;
-                    let y = base_y + (idx / 8) as i64;
+                if y <= b_promo {
+                    raw_score += PAWN_PAST_PROMO_PENALTY;
+                } else {
+                    let dist = y - b_promo;
+                    if dist > PAWN_FULL_VALUE_THRESHOLD {
+                        raw_score += PAWN_FAR_FROM_PROMO_PENALTY;
+                    } else {
+                        raw_score -= (PAWN_FULL_VALUE_THRESHOLD - dist) as i32 * 4;
+                    }
+                    // Track most advanced
                     if y < black_min_y {
                         black_min_y = y;
-                        if black_min_y == b_promo + 1 {
-                            b_done = true;
-                        }
                     }
                 }
             }
@@ -1274,13 +1175,13 @@ fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
         }
     }
 
-    let mut score = 0;
     let white_has_promo = white_max_y != i64::MIN;
     let black_has_promo = black_min_y != i64::MAX;
 
+    // Apply special high-value promotion bonus for the single most advanced pawn
     if white_has_promo {
         let dist = w_promo - white_max_y;
-        score += if dist <= 1 {
+        raw_score += if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1290,7 +1191,7 @@ fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
     }
     if black_has_promo {
         let dist = black_min_y - b_promo;
-        score -= if dist <= 1 {
+        raw_score -= if dist <= 1 {
             500
         } else if dist <= 2 {
             350
@@ -1299,7 +1200,10 @@ fn evaluate_all_pawn_advancements(game: &GameState) -> (i32, bool, bool) {
         };
     }
 
-    (score, white_has_promo, black_has_promo)
+    // Scale final result by game phase
+    let final_score = raw_score * multiplier_q / 100;
+
+    (final_score, white_has_promo, black_has_promo)
 }
 
 // ==================== Fairy Piece Evaluation ====================

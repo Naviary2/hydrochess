@@ -171,6 +171,34 @@ impl PieceType {
         }
     }
 
+    /// Convert piece type to the site's two-letter code
+    pub fn to_site_code(&self) -> &'static str {
+        match self {
+            PieceType::Void => "VO",
+            PieceType::Obstacle => "OB",
+            PieceType::King => "K",
+            PieceType::Giraffe => "GI",
+            PieceType::Camel => "CA",
+            PieceType::Zebra => "ZE",
+            PieceType::Knightrider => "NR",
+            PieceType::Amazon => "AM",
+            PieceType::Queen => "Q",
+            PieceType::RoyalQueen => "RQ",
+            PieceType::Hawk => "HA",
+            PieceType::Chancellor => "CH",
+            PieceType::Archbishop => "AR",
+            PieceType::Centaur => "CE",
+            PieceType::RoyalCentaur => "RC",
+            PieceType::Rose => "RO",
+            PieceType::Knight => "N",
+            PieceType::Guard => "GU",
+            PieceType::Huygen => "HU",
+            PieceType::Rook => "R",
+            PieceType::Bishop => "B",
+            PieceType::Pawn => "P",
+        }
+    }
+
     /// Check if this piece type is a neutral/blocking type (can't be moved by players)
     #[inline]
     pub fn is_neutral_type(&self) -> bool {

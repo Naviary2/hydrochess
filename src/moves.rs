@@ -1103,8 +1103,8 @@ fn generate_pawn_moves(
     } else {
         // promotions_allowed is set but no ranks = use classical defaults
         match piece.color() {
-            PlayerColor::White => vec![8],
-            PlayerColor::Black => vec![1],
+            PlayerColor::White => vec![],
+            PlayerColor::Black => vec![],
             PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
         }
     };
@@ -1244,8 +1244,8 @@ fn generate_pawn_capture_moves(
     } else {
         // promotions_allowed is set but no ranks = use classical defaults
         match piece.color() {
-            PlayerColor::White => vec![8],
-            PlayerColor::Black => vec![1],
+            PlayerColor::White => vec![],
+            PlayerColor::Black => vec![],
             PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
         }
     };
@@ -1769,12 +1769,12 @@ fn generate_pawn_quiet_moves(
             .promotion_ranks
             .as_ref()
             .map(|p| p.white.clone())
-            .unwrap_or_else(|| vec![8]),
+            .unwrap_or_else(|| vec![]),
         PlayerColor::Black => game_rules
             .promotion_ranks
             .as_ref()
             .map(|p| p.black.clone())
-            .unwrap_or_else(|| vec![1]),
+            .unwrap_or_else(|| vec![]),
         PlayerColor::Neutral => unsafe { std::hint::unreachable_unchecked() },
     };
 

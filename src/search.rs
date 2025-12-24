@@ -794,7 +794,11 @@ impl Searcher {
                 if !pv_str.is_empty() {
                     pv_str.push(' ');
                 }
-                pv_str.push_str(&format!("{},{}->{},{}", m.from.x, m.from.y, m.to.x, m.to.y));
+                let promo = m.promotion.map_or("", |p| p.to_site_code());
+                pv_str.push_str(&format!(
+                    "{},{}->{},{}{}",
+                    m.from.x, m.from.y, m.to.x, m.to.y, promo
+                ));
             }
         }
         pv_str
@@ -1361,7 +1365,16 @@ fn get_best_moves_multipv_impl(
                 // Format PV string
                 let pv_str: String = pv
                     .iter()
-                    .map(|m| format!("{},{}->{},{}", m.from.x, m.from.y, m.to.x, m.to.y))
+                    .map(|m| {
+                        format!(
+                            "{},{}->{},{}{}",
+                            m.from.x,
+                            m.from.y,
+                            m.to.x,
+                            m.to.y,
+                            m.promotion.map_or("", |p| p.to_site_code())
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
 

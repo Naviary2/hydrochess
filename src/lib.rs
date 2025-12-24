@@ -384,17 +384,36 @@ impl Engine {
         // ranks 8/1 and back ranks 1/8.
         let (white_promo_rank, black_promo_rank, white_back_rank, black_back_rank) =
             if let Some(ref ranks) = game_rules.promotion_ranks {
-                let white_promo = ranks.white.iter().copied().max().unwrap_or(8);
-                let black_promo = ranks.black.iter().copied().min().unwrap_or(1);
+                let white_promo = ranks
+                    .white
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(2_000_000_000_000_000);
+                let black_promo = ranks
+                    .black
+                    .iter()
+                    .copied()
+                    .min()
+                    .unwrap_or(-2_000_000_000_000_000);
 
                 // White's home side is near Black's promotion ranks, and vice versa.
-                let wb = black_promo; // white back rank
-                let bb = white_promo; // black back rank
+                let wb = if black_promo == -2_000_000_000_000_000 {
+                    1
+                } else {
+                    black_promo
+                }; // white back rank
+                let bb = if white_promo == 2_000_000_000_000_000 {
+                    8
+                } else {
+                    white_promo
+                }; // black back rank
 
                 (white_promo, black_promo, wb, bb)
             } else {
-                // Classical default: white promotes on 8, black on 1; back ranks 1/8.
-                (8, 1, 1, 8)
+                // Classical default: NO promotion unless explicitly provided.
+                // For simplicity use unreachable ranks.
+                (2_000_000_000_000_000, -2_000_000_000_000_000, 1, 8)
             };
 
         // Initialize game with starting position; clocks and turn will be fixed below.
@@ -648,6 +667,9 @@ impl Engine {
         noise_amp: Option<i32>,
         thread_id: Option<u32>,
     ) -> JsValue {
+        // let legal_moves = self.game.get_legal_moves();
+        // web_sys::console::log_1(&format!("Legal moves: {:?}", legal_moves).into());
+
         let effective_limit = if time_limit_ms == 0 && max_depth.is_some() {
             // If explicit depth is requested with 0 time, treat as infinite time (fixed depth search)
             u128::MAX
@@ -791,7 +813,16 @@ impl Engine {
                 let pv_strings: Vec<String> = line
                     .pv
                     .iter()
-                    .map(|m| format!("{},{}->{},{}", m.from.x, m.from.y, m.to.x, m.to.y))
+                    .map(|m| {
+                        format!(
+                            "{},{}->{},{}{}",
+                            m.from.x,
+                            m.from.y,
+                            m.to.x,
+                            m.to.y,
+                            m.promotion.map_or("", |p| p.to_site_code())
+                        )
+                    })
                     .collect();
 
                 JsPVLine {

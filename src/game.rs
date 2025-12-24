@@ -229,8 +229,8 @@ impl GameState {
             starting_squares: FxHashSet::default(),
             white_back_rank: 1,
             black_back_rank: 8,
-            white_promo_rank: 8,
-            black_promo_rank: 1,
+            white_promo_rank: 2_000_000_000_000_000,
+            black_promo_rank: -2_000_000_000_000_000,
             white_king_pos: None,
             black_king_pos: None,
             check_squares_white: FxHashSet::default(),
@@ -276,8 +276,8 @@ impl GameState {
             starting_squares: FxHashSet::default(),
             white_back_rank: 1,
             black_back_rank: 8,
-            white_promo_rank: 8,
-            black_promo_rank: 1,
+            white_promo_rank: 2_000_000_000_000_000,
+            black_promo_rank: -2_000_000_000_000_000,
             white_king_pos: None,
             black_king_pos: None,
             check_squares_white: FxHashSet::default(),
@@ -2158,6 +2158,14 @@ impl GameState {
             self.special_rights.insert(Coordinate::new(x, 2)); // White pawns
             self.special_rights.insert(Coordinate::new(x, 7)); // Black pawns
         }
+
+        // Explicitly set standard promotion ranks (8 for white, 1 for black)
+        self.game_rules.promotion_ranks = Some(PromotionRanks {
+            white: vec![8],
+            black: vec![1],
+        });
+        self.white_promo_rank = 8;
+        self.black_promo_rank = 1;
 
         // Calculate initial material
         self.material_score = calculate_initial_material(&self.board);
