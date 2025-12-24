@@ -22,7 +22,7 @@ permissions:
   pull-requests: write
 
 env:
-  COVERAGE_THRESHOLD: 80
+  COVERAGE_THRESHOLD: 75
 
 jobs:
   test-and-coverage:

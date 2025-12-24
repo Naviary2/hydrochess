@@ -966,4 +966,92 @@ mod tests {
         // No promotion ranks defined - pawns can never promote
         assert!(!can_pawn_promote(5, PlayerColor::White, &rules));
     }
+
+    #[test]
+    fn test_sufficient_queens_vs_king() {
+        // K+Q+Q vs K is sufficient material on infinite board (2 majors + King)
+        let game = create_test_game_with_pieces(&[
+            (0, 0, PieceType::King, PlayerColor::White),
+            (4, 4, PieceType::Queen, PlayerColor::White),
+            (5, 5, PieceType::Queen, PlayerColor::White),
+            (10, 10, PieceType::King, PlayerColor::Black),
+        ]);
+
+        let result = compute_insufficient_material(&game);
+        assert_eq!(result, None, "K+Q+Q vs K should be sufficient material");
+    }
+
+    #[test]
+    fn test_insufficient_bishop_knight_vs_king() {
+        // In this engine's infinite chess rules, K+B+N vs K is insufficient
+        // because coordination is too hard on an unbounded board.
+        let game = create_test_game_with_pieces(&[
+            (0, 0, PieceType::King, PlayerColor::White),
+            (1, 1, PieceType::Bishop, PlayerColor::White),
+            (2, 2, PieceType::Knight, PlayerColor::White),
+            (5, 5, PieceType::King, PlayerColor::Black),
+        ]);
+
+        let result = compute_insufficient_material(&game);
+        assert_eq!(
+            result,
+            Some(0),
+            "K+B+N vs K should be insufficient in infinite chess"
+        );
+    }
+
+    #[test]
+    fn test_insufficient_two_knights_vs_king() {
+        // K+N+N vs K is insufficient in this engine (specifically for infinite boards)
+        let game = create_test_game_with_pieces(&[
+            (0, 0, PieceType::King, PlayerColor::White),
+            (1, 1, PieceType::Knight, PlayerColor::White),
+            (2, 2, PieceType::Knight, PlayerColor::White),
+            (5, 5, PieceType::King, PlayerColor::Black),
+        ]);
+
+        let result = compute_insufficient_material(&game);
+        assert!(
+            result.is_some(),
+            "K+N+N vs K should be insufficient (Some(0)) or drawish"
+        );
+    }
+
+    #[test]
+    fn test_pawn_past_promotion_insufficient() {
+        let mut game = Box::new(create_test_game_with_pieces(&[
+            (0, 0, PieceType::King, PlayerColor::White),
+            (0, 10, PieceType::Pawn, PlayerColor::White), // Past rank 8
+            (5, 5, PieceType::King, PlayerColor::Black),
+        ]));
+        game.game_rules.promotion_ranks = Some(PromotionRanks {
+            white: vec![8],
+            black: vec![1],
+        });
+
+        let result = compute_insufficient_material(&game);
+        // White only has a dead pawn and a king.
+        assert_eq!(
+            result,
+            Some(0),
+            "K + dead Pawn vs K should be insufficient material"
+        );
+    }
+
+    #[test]
+    fn test_no_king_sufficient_material() {
+        // 3 Rooks without king is sufficient to escape the 2-rook insufficient rule
+        let game = create_test_game_with_pieces(&[
+            (1, 1, PieceType::Rook, PlayerColor::White),
+            (2, 2, PieceType::Rook, PlayerColor::White),
+            (3, 3, PieceType::Rook, PlayerColor::White),
+            (5, 5, PieceType::King, PlayerColor::Black),
+        ]);
+
+        let result = compute_insufficient_material(&game);
+        assert_eq!(
+            result, None,
+            "3 Rooks vs K (no white king) should be sufficient"
+        );
+    }
 }

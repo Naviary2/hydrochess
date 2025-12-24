@@ -700,4 +700,147 @@ mod tests {
             "Score should negate for opposite side"
         );
     }
+
+    #[test]
+    fn test_development_bonuses() {
+        let mut game = Box::new(create_confined_game());
+        game.board = Board::new();
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(4, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Add pawns to ensure material is sufficient
+        game.board
+            .set_piece(0, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(7, 4, Piece::new(PieceType::Pawn, PlayerColor::Black));
+
+        // Minor piece at home rank (undeveloped)
+        game.board
+            .set_piece(1, 0, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+        let eval_home = evaluate(&game);
+
+        // Minor piece moved forward (developed)
+        game.board.remove_piece(&1, &0);
+        game.board
+            .set_piece(2, 2, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.recompute_piece_counts();
+        let eval_developed = evaluate(&game);
+
+        assert!(
+            eval_developed > eval_home,
+            "Developed piece should be worth more than undeveloped back-rank piece"
+        );
+    }
+
+    #[test]
+    fn test_back_rank_obstacle_protection() {
+        let mut game = Box::new(create_confined_game());
+        game.board = Board::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Add pawns to ensure material is sufficient
+        game.board
+            .set_piece(0, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(7, 4, Piece::new(PieceType::Pawn, PlayerColor::Black));
+
+        // Back rank obstacles at (4,0) and (6,0) providing protection
+        game.board
+            .set_piece(4, 0, Piece::new(PieceType::Obstacle, PlayerColor::Neutral));
+        game.board
+            .set_piece(6, 0, Piece::new(PieceType::Obstacle, PlayerColor::Neutral));
+        game.recompute_piece_counts();
+        let eval_with_obstacles = evaluate(&game);
+
+        // Removing obstacles (simulating them being captured/eaten) should lower the score
+        game.board.remove_piece(&4, &0);
+        game.board.remove_piece(&6, &0);
+        game.recompute_piece_counts();
+        let eval_without_obstacles = evaluate(&game);
+
+        assert!(
+            eval_with_obstacles > eval_without_obstacles,
+            "Back-rank obstacles should provide a defensive bonus"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_inner_basic() {
+        let mut game = Box::new(create_confined_game());
+        game.board = Board::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(3, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.material_score = 0; // Equal pawns
+
+        let score = evaluate_inner(&game);
+        // Should return a reasonable evaluation
+        assert!(
+            score.abs() < 10000,
+            "Evaluation should be reasonable: {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_mop_up_triggers_in_endgame() {
+        let mut game = Box::new(create_confined_game());
+        game.board = Board::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White has 2 queens - massive advantage
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(3, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.material_score = 2700; // 2 Queen advantage
+
+        let score = evaluate(&game);
+        // Should be very positive for white
+        assert!(
+            score > 1000,
+            "White should have huge advantage with 2 queens: {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_king_position_confined() {
+        let mut game = Box::new(create_confined_game());
+        game.board = Board::new();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(4, 6, Piece::new(PieceType::King, PlayerColor::Black));
+        // Add material to avoid insufficient material
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(7, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.material_score = 0;
+
+        let wk = Some(Coordinate::new(4, 4));
+        let bk = Some(Coordinate::new(4, 6));
+        let score = evaluate_king_position_confined(&wk, &bk);
+        // King positions function should return a value
+        assert!(
+            score.abs() < 500,
+            "King position score should be reasonable: {}",
+            score
+        );
+    }
 }

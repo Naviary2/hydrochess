@@ -468,16 +468,16 @@ pub struct Searcher {
     pub killers: Vec<[Option<Move>; 2]>,
 
     // History heuristic [piece_type][to_square_hash]
-    pub history: Box<[[i32; 256]; 32]>,
+    pub history: [[i32; 256]; 32],
 
     // Capture history [moving_piece_type][captured_piece_type]
     // Used to improve capture ordering beyond pure MVV-LVA
-    pub capture_history: Box<[[i32; 32]; 32]>,
+    pub capture_history: [[i32; 32]; 32],
 
     // Countermove heuristic [prev_from_hash][prev_to_hash] -> (piece_type, to_x, to_y)
     // Stores the move that refuted the previous move (for quiet beta cutoffs).
     // Using (u8, i16, i16) to store piece type and destination coords.
-    pub countermoves: Box<[[(u8, i16, i16); 256]; 256]>,
+    pub countermoves: [[(u8, i16, i16); 256]; 256],
 
     // Previous move info for countermove heuristic (from_hash, to_hash)
     pub prev_move_stack: Vec<(usize, usize)>,
@@ -574,9 +574,9 @@ impl Searcher {
             pv_table,
             pv_length: [0; MAX_PLY],
             killers,
-            history: Box::new([[0; 256]; 32]),
-            capture_history: Box::new([[0; 32]; 32]),
-            countermoves: Box::new([[(0, 0, 0); 256]; 256]),
+            history: [[0; 256]; 32],
+            capture_history: [[0; 32]; 32],
+            countermoves: [[(0, 0, 0); 256]; 256],
             prev_move_stack: vec![(0, 0); MAX_PLY],
             eval_stack: vec![0; MAX_PLY],
             best_move_root: None,
@@ -3066,32 +3066,6 @@ mod tests {
         assert!(INFINITY > 0);
         assert!(MATE_VALUE > 0);
         assert!(MATE_SCORE < MATE_VALUE);
-    }
-
-    // ======================== CorrHistMode Tests ========================
-
-    #[test]
-    fn test_corr_hist_mode_debug() {
-        let mode = CorrHistMode::PawnBased;
-        let debug_str = format!("{:?}", mode);
-        assert!(debug_str.contains("PawnBased"));
-
-        let mode2 = CorrHistMode::NonPawnBased;
-        let debug_str2 = format!("{:?}", mode2);
-        assert!(debug_str2.contains("NonPawnBased"));
-    }
-
-    // ======================== NodeType Tests ========================
-
-    #[test]
-    fn test_node_type_debug() {
-        let pv = NodeType::PV;
-        let cut = NodeType::Cut;
-        let all = NodeType::All;
-
-        assert!(format!("{:?}", pv).contains("PV"));
-        assert!(format!("{:?}", cut).contains("Cut"));
-        assert!(format!("{:?}", all).contains("All"));
     }
 
     // ======================== Extended Searcher Tests ========================

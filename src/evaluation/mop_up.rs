@@ -1113,4 +1113,130 @@ mod tests {
         );
         assert!(score.abs() < 100000);
     }
+
+    #[test]
+    fn test_mop_up_rook_fence_bonus() {
+        let mut game = create_test_game();
+        // Black king in center
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::King, PlayerColor::Black));
+        // White rooks creating a fence
+        game.board
+            .set_piece(0, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(7, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let enemy_king = Coordinate::new(4, 4);
+        let our_king = Coordinate::new(4, 1);
+
+        let score =
+            evaluate_lone_king_endgame(&game, Some(&our_king), &enemy_king, PlayerColor::White);
+        // Should be positive since rooks create cutting lines
+        assert!(
+            score > 0,
+            "Rook fence should give positive score: {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_mop_up_king_approach_bonus() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        // White king close to enemy
+        game.board
+            .set_piece(6, 5, Piece::new(PieceType::King, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let enemy_king = Coordinate::new(5, 5);
+        let our_king_close = Coordinate::new(6, 5);
+
+        let score_close = evaluate_lone_king_endgame(
+            &game,
+            Some(&our_king_close),
+            &enemy_king,
+            PlayerColor::White,
+        );
+
+        // Move white king further away
+        game.board.remove_piece(&6, &5);
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        let our_king_far = Coordinate::new(1, 1);
+        let score_far =
+            evaluate_lone_king_endgame(&game, Some(&our_king_far), &enemy_king, PlayerColor::White);
+
+        assert!(
+            score_close > score_far,
+            "Closer king should get higher score: close={} far={}",
+            score_close,
+            score_far
+        );
+    }
+
+    #[test]
+    fn test_calculate_mop_up_scale_with_pawns() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::King, PlayerColor::White));
+        // Add rooks (sufficient material) and promotable pawn
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(2, 2, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(3, 7, Piece::new(PieceType::Pawn, PlayerColor::White)); // Near promotion
+        game.white_promo_rank = 8;
+        game.recompute_piece_counts();
+
+        let scale = calculate_mop_up_scale(&game, PlayerColor::Black);
+        // Should return a scale since white has mating material
+        assert!(scale.is_some(), "Should have mop-up scale with rooks");
+    }
+
+    #[test]
+    fn test_find_bitboard_cage() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::King, PlayerColor::Black));
+        // Surround with attacking rooks
+        game.board
+            .set_piece(4, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(4, 8, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(0, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(8, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let enemy_king = Coordinate::new(4, 4);
+        let (_is_caged, area) = find_bitboard_cage(
+            &game.board,
+            &game.spatial_indices,
+            &enemy_king,
+            PlayerColor::White,
+        );
+        // The king should be significantly restricted
+        assert!(
+            area < 100,
+            "King should be in a small area, found: {}",
+            area
+        );
+    }
 }

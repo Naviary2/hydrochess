@@ -2061,7 +2061,7 @@ mod tests {
     #[test]
     fn test_compute_cloud_center() {
         let mut board = Board::new();
-        // Use non-neutral pieces (pawns ARE neutral-type is false)
+        // Use non-neutral pieces
         board.set_piece(0, 0, Piece::new(PieceType::Rook, PlayerColor::White));
         board.set_piece(10, 0, Piece::new(PieceType::Rook, PlayerColor::White));
 
@@ -2070,5 +2070,205 @@ mod tests {
         let c = center.unwrap();
         assert_eq!(c.x, 5); // Average of 0 and 10
         assert_eq!(c.y, 0);
+    }
+
+    #[test]
+    fn test_evaluate_lazy_basic() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.material_score = 0; // Kings are worth same
+
+        let score_equal = evaluate_lazy(&game);
+
+        // Add a white queen
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.material_score = 1350; // Manually update material score
+        let score_white_plus = evaluate_lazy(&game);
+
+        assert!(
+            score_white_plus > score_equal + 1300,
+            "White queen should increase lazy eval by at least its material value"
+        );
+    }
+
+    #[test]
+    fn test_king_safety_penalties() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        // White King at (0,0)
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(10, 10, Piece::new(PieceType::King, PlayerColor::Black));
+
+        // Add some sufficient material to avoid draw (0)
+        game.board
+            .set_piece(5, 0, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(5, 9, Piece::new(PieceType::Rook, PlayerColor::Black));
+
+        // White Queen at home near its king (good/neutral)
+        game.board
+            .set_piece(0, 1, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.material_score = 0; // Rook vs Rook balanced
+        let score_near = evaluate_inner(&game);
+
+        // White Queen far away from its king
+        game.board.remove_piece(&0, &1);
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.material_score = 0;
+        let score_far = evaluate_inner(&game);
+
+        assert!(score_far != score_near);
+    }
+
+    #[test]
+    fn test_pawn_structure_caching() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(4, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        clear_pawn_cache();
+        let eval1 = evaluate_inner(&game);
+
+        // Calling again should hit cache
+        let eval2 = evaluate_inner(&game);
+        assert_eq!(
+            eval1, eval2,
+            "Cached evaluation should match initial evaluation"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_knight_centralization() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+
+        // Knight in corner (worst)
+        let corner_score = evaluate_knight(0, 0, PlayerColor::White, &None, &None);
+        // Knight in center (best)
+        let center_score = evaluate_knight(4, 4, PlayerColor::White, &None, &None);
+
+        assert!(
+            center_score > corner_score,
+            "Central knight should score better than corner knight"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_bishop_diagonal() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Bishop, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let wk = Some(Coordinate::new(0, 0));
+        let bk = Some(Coordinate::new(7, 7));
+        let score = evaluate_bishop(&game, 4, 4, PlayerColor::White, &wk, &bk);
+        // Central bishop should have positive score
+        assert!(
+            score > 0,
+            "Central bishop should have positive positional score"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_rook_open_file() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let wk = Some(Coordinate::new(0, 0));
+        let bk = Some(Coordinate::new(7, 7));
+        let score = evaluate_rook(&game, 4, 1, PlayerColor::White, &wk, &bk);
+        // Rook should have score for mobility etc
+        assert!(score.abs() < 1000, "Rook score should be reasonable");
+    }
+
+    #[test]
+    fn test_evaluate_queen_central() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(0, 0, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let wk = Some(Coordinate::new(0, 0));
+        let bk = Some(Coordinate::new(7, 7));
+        let score = evaluate_queen(&game, 4, 4, PlayerColor::White, &wk, &bk);
+        // Queen in center should have decent positional score
+        assert!(score.abs() < 2000, "Queen score should be reasonable");
+    }
+
+    #[test]
+    fn test_pawn_structure_isolated_pawn() {
+        let mut game = Box::new(GameState::new());
+        game.board = Board::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // Isolated white pawn on d-file
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        clear_pawn_cache();
+        let isolated_score = evaluate_pawn_structure(&game);
+
+        // Add supporting pawns
+        game.board
+            .set_piece(3, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(5, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        clear_pawn_cache();
+        let supported_score = evaluate_pawn_structure(&game);
+
+        // Supported pawns should score better
+        assert!(
+            supported_score > isolated_score,
+            "Supported pawns should be better than isolated"
+        );
     }
 }

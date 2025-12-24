@@ -418,3 +418,172 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
 
     gain[0]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
+    use crate::game::GameState;
+    use crate::moves::Move;
+
+    fn create_test_game() -> GameState {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game
+    }
+
+    #[test]
+    fn test_see_simple_pawn_takes_pawn() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(5, 5),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+
+        let see_val = static_exchange_eval_impl(&game, &m);
+        assert_eq!(see_val, 100, "Pawn takes pawn should yield 100 cp");
+    }
+
+    #[test]
+    fn test_see_queen_takes_defended_pawn() {
+        let mut game = create_test_game();
+        // White queen takes black pawn defended by black pawn
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.board
+            .set_piece(6, 6, Piece::new(PieceType::Pawn, PlayerColor::Black)); // Defends 5,5
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(5, 5),
+            Piece::new(PieceType::Queen, PlayerColor::White),
+        );
+
+        let see_val = static_exchange_eval_impl(&game, &m);
+        // Queen takes pawn (+100), then pawn takes queen (-1350), net = -1250
+        assert!(
+            see_val < 0,
+            "Queen taking defended pawn should be negative: {}",
+            see_val
+        );
+    }
+
+    #[test]
+    fn test_see_rook_takes_rook() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(4, 7, Piece::new(PieceType::Rook, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 1),
+            Coordinate::new(4, 7),
+            Piece::new(PieceType::Rook, PlayerColor::White),
+        );
+
+        let see_val = static_exchange_eval_impl(&game, &m);
+        assert_eq!(see_val, 650, "Rook takes rook should yield rook value");
+    }
+
+    #[test]
+    fn test_see_ge_threshold_pass() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Queen, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(5, 5),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+
+        // Pawn takes queen = +1350, easily passes threshold 0
+        assert!(see_ge(&game, &m, 0));
+        assert!(see_ge(&game, &m, 1000));
+    }
+
+    #[test]
+    fn test_see_ge_threshold_fail() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Queen, PlayerColor::White));
+        game.board
+            .set_piece(5, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(5, 5),
+            Piece::new(PieceType::Queen, PlayerColor::White),
+        );
+
+        // Queen takes pawn = +100, but very high threshold should fail
+        assert!(!see_ge(&game, &m, 500));
+    }
+
+    #[test]
+    fn test_see_no_capture_returns_zero() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(4, 5), // Empty square
+            Piece::new(PieceType::Rook, PlayerColor::White),
+        );
+
+        let see_val = static_exchange_eval_impl(&game, &m);
+        assert_eq!(see_val, 0, "Non-capture should return 0");
+    }
+
+    #[test]
+    fn test_see_knight_takes_bishop() {
+        let mut game = create_test_game();
+        game.board
+            .set_piece(3, 3, Piece::new(PieceType::Knight, PlayerColor::White));
+        game.board
+            .set_piece(4, 5, Piece::new(PieceType::Bishop, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.board.rebuild_tiles();
+
+        let m = Move::new(
+            Coordinate::new(3, 3),
+            Coordinate::new(4, 5),
+            Piece::new(PieceType::Knight, PlayerColor::White),
+        );
+
+        let see_val = static_exchange_eval_impl(&game, &m);
+        // Knight (250) takes bishop (450) = +450 (undefended)
+        assert_eq!(see_val, 450, "Knight takes bishop should yield 450");
+    }
+}

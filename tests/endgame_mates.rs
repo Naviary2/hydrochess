@@ -1,13 +1,12 @@
 //! Endgame Mate Tests - Excluded from coverage
 //!
 //! These tests verify the engine can find checkmate in specific endgames
-//! within a certain ply limit. They are excluded from coverage reports due to their
+//! within the 50-move rule. They are excluded from coverage reports due to their
 //! time-consuming nature.
 //!
 //! INFINITE CHESS NOTES:
 //! - Some classical chess mates don't work on infinite board (e.g., 2R vs K)
-//! - Tests include positions where one side has no king (Infinite Chess supports this)
-//! - Focus on piece combinations that CAN force mate on infinite board
+//! - Tests include positions where one side has no king
 
 #![cfg(not(coverage))]
 
@@ -92,7 +91,7 @@ fn verify_can_mate(mut game: GameState, max_ply: u32, description: &str) {
         }
 
         // Get best move with reasonable think time
-        let result = get_best_move(&mut game, 20, 5000, true);
+        let result = get_best_move(&mut game, 20, 2000, true);
 
         let best_move = match result {
             Some((m, _eval, _stats)) => m,
@@ -144,7 +143,7 @@ fn test_mate_queen_rook_vs_king() {
         ],
         &[(5, 8, PieceType::King)],
     );
-    verify_can_mate(game, 200, "Q + R + K vs K");
+    verify_can_mate(game, 100, "Q + R + K vs K");
 }
 
 // 2R + K vs K
@@ -154,7 +153,7 @@ fn test_mate_2rook_vs_king() {
         &[(5, 1, PieceType::King), (4, 4, PieceType::Rook), (6, 4, PieceType::Rook)],
         &[(5, 8, PieceType::King)],
     );
-    verify_can_mate(game, 150, "2R + K vs K");
+    verify_can_mate(game, 100, "2R + K vs K");
 }
 
 /// Amazon + K vs K - Amazon (Queen + Knight) is stronger than queen
@@ -182,7 +181,7 @@ fn test_mate_queen_rook_bishop_vs_king() {
         ],
         &[(5, 8, PieceType::King)],
     );
-    verify_can_mate(game, 200, "Q + R + B vs K");
+    verify_can_mate(game, 100, "Q + R + B vs K");
 }
 
 /// Q + R + N + K vs K  
@@ -196,7 +195,7 @@ fn test_mate_queen_rook_knight_vs_king() {
         ],
         &[(5, 8, PieceType::King)],
     );
-    verify_can_mate(game, 200, "Q + R + N vs K");
+    verify_can_mate(game, 100, "Q + R + N vs K");
 }
 
 /// Archbishop + K vs K - Archbishop = Bishop + Knight
@@ -211,5 +210,5 @@ fn test_mate_archbishop_vs_king() {
         ],
         &[(5, 8, PieceType::King)],
     );
-    verify_can_mate(game, 200, "Archbishop + R + K vs K");
+    verify_can_mate(game, 100, "Archbishop + R + K vs K");
 }

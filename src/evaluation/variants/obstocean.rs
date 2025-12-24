@@ -271,4 +271,72 @@ mod tests {
             "Outside file pawn should be best"
         );
     }
+
+    #[test]
+    fn test_race_eval_both_sides_racing() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White pawn closer to promotion
+        game.board
+            .set_piece(1, 7, Piece::new(PieceType::Pawn, PlayerColor::White));
+        // Black pawn further from promotion
+        game.board
+            .set_piece(1, 4, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game.recompute_piece_counts();
+
+        let race = race_eval(&game);
+        // White should be winning the race (1 move vs 3 moves)
+        assert!(race > 0, "White closer to promo should win race: {}", race);
+    }
+
+    #[test]
+    fn test_evaluate_inner_returns_value() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.board
+            .set_piece(3, 5, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game.recompute_piece_counts();
+
+        let score = evaluate_inner(&game);
+        // Should return a valid evaluation (not panic or overflow)
+        assert!(
+            score.abs() < 100000,
+            "Score should be reasonable: {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_black_advantage_race() {
+        let mut game = create_obstocean_game();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        // White pawn far from promotion
+        game.board
+            .set_piece(1, 3, Piece::new(PieceType::Pawn, PlayerColor::White));
+        // Black pawn very close to promotion
+        game.board
+            .set_piece(1, 2, Piece::new(PieceType::Pawn, PlayerColor::Black));
+        game.white_promo_rank = 8;
+        game.black_promo_rank = 1;
+        game.recompute_piece_counts();
+
+        let race = race_eval(&game);
+        // Black should be winning the race
+        assert!(race < 0, "Black closer to promo should win race: {}", race);
+    }
 }

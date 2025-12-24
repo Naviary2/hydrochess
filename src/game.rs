@@ -2711,4 +2711,170 @@ mod tests {
         // Just verify we have some moves available
         assert!(!moves.is_empty(), "Should have legal moves at start");
     }
+
+    #[test]
+    fn test_make_undo_move_restores_state() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        let original_hash = game.hash;
+        let original_piece_count = game.white_piece_count;
+
+        // Create and make a move
+        let mv = Move::new(
+            Coordinate::new(4, 2),
+            Coordinate::new(4, 3),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+
+        let undo = game.make_move(&mv);
+        assert!(
+            game.board.get_piece(4, 3).is_some(),
+            "Pawn should be at new position"
+        );
+        assert!(
+            game.board.get_piece(4, 2).is_none(),
+            "Original position should be empty"
+        );
+
+        game.undo_move(&mv, undo);
+        assert!(
+            game.board.get_piece(4, 2).is_some(),
+            "Pawn should be restored"
+        );
+        assert!(
+            game.board.get_piece(4, 3).is_none(),
+            "New position should be empty after undo"
+        );
+        assert_eq!(game.hash, original_hash, "Hash should be restored");
+        assert_eq!(
+            game.white_piece_count, original_piece_count,
+            "Piece count should match"
+        );
+    }
+
+    #[test]
+    fn test_has_special_right() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.special_rights.insert(Coordinate::new(5, 1));
+
+        assert!(game.has_special_right(&Coordinate::new(5, 1)));
+        assert!(!game.has_special_right(&Coordinate::new(1, 1)));
+    }
+
+    #[test]
+    fn test_halfmove_clock_increment() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+
+        let initial_clock = game.halfmove_clock;
+
+        // Make a quiet rook move (non-pawn, non-capture)
+        let mv = Move::new(
+            Coordinate::new(4, 4),
+            Coordinate::new(4, 5),
+            Piece::new(PieceType::Rook, PlayerColor::White),
+        );
+        let _undo = game.make_move(&mv);
+
+        assert_eq!(
+            game.halfmove_clock,
+            initial_clock + 1,
+            "Halfmove clock should increment for quiet move"
+        );
+    }
+
+    #[test]
+    fn test_halfmove_clock_resets_on_pawn_move() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
+        game.turn = PlayerColor::White;
+        game.halfmove_clock = 10; // Simulate some moves having been made
+        game.recompute_piece_counts();
+
+        let mv = Move::new(
+            Coordinate::new(4, 2),
+            Coordinate::new(4, 3),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+        let _undo = game.make_move(&mv);
+
+        assert_eq!(
+            game.halfmove_clock, 0,
+            "Halfmove clock should reset on pawn move"
+        );
+    }
+
+    #[test]
+    fn test_is_repetition_basic() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.turn = PlayerColor::White;
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        // At ply 0, no repetition initially
+        assert!(!game.is_repetition(0));
+    }
+
+    #[test]
+    fn test_has_non_pawn_material() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+        game.board
+            .set_piece(4, 4, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.recompute_piece_counts();
+
+        assert!(
+            game.has_non_pawn_material(PlayerColor::White),
+            "White should have non-pawn material"
+        );
+        assert!(
+            !game.has_non_pawn_material(PlayerColor::Black),
+            "Black should not have non-pawn material (only king)"
+        );
+    }
+
+    #[test]
+    fn test_init_starting_squares() {
+        let mut game = GameState::new();
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+        game.board
+            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.board
+            .set_piece(8, 1, Piece::new(PieceType::Rook, PlayerColor::White));
+        game.init_starting_squares();
+
+        assert!(game.starting_squares.contains(&Coordinate::new(1, 1)));
+        assert!(game.starting_squares.contains(&Coordinate::new(8, 1)));
+    }
 }
