@@ -335,7 +335,8 @@ pub fn evaluate(game: &GameState) -> i32 {
                 } else {
                     KING_PST_EG[black_pst_idx]
                 };
-                let king_pst = (mg_pst * phase + eg_pst * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
+                let king_pst =
+                    crate::simd::tapered_eval_simd(mg_pst, eg_pst, phase * 256 / TOTAL_PHASE);
                 if is_white {
                     score += king_pst;
                     white_king_pos = (*x, *y);

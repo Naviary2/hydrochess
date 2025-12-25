@@ -444,7 +444,11 @@ pub fn evaluate_pieces(
             cloud_count += n;
         }
 
-        let w_minors = tile.occ_white & (tile.occ_knights | tile.occ_bishops);
+        // SIMD: Compute both color minor masks simultaneously
+        let minors_mask = tile.occ_knights | tile.occ_bishops;
+        let (w_minors, b_minors) =
+            crate::simd::and_pairs(tile.occ_white, tile.occ_black, minors_mask, minors_mask);
+
         if w_minors != 0 {
             let mut bits = w_minors;
             while bits != 0 {
@@ -466,7 +470,6 @@ pub fn evaluate_pieces(
             }
         }
 
-        let b_minors = tile.occ_black & (tile.occ_knights | tile.occ_bishops);
         if b_minors != 0 {
             let mut bits = b_minors;
             while bits != 0 {
