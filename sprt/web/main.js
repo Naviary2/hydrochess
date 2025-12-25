@@ -69,8 +69,9 @@ const CONFIG = {
     maxGames: 1000,
     minGames: 500,
     maxMoves: 200,
-    concurrency: 1,
-    materialThreshold: 1500,
+    concurrency: navigator.hardwareConcurrency || 1,
+    materialThreshold: 0,
+
     searchNoise: 7,
 };
 
@@ -367,7 +368,10 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
             termination = 'Draw by fifty-move rule';
         } else if (endReason === 'insufficient_material') {
             termination = 'Draw by insufficient material';
+        } else if (endReason === 'max_moves') {
+            termination = 'Draw by maximum moves reached';
         }
+
         if (termination) {
             headerList.push(`[Termination "${termination}"]`);
         }
@@ -602,7 +606,9 @@ async function initWasm() {
         wasmReady = true;
         setStatus('ready', 'WASM loaded and ready');
         runSprtBtn.disabled = false;
+        sprtConcurrencyEl.value = CONFIG.concurrency;
         log('WASM module initialized successfully', 'success');
+
 
         const testPos = getStandardPosition();
         const engine = new EngineNew(testPos);
@@ -749,11 +755,14 @@ async function runSprt() {
     CONFIG.maxGames = parseInt(sprtMaxGames.value, 10) || 1000;
     CONFIG.maxMoves = parseInt(sprtMaxMoves.value, 10) || 200;
     {
-        const mt = parseInt(sprtMaterialThresholdEl.value, 10);
-        CONFIG.materialThreshold = Number.isFinite(mt) && mt >= 0 ? mt : 1500;
-        const noise = parseInt(sprtSearchNoiseEl.value, 10);
-        CONFIG.searchNoise = Number.isFinite(noise) && noise >= 0 ? noise : 7;
+        const mtVal = (sprtMaterialThresholdEl.value || '').trim();
+        const mt = parseInt(mtVal, 10);
+        CONFIG.materialThreshold = (mtVal !== "" && Number.isFinite(mt) && mt >= 0) ? mt : 0;
+        const noiseVal = (sprtSearchNoiseEl.value || '').trim();
+        const noise = parseInt(noiseVal, 10);
+        CONFIG.searchNoise = (noiseVal !== "" && Number.isFinite(noise) && noise >= 0) ? noise : 0;
     }
+
 
     // Ensure min/max games are even (for game pairing)
     if (CONFIG.minGames % 2 !== 0) CONFIG.minGames++;

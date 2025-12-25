@@ -194,7 +194,7 @@ Web Mode:
 Native Mode Options:
   --games N        Number of game pairs (default: 100)
   --tc TIME        Time control in seconds per move (default: 0.1)
-  --concurrency N  Number of parallel workers (default: 8)
+  --concurrency N  Number of parallel workers (default: physical threads)
   --variant NAME   Variant to test (default: Classical)
   --elo0 N         H0 Elo bound (default: -5)
   --elo1 N         H1 Elo bound (default: 5)

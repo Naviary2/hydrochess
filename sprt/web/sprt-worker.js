@@ -388,8 +388,8 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
             // winner, stop early and award the game. Only start checking after at
             // least 20 plies, and only if both engines have provided evals.
             if (moveHistory.length >= 20 && lastEvalNew !== null && lastEvalOld !== null) {
-                const uiThresh = typeof materialThreshold === 'number' ? materialThreshold : 0;
-                const threshold = Math.max(1500, uiThresh);
+                const threshold = typeof materialThreshold === 'number' ? materialThreshold : 0;
+
                 if (threshold > 0) {
                     function winnerFromWhiteEval(score) {
                         if (score >= threshold) return 'w';
@@ -742,7 +742,7 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
     for (const s of texelSamples) {
         s.result_token = '1/2-1/2';
     }
-    return { result: 'draw', log: moveLines.join('\n'), samples: texelSamples };
+    return { result: 'draw', log: moveLines.join('\n'), reason: 'max_moves', samples: texelSamples };
 }
 
 // Per-game timeout to prevent hangs

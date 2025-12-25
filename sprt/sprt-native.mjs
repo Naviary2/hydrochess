@@ -25,6 +25,8 @@ import { execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import os from 'os';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -84,7 +86,8 @@ function parseArgs() {
     const config = {
         games: 100,
         tc: '10+0.1', // Default time control
-        concurrency: 8,
+        concurrency: os.availableParallelism ? os.availableParallelism() : os.cpus().length,
+
         variant: null, // Default to all if null
         elo0: -5,
         elo1: 5,
@@ -139,9 +142,15 @@ function parseArgs() {
                 i++;
                 break;
             case '--material':
-                config.materialThreshold = parseInt(next, 10) || config.materialThreshold;
-                i++;
+                if (next === undefined || next === "" || next.startsWith('--')) {
+                    config.materialThreshold = 0;
+                } else {
+                    const parsed = parseInt(next, 10);
+                    config.materialThreshold = isNaN(parsed) ? 0 : parsed;
+                    i++;
+                }
                 break;
+
             case '--old':
                 config.oldPath = next;
                 i++;
@@ -163,7 +172,8 @@ Usage: node sprt-native.mjs [options]
 Options:
   --games N        Number of game pairs (default: 100)
   --tc TIME        Time control e.g. "10+0.1" (default: 10+0.1)
-  --concurrency N  Number of parallel workers (default: 8)
+  --concurrency N  Number of parallel workers (default: physical threads)
+
   --variant NAME   Variant to test (default: All variants)
   --old PATH       Path to Old (Baseline) WASM binary
   --new PATH       Path to New (Test) WASM binary

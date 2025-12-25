@@ -241,7 +241,9 @@ export class NativeWasmRunner {
         this.newWasmPath = options.newWasmPath || options.wasmPath || getWasmPath();
         this.oldWasmPath = options.oldWasmPath || this.newWasmPath; // Fallback to comparison vs self
         this.variantName = options.variant || 'Classical';
+        this.materialThreshold = (options.materialThreshold !== undefined) ? options.materialThreshold : 1500;
         this.poolNew = [];
+
         this.poolOld = [];
     }
 
@@ -624,8 +626,15 @@ export class NativeWasmRunner {
         if (endReason) {
             let termination = null;
             if (endReason === 'material_adjudication') termination = `Material adjudication`;
-            // Simplified for brevity, original logic is preserved in context if not changed here
+            else if (endReason === 'max_moves') termination = `Draw by maximum moves reached`;
+            else if (endReason === 'threefold') termination = `Draw by threefold repetition`;
+            else if (endReason === 'fifty_move') termination = `Draw by fifty-move rule`;
+            else if (endReason === 'time_forfeit') termination = `Loss on time`;
+            else if (endReason === 'checkmate') termination = `Checkmate`;
+
+            if (termination) headerList.push(`[Termination "${termination}"]`);
         }
+
 
         const headers = headerList.join(' ');
 
@@ -718,8 +727,9 @@ export class NativeWasmRunner {
                 plusPlaysWhite: true,
                 timeControl: tc,
                 maxMoves: 150,
-                materialThreshold: 1500,
+                materialThreshold: this.materialThreshold,
                 variantName
+
             });
             // Game 2: Minus (White) vs Plus (Black)
             jobs.push({
@@ -728,8 +738,9 @@ export class NativeWasmRunner {
                 plusPlaysWhite: false,
                 timeControl: tc,
                 maxMoves: 150,
-                materialThreshold: 1500,
+                materialThreshold: this.materialThreshold,
                 variantName
+
             });
         }
 
@@ -761,9 +772,13 @@ export class NativeWasmRunner {
             variantIdx++;
 
             const tc = options.timeControl || '10+0.1';
+            const mt = (options.materialThreshold !== undefined) ? options.materialThreshold : this.materialThreshold;
+            const mxm = options.maxMoves || 150;
 
-            tasks.push({ newPlaysWhite: true, timeControl: tc, maxMoves: options.maxMoves || 150, materialThreshold: options.materialThreshold || 1500, variantName });
-            tasks.push({ newPlaysWhite: false, timeControl: tc, maxMoves: options.maxMoves || 150, materialThreshold: options.materialThreshold || 1500, variantName });
+            tasks.push({ newPlaysWhite: true, timeControl: tc, maxMoves: mxm, materialThreshold: mt, variantName });
+            tasks.push({ newPlaysWhite: false, timeControl: tc, maxMoves: mxm, materialThreshold: mt, variantName });
+
+
         }
 
         const promises = tasks.map(async (config, index) => {
