@@ -115,52 +115,6 @@ pub fn score_move(
     score
 }
 
-/// **Optimized partial sorting**: Only extract the best move to the front.
-/// This is O(n) instead of O(n log n) for full sort.
-/// Called iteratively - each call finds the next best move.
-///
-/// Returns the score of the best move found, or i32::MIN if no more moves.
-#[inline]
-pub fn pick_best_move(
-    searcher: &Searcher,
-    game: &GameState,
-    moves: &mut MoveList,
-    scores: &mut [i32],
-    start_idx: usize,
-    ply: usize,
-    tt_move: &Option<Move>,
-) -> i32 {
-    if start_idx >= moves.len() {
-        return i32::MIN;
-    }
-
-    // On first call (start_idx == 0), compute all scores
-    if start_idx == 0 {
-        for (i, m) in moves.iter().enumerate() {
-            scores[i] = score_move(searcher, game, m, ply, tt_move);
-        }
-    }
-
-    // Find the best move from start_idx onwards
-    let mut best_idx = start_idx;
-    let mut best_score = scores[start_idx];
-
-    for i in (start_idx + 1)..moves.len() {
-        if scores[i] > best_score {
-            best_score = scores[i];
-            best_idx = i;
-        }
-    }
-
-    // Swap best move to current position
-    if best_idx != start_idx {
-        moves.swap(start_idx, best_idx);
-        scores.swap(start_idx, best_idx);
-    }
-
-    best_score
-}
-
 /// Sort all moves using selection sort approach.
 /// This is equivalent to calling pick_best_move repeatedly but more efficient
 /// when we need all moves sorted (e.g., at root).
@@ -249,24 +203,6 @@ pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
             }
         });
     }
-}
-
-/// Sort captures with SEE filtering - only winning captures come first
-pub fn sort_captures_with_see(game: &GameState, moves: &mut MoveList) {
-    moves.sort_by_cached_key(|m| {
-        let mut score = 0;
-        if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
-            let mvv_lva =
-                get_piece_value(target.piece_type()) * 10 - get_piece_value(m.piece.piece_type());
-            score += mvv_lva;
-
-            // Winning SEE gets a big bonus
-            if super::see_ge(game, m, 0) {
-                score += 10000;
-            }
-        }
-        -score
-    });
 }
 
 /// Hash move destination to 256-size index (for main history)
