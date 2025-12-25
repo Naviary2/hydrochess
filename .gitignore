@@ -5,3 +5,5 @@ bin/
 pkg/
 wasm-pack.log
 .idea
+# Hidden mac file storing attributes of the directory
+.DS_Store
