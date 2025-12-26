@@ -22,7 +22,7 @@ fn evaluate_inner(game: &GameState) -> i32 {
     let (wk, bk) = (game.white_king_pos, game.black_king_pos);
 
     // Mop-up
-    if let Some(_) = crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black) {
+    if crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black).is_some() {
         if let Some(b) = &bk {
             score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
@@ -32,10 +32,8 @@ fn evaluate_inner(game: &GameState) -> i32 {
                 PlayerColor::Black,
             );
         }
-    } else if let Some(_) =
-        crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White)
-    {
-        if let Some(w) = &wk {
+    } else if crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White).is_some()
+        && let Some(w) = &wk {
             score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
                 game,
                 bk.as_ref(),
@@ -44,7 +42,6 @@ fn evaluate_inner(game: &GameState) -> i32 {
                 PlayerColor::White,
             );
         }
-    }
 
     // Piece evaluation (minimal for non-pawns)
     for ((x, y), p) in game.board.iter() {

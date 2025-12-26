@@ -17,7 +17,7 @@ use super::{
 use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::get_piece_value;
 use crate::game::GameState;
-use crate::moves::{Move, MoveList, get_quiescence_captures, get_quiet_moves_into};
+use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures, get_quiet_moves_into};
 
 /// Good quiet threshold - matches Stockfish exactly
 const GOOD_QUIET_THRESHOLD: i32 = -14000;
@@ -95,8 +95,8 @@ impl StagedMoveGen {
         };
 
         // Get killers
-        let killer1 = searcher.killers[ply][0].clone();
-        let killer2 = searcher.killers[ply][1].clone();
+        let killer1 = searcher.killers[ply][0];
+        let killer2 = searcher.killers[ply][1];
 
         Self {
             stage: MoveStage::TTMove,
@@ -258,14 +258,15 @@ impl StagedMoveGen {
         let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
         for &plies_ago in &[0usize, 1, 2, 3, 5] {
-            if ply >= plies_ago + 1 {
-                if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
-                    let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
-                    if prev_piece < 16 {
-                        let prev_to_h = hash_coord_32(prev_move.to.x, prev_move.to.y);
-                        score += searcher.cont_history[prev_piece][prev_to_h][cur_from_hash]
-                            [cur_to_hash];
-                    }
+            if let Some(prev_move) = ply
+                .checked_sub(plies_ago + 1)
+                .and_then(|i| searcher.move_history[i])
+            {
+                let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                if prev_piece < 16 {
+                    let prev_to_h = hash_coord_32(prev_move.to.x, prev_move.to.y);
+                    score +=
+                        searcher.cont_history[prev_piece][prev_to_h][cur_from_hash][cur_to_hash];
                 }
             }
         }
@@ -335,24 +336,18 @@ impl StagedMoveGen {
         let pt_bit = 1u32 << (pt as u8);
 
         // 1. Knight-like check (including compounds like Amazon, Chancellor, etc.)
-        if (pt_bit & KNIGHT_MASK) != 0 {
-            if (adx == 1 && ady == 2) || (adx == 2 && ady == 1) {
-                return true;
-            }
+        if (pt_bit & KNIGHT_MASK) != 0 && ((adx == 1 && ady == 2) || (adx == 2 && ady == 1)) {
+            return true;
         }
 
         // 2. Orthogonal slider check (including Queen, Rook, Chancellor, etc.)
-        if (pt_bit & ORTHO_MASK) != 0 {
-            if dx == 0 || dy == 0 {
-                return true;
-            }
+        if (pt_bit & ORTHO_MASK) != 0 && (dx == 0 || dy == 0) {
+            return true;
         }
 
         // 3. Diagonal slider check (including Queen, Bishop, Archbishop, etc.)
-        if (pt_bit & DIAG_MASK) != 0 {
-            if adx == ady && adx > 0 {
-                return true;
-            }
+        if (pt_bit & DIAG_MASK) != 0 && (adx == ady && adx > 0) {
+            return true;
         }
 
         false
@@ -380,10 +375,11 @@ impl StagedMoveGen {
                         self.stage = MoveStage::CaptureInit;
                     }
 
-                    if let Some(ref m) = self.tt_move {
-                        if !self.is_excluded(m) && Self::is_pseudo_legal(game, m) {
-                            return Some(m.clone());
-                        }
+                    if let Some(m) = self
+                        .tt_move
+                        .filter(|m| !self.is_excluded(m) && Self::is_pseudo_legal(game, m))
+                    {
+                        return Some(m);
                     }
                 }
 
@@ -410,7 +406,7 @@ impl StagedMoveGen {
 
                 MoveStage::Evasion => {
                     if self.cur < self.moves.len() {
-                        let m = self.moves[self.cur].m.clone();
+                        let m = self.moves[self.cur].m;
                         self.cur += 1;
                         return Some(m);
                     }
@@ -420,15 +416,14 @@ impl StagedMoveGen {
                 MoveStage::CaptureInit => {
                     // Generate all captures
                     let mut captures: MoveList = MoveList::new();
-                    get_quiescence_captures(
-                        &game.board,
-                        game.turn,
-                        &game.special_rights,
-                        &game.en_passant,
-                        &game.game_rules,
-                        &game.spatial_indices,
-                        &mut captures,
-                    );
+                    let ctx = MoveGenContext {
+                        special_rights: &game.special_rights,
+                        en_passant: &game.en_passant,
+                        game_rules: &game.game_rules,
+                        indices: &game.spatial_indices,
+                        enemy_king_pos: game.enemy_king_pos(),
+                    };
+                    get_quiescence_captures(&game.board, game.turn, &ctx, &mut captures);
 
                     // Score captures
                     for m in captures {
@@ -458,7 +453,7 @@ impl StagedMoveGen {
                     while self.cur < self.end_captures {
                         let see_threshold = -self.moves[self.cur].score / 18;
                         if static_exchange_eval(game, &self.moves[self.cur].m) >= see_threshold {
-                            let m = self.moves[self.cur].m.clone();
+                            let m = self.moves[self.cur].m;
                             self.cur += 1;
                             return Some(m);
                         } else {
@@ -478,15 +473,13 @@ impl StagedMoveGen {
                     if self.skip_quiets {
                         continue;
                     }
-                    if let Some(ref k) = self.killer1 {
-                        // Killer must be: not TT move, not a capture, pseudo-legal
-                        if !self.is_tt_move(k)
+                    if let Some(k) = self.killer1.filter(|k| {
+                        !self.is_tt_move(k)
                             && !self.is_excluded(k)
                             && !Self::is_capture(game, k)
                             && Self::is_pseudo_legal(game, k)
-                        {
-                            return Some(k.clone());
-                        }
+                    }) {
+                        return Some(k);
                     }
                 }
 
@@ -496,15 +489,14 @@ impl StagedMoveGen {
                     if self.skip_quiets {
                         continue;
                     }
-                    if let Some(ref k) = self.killer2 {
-                        if !self.is_tt_move(k)
+                    if let Some(k) = self.killer2.filter(|k| {
+                        !self.is_tt_move(k)
                             && !Self::moves_match(k, &self.killer1)
                             && !self.is_excluded(k)
                             && !Self::is_capture(game, k)
                             && Self::is_pseudo_legal(game, k)
-                        {
-                            return Some(k.clone());
-                        }
+                    }) {
+                        return Some(k);
                     }
                 }
 
@@ -516,16 +508,14 @@ impl StagedMoveGen {
 
                     // Generate quiets
                     let mut quiets: MoveList = MoveList::new();
-                    get_quiet_moves_into(
-                        &game.board,
-                        game.turn,
-                        &game.special_rights,
-                        &game.en_passant,
-                        &game.game_rules,
-                        &game.spatial_indices,
-                        &mut quiets,
-                        game.enemy_king_pos(),
-                    );
+                    let ctx = MoveGenContext {
+                        special_rights: &game.special_rights,
+                        en_passant: &game.en_passant,
+                        game_rules: &game.game_rules,
+                        indices: &game.spatial_indices,
+                        enemy_king_pos: game.enemy_king_pos(),
+                    };
+                    get_quiet_moves_into(&game.board, game.turn, &ctx, &mut quiets);
 
                     // Score quiets
                     let quiet_start = self.moves.len();

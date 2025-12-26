@@ -151,7 +151,7 @@ fn coord_to_pst_index(x: i64, y: i64) -> usize {
 /// Check if on 8x8 board
 #[inline]
 fn on_board(x: i64, y: i64) -> bool {
-    x >= 1 && x <= 8 && y >= 1 && y <= 8
+    (1..=8).contains(&x) && (1..=8).contains(&y)
 }
 
 /// Calculate game phase (24 = full pieces = middlegame, 0 = endgame)
@@ -301,12 +301,10 @@ pub fn evaluate(game: &GameState) -> i32 {
                         } else {
                             score -= ROOK_OPEN_FILE_BONUS;
                         }
+                    } else if is_white {
+                        score += ROOK_SEMI_OPEN_BONUS;
                     } else {
-                        if is_white {
-                            score += ROOK_SEMI_OPEN_BONUS;
-                        } else {
-                            score -= ROOK_SEMI_OPEN_BONUS;
-                        }
+                        score -= ROOK_SEMI_OPEN_BONUS;
                     }
                 }
             }
@@ -465,7 +463,7 @@ fn evaluate_pawn_structure(
                 break;
             }
         }
-        if is_passed && rank >= 2 && rank <= 7 {
+        if is_passed && (2..=7).contains(&rank) {
             score += PASSED_PAWN_BONUS[rank - 1];
         }
     }
@@ -495,7 +493,7 @@ fn evaluate_pawn_structure(
                 break;
             }
         }
-        if is_passed && rank >= 2 && rank <= 7 {
+        if is_passed && (2..=7).contains(&rank) {
             score -= PASSED_PAWN_BONUS[rank - 1];
         }
     }

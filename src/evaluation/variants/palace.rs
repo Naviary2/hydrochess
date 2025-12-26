@@ -108,11 +108,10 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
 
         // 3. Amazon Special Aggression
-        if *ptype == PieceType::Amazon {
-            if pos.y <= 5 && pos.x >= 3 && pos.x <= 6 {
+        if *ptype == PieceType::Amazon
+            && pos.y <= 5 && pos.x >= 3 && pos.x <= 6 {
                 score -= AMAZON_AGGRESSION_BONUS;
             }
-        }
     }
 
     // Return perspective

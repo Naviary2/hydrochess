@@ -22,6 +22,25 @@ pub fn value_to_tt(value: i32, ply: usize) -> i32 {
     }
 }
 
+pub struct TTProbeParams {
+    pub hash: u64,
+    pub alpha: i32,
+    pub beta: i32,
+    pub depth: usize,
+    pub ply: usize,
+    pub rule50_count: u32,
+    pub rule_limit: i32,
+}
+
+pub struct TTStoreParams {
+    pub hash: u64,
+    pub depth: usize,
+    pub flag: TTFlag,
+    pub score: i32,
+    pub best_move: Option<Move>,
+    pub ply: usize,
+}
+
 /// Stockfish: value_from_tt
 /// Inverse of value_to_tt: adjusts TT score back to root-relative.
 /// Downgrades mate scores that are unreachable due to the 50-move rule.
@@ -152,7 +171,7 @@ impl TTMove {
 
     /// Convert back to Option<Move> for use in search
     #[inline]
-    pub fn to_move(&self) -> Option<Move> {
+    pub fn to_move(self) -> Option<Move> {
         if !self.is_some() {
             return None;
         }
@@ -396,16 +415,15 @@ impl TranspositionTable {
     /// Returns `Some((score, best_move))` where:
     /// - If `score` is usable for cutoff (not `INFINITY + 1`), use it directly.
     /// - If `score == INFINITY + 1`, only the move is usable (for ordering).
-    pub fn probe(
-        &self,
-        hash: u64,
-        alpha: i32,
-        beta: i32,
-        depth: usize,
-        ply: usize,
-        rule50_count: u32,
-        rule_limit: i32,
-    ) -> Option<(i32, Option<Move>)> {
+    pub fn probe(&self, params: &TTProbeParams) -> Option<(i32, Option<Move>)> {
+        let hash = params.hash;
+        let alpha = params.alpha;
+        let beta = params.beta;
+        let depth = params.depth;
+        let ply = params.ply;
+        let rule50_count = params.rule50_count;
+        let rule_limit = params.rule_limit;
+
         let idx = self.bucket_index(hash);
         let bucket = &self.buckets[idx];
 
@@ -479,15 +497,14 @@ impl TranspositionTable {
     /// Uses a smart replacement strategy within the bucket:
     /// 1. If we find our position, always update it
     /// 2. Otherwise, find the least valuable
-    pub fn store(
-        &mut self,
-        hash: u64,
-        depth: usize,
-        flag: TTFlag,
-        score: i32,
-        best_move: Option<Move>,
-        ply: usize,
-    ) {
+    pub fn store(&mut self, params: &TTStoreParams) {
+        let hash = params.hash;
+        let depth = params.depth;
+        let flag = params.flag;
+        let score = params.score;
+        let best_move = params.best_move;
+        let ply = params.ply;
+
         // Adjust mate scores for storage
         // Adjust mate scores for storage
         let adjusted_score = value_to_tt(score, ply);
@@ -634,9 +651,24 @@ mod tests {
 
         // Store and probe
         let hash = 0x123456789ABCDEF0u64;
-        tt.store(hash, 5, TTFlag::Exact, 100, None, 0);
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 5,
+            flag: TTFlag::Exact,
+            score: 100,
+            best_move: None,
+            ply: 0,
+        });
 
-        let result = tt.probe(hash, -1000, 1000, 5, 0, 0, 100);
+        let result = tt.probe(&TTProbeParams {
+            hash,
+            alpha: -1000,
+            beta: 1000,
+            depth: 5,
+            ply: 0,
+            rule50_count: 0,
+            rule_limit: 100,
+        });
         assert!(result.is_some());
         let (score, _) = result.unwrap();
         assert_eq!(score, 100);

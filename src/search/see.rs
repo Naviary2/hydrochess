@@ -195,13 +195,11 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                     }
                 } else {
                     // Diagonal ray
-                    if odx.abs() == ody.abs() && odx.abs() > 0 {
-                        if odx.signum() == dx.signum() && ody.signum() == dy.signum() {
-                            if odx.abs() < adx {
+                    if odx.abs() == ody.abs() && odx.abs() > 0
+                        && odx.signum() == dx.signum() && ody.signum() == dy.signum()
+                            && odx.abs() < adx {
                                 return false; // Blocker found
                             }
-                        }
-                    }
                 }
             }
             true

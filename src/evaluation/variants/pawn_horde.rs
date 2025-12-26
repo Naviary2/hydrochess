@@ -137,10 +137,8 @@ pub fn evaluate(game: &GameState) -> i32 {
     // 3. Black Logic (Pieces)
     for (pos, ptype) in &black_pieces {
         // Breakthrough: Are we behind the pawn wall?
-        if pos.y < min_pawn_y {
-            if *ptype == PieceType::Rook || *ptype == PieceType::Queen {
-                score -= BREAKTHROUGH_BONUS; // Score is absolute, so subtract for Black advantage
-            }
+        if pos.y < min_pawn_y && (*ptype == PieceType::Rook || *ptype == PieceType::Queen) {
+            score -= BREAKTHROUGH_BONUS; // Score is absolute, so subtract for Black advantage
         }
 
         // Attacks on Pawns
@@ -220,11 +218,8 @@ mod tests {
         game.recompute_hash();
 
         let score = evaluate(&game);
-        // Should return some meaningful value
-        assert!(
-            score != 0 || true,
-            "Horde position should have an evaluation"
-        );
+        // Should return some meaningful value (just check it doesn't panic)
+        let _ = score;
     }
 
     #[test]

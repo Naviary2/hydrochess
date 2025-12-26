@@ -19,13 +19,15 @@ pub fn clear_material_cache() {
 /// Returns Queen if any promotion mechanism is enabled (promotion_types, promotions_allowed, or promotion_ranks)
 fn get_best_promotion_piece(game_rules: &crate::game::GameRules) -> Option<PieceType> {
     // If promotion_types is set and non-empty, find the best piece
-    if let Some(ref types) = game_rules.promotion_types {
-        if !types.is_empty() {
-            return types
-                .iter()
-                .max_by_key(|pt| super::base::get_piece_value(**pt))
-                .copied();
-        }
+    if let Some(types) = game_rules
+        .promotion_types
+        .as_ref()
+        .filter(|t| !t.is_empty())
+    {
+        return types
+            .iter()
+            .max_by_key(|pt| super::base::get_piece_value(**pt))
+            .copied();
     }
 
     None
@@ -43,7 +45,7 @@ fn can_pawn_promote(y: i64, color: PlayerColor, game_rules: &crate::game::GameRu
     } else if game_rules
         .promotions_allowed
         .as_ref()
-        .map_or(true, |v| v.is_empty())
+        .is_none_or(|v| v.is_empty())
     {
         // No promotion ranks AND no promotions_allowed = no promotions
         return false;

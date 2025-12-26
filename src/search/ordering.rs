@@ -26,11 +26,10 @@ pub fn score_move(
     let mut score: i32 = 0;
 
     // Hash move bonus (highest priority)
-    if let Some(ttm) = tt_move {
-        if m.from == ttm.from && m.to == ttm.to && m.promotion == ttm.promotion {
+    if let Some(ttm) = tt_move
+        && m.from == ttm.from && m.to == ttm.to && m.promotion == ttm.promotion {
             return sort_hash(); // Early return - TT move always first
         }
-    }
 
     // Capture scoring
     if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
@@ -56,11 +55,11 @@ pub fn score_move(
         // Quiet move scoring
 
         // Killer moves
-        if searcher.killers[ply][0].as_ref().map_or(false, |k| {
+        if searcher.killers[ply][0].as_ref().is_some_and(|k| {
             m.from == k.from && m.to == k.to && m.promotion == k.promotion
         }) {
             score += sort_killer1();
-        } else if searcher.killers[ply][1].as_ref().map_or(false, |k| {
+        } else if searcher.killers[ply][1].as_ref().is_some_and(|k| {
             m.from == k.from && m.to == k.to && m.promotion == k.promotion
         }) {
             score += sort_killer2();
@@ -92,8 +91,8 @@ pub fn score_move(
             let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
             for &plies_ago in &[0usize, 1, 2, 3, 5] {
-                if ply > plies_ago {
-                    if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
+                if ply > plies_ago
+                    && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
                         let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
                         if prev_piece < 16 {
                             let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
@@ -101,7 +100,6 @@ pub fn score_move(
                                 [cur_to_hash];
                         }
                     }
-                }
             }
 
             // Low-ply history bonus (Stockfish technique)

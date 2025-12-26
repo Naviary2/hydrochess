@@ -362,6 +362,7 @@ impl Default for Bucket {
 
 /// Fixed-size open-addressing hash table for tiles.
 /// Uses linear probing. Never grows (128 buckets is plenty for ~70 pieces).
+#[derive(Debug)]
 pub struct TileTable {
     buckets: Box<[Bucket; TILE_TABLE_CAPACITY]>,
     count: usize,

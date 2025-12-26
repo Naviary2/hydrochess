@@ -37,14 +37,14 @@ fn find_bitboard_cage(
     // 1. Mark forbidden squares (attacked, occupied by our piece, or out of bounds)
     let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
 
-    for local_y in 0..32 {
+    for (local_y, forbidden_row) in forbidden.iter_mut().enumerate() {
         let abs_y = origin_y + local_y as i64;
         for local_x in 0..32 {
             let abs_x = origin_x + local_x as i64;
 
             // If out of bounds, it's a "wall"
             if abs_x < min_x || abs_x > max_x || abs_y < min_y || abs_y > max_y {
-                forbidden[local_y] |= 1 << local_x;
+                *forbidden_row |= 1 << local_x;
                 continue;
             }
 
@@ -54,7 +54,7 @@ fn find_bitboard_cage(
             if is_square_attacked(board, &target, our_color, indices)
                 || board.is_occupied_by_color(abs_x, abs_y, our_color)
             {
-                forbidden[local_y] |= 1 << local_x;
+                *forbidden_row |= 1 << local_x;
             }
         }
     }
@@ -105,8 +105,8 @@ fn find_bitboard_cage(
         if (reachable[0] | reachable[31]) != 0 {
             return (false, 1024);
         }
-        for y in 1..31 {
-            if (reachable[y] & 0x80000001) != 0 {
+        for reach in reachable.iter().take(31).skip(1) {
+            if (reach & 0x80000001) != 0 {
                 return (false, 1024);
             }
         }
@@ -114,8 +114,8 @@ fn find_bitboard_cage(
 
     // 3. If we finished without hitting perimeter, it's a cage!
     let mut area = 0u32;
-    for y in 0..32 {
-        area += reachable[y].count_ones();
+    for row in reachable.iter() {
+        area += row.count_ones();
     }
 
     (area > 0 && area < 1000, area)
@@ -135,7 +135,9 @@ pub fn is_lone_king(game: &GameState, color: PlayerColor) -> bool {
 
 /// Calculate mop-up scaling factor (0-100). Returns None if:
 /// - Opponent has >= 20% of starting non-pawn pieces
-/// - Winning side has no non-pawn pieces (only king/pawns)
+///
+///   - Winning side has no non-pawn pieces (only king/pawns)
+///
 /// Returns 10 (10% scale) if winning side has promotable pawns
 #[inline(always)]
 pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Option<u32> {
@@ -289,11 +291,9 @@ fn evaluate_mop_up_core(
                 | PieceType::Amazon
         );
 
-        if pt != PieceType::King && pt != PieceType::Pawn {
-            if our_pieces_count < 24 {
-                our_pieces[our_pieces_count] = SliderInfo { x, y };
-                our_pieces_count += 1;
-            }
+        if pt != PieceType::King && pt != PieceType::Pawn && our_pieces_count < 24 {
+            our_pieces[our_pieces_count] = SliderInfo { x, y };
+            our_pieces_count += 1;
         }
 
         if has_ortho {
@@ -532,8 +532,7 @@ fn evaluate_mop_up_core(
             }
 
             // ALL PIECES should approach once caged - add unified approach bonuses
-            for i in 0..our_pieces_count {
-                let s = &our_pieces[i];
+            for s in our_pieces.iter().take(our_pieces_count) {
                 let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs()); // Chebyshev distance
 
                 // Scale by cage tightness - tighter cage = more urgency to close in
@@ -709,8 +708,7 @@ fn evaluate_mop_up_core(
         } else {
             // CASE B: TECHNICAL/SPARSE - Use technical Ladders/Sandwiches.
             let mut protected_count = 0;
-            for i in 0..our_pieces_count {
-                let s = &our_pieces[i];
+            for s in &our_pieces[..our_pieces_count] {
                 let coord = Coordinate::new(s.x, s.y);
                 if crate::moves::is_square_attacked(
                     &game.board,
@@ -721,7 +719,7 @@ fn evaluate_mop_up_core(
                     protected_count += 1;
                 }
             }
-            bonus += protected_count as i32 * 40;
+            bonus += protected_count * 40;
 
             let mut sand_h = false;
             let mut sand_v = false;
@@ -861,8 +859,7 @@ fn evaluate_mop_up_core(
             bonus += king_approach_bonus;
 
             // Technical piece approach (Long range)
-            for i in 0..our_pieces_count {
-                let s = &our_pieces[i];
+            for s in &our_pieces[..our_pieces_count] {
                 let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
 
                 // Pieces approach even in technical branch
@@ -882,7 +879,7 @@ fn evaluate_mop_up_core(
                 }
             } else {
                 let prox = (20 - king_dist.min(20)) as i32;
-                bonus += prox * 1;
+                bonus += prox;
             }
         }
     }

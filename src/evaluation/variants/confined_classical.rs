@@ -48,38 +48,36 @@ fn evaluate_inner(game: &GameState) -> i32 {
     let mut mop_up_applied = false;
 
     // Check if black is losing
-    if let Some(_scale) =
-        crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black)
-    {
-        if let Some(bk) = &black_king {
-            score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
-                game,
-                white_king.as_ref(),
-                bk,
-                PlayerColor::White,
-                PlayerColor::Black,
-            );
-            mop_up_applied = true;
-        }
+    if let (Some(_scale), Some(bk)) = (
+        crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black),
+        &black_king,
+    ) {
+        score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
+            game,
+            white_king.as_ref(),
+            bk,
+            PlayerColor::White,
+            PlayerColor::Black,
+        );
+        mop_up_applied = true;
     }
 
     // Check if white is losing
-    if !mop_up_applied {
-        if let Some(_scale) =
-            crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White)
-        {
-            if let Some(wk) = &white_king {
-                score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
-                    game,
-                    black_king.as_ref(),
-                    wk,
-                    PlayerColor::Black,
-                    PlayerColor::White,
-                );
-                mop_up_applied = true;
-            }
+    // Check if white is losing
+    if !mop_up_applied
+        && let (Some(_scale), Some(wk)) = (
+            crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White),
+            &white_king,
+        ) {
+            score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
+                game,
+                black_king.as_ref(),
+                wk,
+                PlayerColor::Black,
+                PlayerColor::White,
+            );
+            mop_up_applied = true;
         }
-    }
 
     // If mop-up wasn't applied, use normal Confined Classical evaluation
     if !mop_up_applied {
@@ -422,7 +420,7 @@ fn evaluate_knight_confined(x: i64, y: i64, color: PlayerColor) -> i32 {
     }
 
     // Central file bonus (files 3-6 are central)
-    if x >= 3 && x <= 6 {
+    if (3..=6).contains(&x) {
         bonus += 10;
     }
 

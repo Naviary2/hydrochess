@@ -22,18 +22,22 @@ pub enum WinCondition {
     AllPiecesCaptured,
 }
 
-impl WinCondition {
+impl std::str::FromStr for WinCondition {
+    type Err = ();
+
     /// Parse a win condition from a string (as received from JS).
-    pub fn from_str(s: &str) -> Option<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "checkmate" => Some(WinCondition::Checkmate),
-            "royalcapture" => Some(WinCondition::RoyalCapture),
-            "allroyalscaptured" => Some(WinCondition::AllRoyalsCaptured),
-            "allpiecescaptured" => Some(WinCondition::AllPiecesCaptured),
-            _ => None,
+            "checkmate" => Ok(WinCondition::Checkmate),
+            "royalcapture" => Ok(WinCondition::RoyalCapture),
+            "allroyalscaptured" => Ok(WinCondition::AllRoyalsCaptured),
+            "allpiecescaptured" => Ok(WinCondition::AllPiecesCaptured),
+            _ => Err(()),
         }
     }
+}
 
+impl WinCondition {
     /// Returns true if this win condition requires the opponent to respond to check.
     /// For Checkmate, checks must be addressed. For capture-based conditions, king can be taken.
     #[inline]
@@ -52,21 +56,21 @@ impl WinCondition {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct EnPassantState {
     pub square: Coordinate,
     pub pawn_square: Coordinate,
 }
 
 /// Promotion ranks configuration for a variant
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PromotionRanks {
     pub white: Vec<i64>,
     pub black: Vec<i64>,
 }
 
 /// Game rules that can vary between chess variants
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameRules {
     pub promotion_ranks: Option<PromotionRanks>,
     #[serde(skip)]
@@ -90,7 +94,7 @@ impl GameRules {
             self.promotion_types = Some(
                 allowed
                     .iter()
-                    .filter_map(|s| PieceType::from_str(s.as_str()))
+                    .filter_map(|s| s.parse::<PieceType>().ok())
                     .collect(),
             );
         }
@@ -115,7 +119,7 @@ pub struct UndoMove {
     pub old_repetition: i32,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub board: Board,
     pub turn: PlayerColor,
@@ -239,7 +243,7 @@ impl GameState {
                     || piece.piece_type() == PieceType::Rook
                     || piece.piece_type() == PieceType::RoyalCentaur
                 {
-                    rights.insert(coord.clone());
+                    rights.insert(*coord);
                 }
             }
         }
@@ -249,6 +253,12 @@ impl GameState {
     /// Check if a piece at the given coordinate has its special rights
     pub fn has_special_right(&self, coord: &Coordinate) -> bool {
         self.special_rights.contains(coord)
+    }
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -498,24 +508,20 @@ impl GameState {
                 if let Some((bx, by)) = self.find_first_blocker_on_ray(wk.x, wk.y, *dx, *dy) {
                     self.slider_rays_white[dir_idx] = Some((bx, by));
                     // Discovered check: if bx,by is a BLACK piece, does it block a BLACK slider?
-                    if let Some(p1) = self.board.get_piece(bx, by) {
-                        if p1.color() == PlayerColor::Black {
-                            if let Some((bx2, by2)) =
-                                self.find_first_blocker_on_ray(bx, by, *dx, *dy)
-                            {
-                                if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                    if p2.color() == PlayerColor::Black {
-                                        let is_ortho = dir_idx < 4;
-                                        let pt2 = p2.piece_type();
-                                        use crate::attacks::{is_diag_slider, is_ortho_slider};
-                                        if (is_ortho && is_ortho_slider(pt2))
-                                            || (!is_ortho && is_diag_slider(pt2))
-                                        {
-                                            self.discovered_check_squares_black.insert((bx, by));
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some(p2) = self
+                        .board
+                        .get_piece(bx, by)
+                        .filter(|p| p.color() == PlayerColor::Black)
+                        .and_then(|_| self.find_first_blocker_on_ray(bx, by, *dx, *dy))
+                        .and_then(|(bx2, by2)| self.board.get_piece(bx2, by2))
+                        .filter(|p| p.color() == PlayerColor::Black)
+                    {
+                        let is_ortho = dir_idx < 4;
+                        let pt2 = p2.piece_type();
+                        use crate::attacks::{is_diag_slider, is_ortho_slider};
+                        if (is_ortho && is_ortho_slider(pt2)) || (!is_ortho && is_diag_slider(pt2))
+                        {
+                            self.discovered_check_squares_black.insert((bx, by));
                         }
                     }
                 }
@@ -538,24 +544,20 @@ impl GameState {
                 if let Some((bx, by)) = self.find_first_blocker_on_ray(bk.x, bk.y, *dx, *dy) {
                     self.slider_rays_black[dir_idx] = Some((bx, by));
                     // Discovered check: if bx,by is a WHITE piece, does it block a WHITE slider?
-                    if let Some(p1) = self.board.get_piece(bx, by) {
-                        if p1.color() == PlayerColor::White {
-                            if let Some((bx2, by2)) =
-                                self.find_first_blocker_on_ray(bx, by, *dx, *dy)
-                            {
-                                if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                    if p2.color() == PlayerColor::White {
-                                        let is_ortho = dir_idx < 4;
-                                        let pt2 = p2.piece_type();
-                                        use crate::attacks::{is_diag_slider, is_ortho_slider};
-                                        if (is_ortho && is_ortho_slider(pt2))
-                                            || (!is_ortho && is_diag_slider(pt2))
-                                        {
-                                            self.discovered_check_squares_white.insert((bx, by));
-                                        }
-                                    }
-                                }
-                            }
+                    if let Some(p2) = self
+                        .board
+                        .get_piece(bx, by)
+                        .filter(|p| p.color() == PlayerColor::White)
+                        .and_then(|_| self.find_first_blocker_on_ray(bx, by, *dx, *dy))
+                        .and_then(|(bx2, by2)| self.board.get_piece(bx2, by2))
+                        .filter(|p| p.color() == PlayerColor::White)
+                    {
+                        let is_ortho = dir_idx < 4;
+                        let pt2 = p2.piece_type();
+                        use crate::attacks::{is_diag_slider, is_ortho_slider};
+                        if (is_ortho && is_ortho_slider(pt2)) || (!is_ortho && is_diag_slider(pt2))
+                        {
+                            self.discovered_check_squares_white.insert((bx, by));
                         }
                     }
                 }
@@ -590,11 +592,13 @@ impl GameState {
             }
         } else if dy == 0 {
             // Horizontal ray (E or W) - use rows[start_y] to get all x coords
-            if let Some(row_vec) = self.spatial_indices.rows.get(&start_y) {
-                if let Some((found_x, _packed)) = SpatialIndices::find_nearest(row_vec, start_x, dx)
-                {
-                    return Some((found_x, start_y));
-                }
+            if let Some((found_x, _packed)) = self
+                .spatial_indices
+                .rows
+                .get(&start_y)
+                .and_then(|row_vec| SpatialIndices::find_nearest(row_vec, start_x, dx))
+            {
+                return Some((found_x, start_y));
             }
         } else {
             // Diagonal rays
@@ -713,10 +717,16 @@ impl GameState {
                 return false;
             }
             // If blocker is exactly at target, check if it's enemy (capture) or friendly
+            if blocker_dist == dist
+                && self
+                    .board
+                    .get_piece(bx, by)
+                    .is_some_and(|p| p.color() != self.turn)
+            {
+                return true;
+            }
             if blocker_dist == dist {
-                if let Some(p) = self.board.get_piece(bx, by) {
-                    return p.color() != self.turn;
-                }
+                return false;
             }
         }
         true
@@ -746,10 +756,16 @@ impl GameState {
             if blocker_dist < dist {
                 return false;
             }
+            if blocker_dist == dist
+                && self
+                    .board
+                    .get_piece(bx, by)
+                    .is_some_and(|p| p.color() != self.turn)
+            {
+                return true;
+            }
             if blocker_dist == dist {
-                if let Some(p) = self.board.get_piece(bx, by) {
-                    return p.color() != self.turn;
-                }
+                return false;
             }
         }
         true
@@ -1084,15 +1100,15 @@ impl GameState {
             return out;
         }
 
-        get_legal_moves(
-            &self.board,
-            self.turn,
-            &self.special_rights,
-            &self.en_passant,
-            &self.game_rules,
-            &self.spatial_indices,
-            self.enemy_king_pos(),
-        )
+        let ctx = crate::moves::MoveGenContext {
+            special_rights: &self.special_rights,
+            en_passant: &self.en_passant,
+            game_rules: &self.game_rules,
+            indices: &self.spatial_indices,
+            enemy_king_pos: self.enemy_king_pos(),
+        };
+
+        get_legal_moves(&self.board, self.turn, &ctx)
     }
 
     /// Fill a pre-allocated buffer with pseudo-legal moves for the current side.
@@ -1118,30 +1134,18 @@ impl GameState {
             return;
         }
 
-        get_legal_moves_into(
-            &self.board,
-            self.turn,
-            &self.special_rights,
-            &self.en_passant,
-            &self.game_rules,
-            &self.spatial_indices,
-            out,
-            false,
-            self.enemy_king_pos(),
-        );
+        let ctx = crate::moves::MoveGenContext {
+            special_rights: &self.special_rights,
+            en_passant: &self.en_passant,
+            game_rules: &self.game_rules,
+            indices: &self.spatial_indices,
+            enemy_king_pos: self.enemy_king_pos(),
+        };
+
+        get_legal_moves_into(&self.board, self.turn, &ctx, out, false);
 
         if out.is_empty() {
-            get_legal_moves_into(
-                &self.board,
-                self.turn,
-                &self.special_rights,
-                &self.en_passant,
-                &self.game_rules,
-                &self.spatial_indices,
-                out,
-                true,
-                self.enemy_king_pos(),
-            );
+            get_legal_moves_into(&self.board, self.turn, &ctx, out, true);
         }
     }
 
@@ -1177,40 +1181,37 @@ impl GameState {
         let indices = &self.spatial_indices;
         if let Some(active) = &self.board.active_coords {
             for &(ax, ay) in active {
-                if let Some(p) = self.board.get_piece(ax, ay) {
-                    if p.color() == their_color {
-                        if crate::moves::is_piece_attacking_square(
+                if self.board.get_piece(ax, ay).is_some_and(|p| {
+                    p.color() == their_color
+                        && crate::moves::is_piece_attacking_square(
                             &self.board,
                             p,
                             &Coordinate::new(ax, ay),
                             &king_sq,
                             indices,
                             &self.game_rules,
-                        ) {
-                            if checker_count < 16 {
-                                checkers[checker_count] = Coordinate::new(ax, ay);
-                                checker_count += 1;
-                            }
-                        }
-                    }
+                        )
+                }) && checker_count < 16
+                {
+                    checkers[checker_count] = Coordinate::new(ax, ay);
+                    checker_count += 1;
                 }
             }
         } else {
             for (&(ax, ay), p) in self.board.iter() {
-                if p.color() == their_color {
-                    if crate::moves::is_piece_attacking_square(
+                if p.color() == their_color
+                    && crate::moves::is_piece_attacking_square(
                         &self.board,
                         p,
                         &Coordinate::new(ax, ay),
                         &king_sq,
                         indices,
                         &self.game_rules,
-                    ) {
-                        if checker_count < 16 {
-                            checkers[checker_count] = Coordinate::new(ax, ay);
-                            checker_count += 1;
-                        }
-                    }
+                    )
+                    && checker_count < 16
+                {
+                    checkers[checker_count] = Coordinate::new(ax, ay);
+                    checker_count += 1;
                 }
             }
         }
@@ -1220,17 +1221,20 @@ impl GameState {
         }
 
         // 1. King escapes (Legal regardless of checker count, as long as target not attacked)
+        let ctx = crate::moves::MoveGenContext {
+            special_rights: &self.special_rights,
+            en_passant: &self.en_passant,
+            game_rules: &self.game_rules,
+            indices: &self.spatial_indices,
+            enemy_king_pos: self.enemy_king_pos(),
+        };
         get_pseudo_legal_moves_for_piece_into(
             &self.board,
             &king_piece,
             &king_sq,
-            &self.special_rights,
-            &self.en_passant,
-            &self.spatial_indices,
-            &self.game_rules,
+            &ctx,
             true, // Allow check-related filtering
             out,
-            self.enemy_king_pos(),
         );
 
         if checker_count >= 2 {
@@ -1510,18 +1514,14 @@ impl GameState {
             // Uses pseudo-legal move generation for captures
             // ==========================================
             let mut pseudo = MoveList::new();
-            get_pseudo_legal_moves_for_piece_into(
-                &s.board,
-                piece,
-                &from,
-                &s.special_rights,
-                &s.en_passant,
-                &s.spatial_indices,
-                &s.game_rules,
-                true,
-                &mut pseudo,
-                s.enemy_king_pos(),
-            );
+            let ctx = crate::moves::MoveGenContext {
+                special_rights: &s.special_rights,
+                en_passant: &s.en_passant,
+                game_rules: &s.game_rules,
+                indices: &s.spatial_indices,
+                enemy_king_pos: s.enemy_king_pos(),
+            };
+            get_pseudo_legal_moves_for_piece_into(&s.board, piece, &from, &ctx, true, &mut pseudo);
 
             // Check if this piece has optimized blocking (already handled above)
             let has_optimized_blocking = can_ortho
@@ -1541,10 +1541,11 @@ impl GameState {
                     continue;
                 }
                 // Blocking moves for pieces without optimized blocking
-                if is_slider && !has_optimized_blocking {
-                    if s.is_on_check_ray(&m.to, &king_sq, step_x, step_y, check_dist) {
-                        out.push(m);
-                    }
+                if is_slider
+                    && !has_optimized_blocking
+                    && s.is_on_check_ray(&m.to, &king_sq, step_x, step_y, check_dist)
+                {
+                    out.push(m);
                 }
             }
         };
@@ -1597,10 +1598,12 @@ impl GameState {
                 return true;
             }
             // For standard variants with just a King, we're done
-            if let Some(piece) = self.board.get_piece(king_pos.x, king_pos.y) {
-                if piece.piece_type() == PieceType::King {
-                    return false;
-                }
+            if self
+                .board
+                .get_piece(king_pos.x, king_pos.y)
+                .is_some_and(|p| p.piece_type() == PieceType::King)
+            {
+                return false;
             }
         }
 
@@ -1728,7 +1731,7 @@ impl GameState {
             from: Coordinate::new(from_x, from_y),
             to: Coordinate::new(to_x, to_y),
             piece,
-            promotion: promotion.and_then(PieceType::from_str),
+            promotion: promotion.and_then(|s| s.parse().ok()),
             rook_coord: None,
         };
 
@@ -1775,7 +1778,7 @@ impl GameState {
 
         let mut undo_info = UndoMove {
             captured_piece: self.board.get_piece(m.to.x, m.to.y).copied(),
-            old_en_passant: self.en_passant.clone(),
+            old_en_passant: self.en_passant,
             old_halfmove_clock: self.halfmove_clock,
             old_hash: self.hash_stack.last().copied().unwrap_or(0), // Save original hash
             special_rights_removed: ArrayVec::new(),
@@ -1856,43 +1859,47 @@ impl GameState {
 
         // Handle En Passant capture
         let mut is_ep_capture = false;
-        if piece.piece_type() == PieceType::Pawn {
-            if let Some(ep) = &self.en_passant {
-                if m.to.x == ep.square.x && m.to.y == ep.square.y {
-                    if let Some(captured_pawn) = self
-                        .board
-                        .remove_piece(&ep.pawn_square.x, &ep.pawn_square.y)
-                    {
-                        is_ep_capture = true;
-                        // Hash: remove EP captured pawn
-                        self.hash ^= piece_key(
-                            captured_pawn.piece_type(),
-                            captured_pawn.color(),
-                            ep.pawn_square.x,
-                            ep.pawn_square.y,
-                        );
-                        // Update spatial indices for EP captured pawn
-                        self.spatial_indices
-                            .remove(ep.pawn_square.x, ep.pawn_square.y);
+        if let Some((ep, captured_pawn)) = self
+            .en_passant
+            .as_ref()
+            .filter(|ep| {
+                piece.piece_type() == PieceType::Pawn
+                    && m.to.x == ep.square.x
+                    && m.to.y == ep.square.y
+            })
+            .and_then(|ep| {
+                self.board
+                    .remove_piece(&ep.pawn_square.x, &ep.pawn_square.y)
+                    .map(|p| (ep, p))
+            })
+        {
+            is_ep_capture = true;
+            // Hash: remove EP captured pawn
+            self.hash ^= piece_key(
+                captured_pawn.piece_type(),
+                captured_pawn.color(),
+                ep.pawn_square.x,
+                ep.pawn_square.y,
+            );
+            // Update spatial indices for EP captured pawn
+            self.spatial_indices
+                .remove(ep.pawn_square.x, ep.pawn_square.y);
 
-                        // Update material hash (subtractive) for EP capture
-                        self.material_hash = self.material_hash.wrapping_sub(material_key(
-                            captured_pawn.piece_type(),
-                            captured_pawn.color(),
-                        ));
+            // Update material hash (subtractive) for EP capture
+            self.material_hash = self.material_hash.wrapping_sub(material_key(
+                captured_pawn.piece_type(),
+                captured_pawn.color(),
+            ));
 
-                        let value = get_piece_value(captured_pawn.piece_type());
-                        if captured_pawn.color() == PlayerColor::White {
-                            self.material_score -= value;
-                            self.white_piece_count = self.white_piece_count.saturating_sub(1);
-                            self.white_pawn_count = self.white_pawn_count.saturating_sub(1);
-                        } else {
-                            self.material_score += value;
-                            self.black_piece_count = self.black_piece_count.saturating_sub(1);
-                            self.black_pawn_count = self.black_pawn_count.saturating_sub(1);
-                        }
-                    }
-                }
+            let value = get_piece_value(captured_pawn.piece_type());
+            if captured_pawn.color() == PlayerColor::White {
+                self.material_score -= value;
+                self.white_piece_count = self.white_piece_count.saturating_sub(1);
+                self.white_pawn_count = self.white_pawn_count.saturating_sub(1);
+            } else {
+                self.material_score += value;
+                self.black_piece_count = self.black_piece_count.saturating_sub(1);
+                self.black_pawn_count = self.black_pawn_count.saturating_sub(1);
             }
         }
 
@@ -1937,29 +1944,25 @@ impl GameState {
         }
 
         // Handle Castling Move (King moves > 1 square)
-        if piece.piece_type() == PieceType::King {
+        if piece.piece_type() == PieceType::King
+            && (m.to.x - m.from.x).abs() > 1
+            && let Some(rook_coord) = &m.rook_coord
+            && let Some(rook) = self.board.remove_piece(&rook_coord.x, &rook_coord.y)
+        {
             let dx = m.to.x - m.from.x;
-            if dx.abs() > 1 {
-                if let Some(rook_coord) = &m.rook_coord {
-                    if let Some(rook) = self.board.remove_piece(&rook_coord.x, &rook_coord.y) {
-                        let rook_to_x = m.from.x + (if dx > 0 { 1 } else { -1 });
-                        // Hash: remove rook from original, add at new position
-                        self.hash ^=
-                            piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
-                        self.hash ^=
-                            piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
-                        self.board.set_piece(rook_to_x, m.from.y, rook);
-                        // Update spatial indices for rook move
-                        self.spatial_indices.remove(rook_coord.x, rook_coord.y);
-                        self.spatial_indices.add(rook_to_x, m.from.y, rook.packed());
+            let rook_to_x = m.from.x + (if dx > 0 { 1 } else { -1 });
+            // Hash: remove rook from original, add at new position
+            self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
+            self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+            self.board.set_piece(rook_to_x, m.from.y, rook);
+            // Update spatial indices for rook move
+            self.spatial_indices.remove(rook_coord.x, rook_coord.y);
+            self.spatial_indices.add(rook_to_x, m.from.y, rook.packed());
 
-                        // Rook also loses special rights
-                        if self.special_rights.remove(rook_coord) {
-                            self.hash ^= special_right_key(rook_coord);
-                            undo_info.special_rights_removed.push(*rook_coord);
-                        }
-                    }
-                }
+            // Rook also loses special rights
+            if self.special_rights.remove(rook_coord) {
+                self.hash ^= special_right_key(rook_coord);
+                undo_info.special_rights_removed.push(*rook_coord);
             }
         }
 
@@ -2028,19 +2031,19 @@ impl GameState {
                         // First match: store distance as positive (twofold)
                         first_match = Some(i as i32);
                         // Continue searching for a second match (threefold)
-                    } else {
+                    } else if let Some(m) = first_match {
                         // Second match: this is threefold! Store as negative.
-                        self.repetition = -(first_match.unwrap());
+                        self.repetition = -m;
                         break;
                     }
                 }
                 i += 2;
             }
             // If we only found one match, store it as positive (twofold)
-            if self.repetition == 0 {
-                if let Some(dist) = first_match {
-                    self.repetition = dist;
-                }
+            if self.repetition == 0
+                && let Some(dist) = first_match
+            {
+                self.repetition = dist;
             }
         }
 
@@ -2124,44 +2127,36 @@ impl GameState {
             self.spatial_indices.add(m.to.x, m.to.y, captured.packed());
         }
 
-        // Handle En Passant Capture Revert
-        // If it was an EP capture, the captured pawn was on 'pawn_square' of the OLD en_passant state
-        // But wait, we don't store "is_ep_capture" in UndoMove.
-        // We can infer it: if piece is pawn, and to_square matches old_ep.square
-        if piece.piece_type() == PieceType::Pawn {
-            if let Some(ep) = &undo.old_en_passant {
-                if m.to.x == ep.square.x && m.to.y == ep.square.y {
-                    // It was an EP capture!
-                    // Restore the captured pawn
-                    let captured_pawn = Piece::new(PieceType::Pawn, piece.color().opponent());
+        let is_pawn_move = piece.piece_type() == PieceType::Pawn;
+        if is_pawn_move
+            && undo
+                .old_en_passant
+                .as_ref()
+                .is_some_and(|ep| m.to.x == ep.square.x && m.to.y == ep.square.y)
+            && let Some(ep) = &undo.old_en_passant
+        {
+            // Restore the captured pawn
+            let captured_pawn = Piece::new(PieceType::Pawn, piece.color().opponent());
+            self.board
+                .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
+            self.spatial_indices
+                .add(ep.pawn_square.x, ep.pawn_square.y, captured_pawn.packed());
 
-                    self.board
-                        .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
-                    // Update spatial indices for restored EP pawn
-                    self.spatial_indices.add(
-                        ep.pawn_square.x,
-                        ep.pawn_square.y,
-                        captured_pawn.packed(),
-                    );
+            // Restore material
+            self.material_hash = self.material_hash.wrapping_add(material_key(
+                captured_pawn.piece_type(),
+                captured_pawn.color(),
+            ));
 
-                    // Restore material
-                    // Restore material hash for EP capture
-                    self.material_hash = self.material_hash.wrapping_add(material_key(
-                        captured_pawn.piece_type(),
-                        captured_pawn.color(),
-                    ));
-
-                    let value = get_piece_value(PieceType::Pawn);
-                    if captured_pawn.color() == PlayerColor::White {
-                        self.material_score += value;
-                        self.white_piece_count = self.white_piece_count.saturating_add(1);
-                        self.white_pawn_count = self.white_pawn_count.saturating_add(1);
-                    } else {
-                        self.material_score -= value;
-                        self.black_piece_count = self.black_piece_count.saturating_add(1);
-                        self.black_pawn_count = self.black_pawn_count.saturating_add(1);
-                    }
-                }
+            let value = get_piece_value(PieceType::Pawn);
+            if captured_pawn.color() == PlayerColor::White {
+                self.material_score += value;
+                self.white_piece_count = self.white_piece_count.saturating_add(1);
+                self.white_pawn_count = self.white_pawn_count.saturating_add(1);
+            } else {
+                self.material_score -= value;
+                self.black_piece_count = self.black_piece_count.saturating_add(1);
+                self.black_pawn_count = self.black_pawn_count.saturating_add(1);
             }
         }
 

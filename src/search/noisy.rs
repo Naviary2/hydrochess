@@ -2,13 +2,27 @@
 //! This module largely mirrors search.rs with noise injection.
 //! Coverage exclusion is handled via CI ignore flags.
 
-use super::params;
+use super::ordering::*;
+use super::params::*;
 use super::*;
+use crate::board::PlayerColor;
 use crate::evaluation::evaluate;
+use crate::moves::{MoveGenContext, MoveList, get_quiescence_captures};
 use std::cell::RefCell;
 
+pub struct NegamaxNoisyContext<'a> {
+    pub searcher: &'a mut Searcher,
+    pub game: &'a mut GameState,
+    pub depth: usize,
+    pub ply: usize,
+    pub alpha: i32,
+    pub beta: i32,
+    pub allow_null: bool,
+    pub noise_amp: i32,
+}
+
 thread_local! {
-    static NOISE_SEED: RefCell<u64> = RefCell::new(0);
+    static NOISE_SEED: RefCell<u64> = const { RefCell::new(0) };
 }
 
 pub fn reset_noise_seed(seed: u64) {
@@ -28,7 +42,7 @@ fn evaluate_with_noise(game: &GameState, noise_amp: i32) -> i32 {
     // Generate a determenistic wiggle to the eval based on the game state
     let hash = TranspositionTable::generate_hash(game);
     let seed = NOISE_SEED.with(|c| *c.borrow());
-    let mut x = (hash as u64) ^ seed;
+    let mut x = hash ^ seed;
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
@@ -79,7 +93,7 @@ fn search_with_searcher_noisy(
     }
 
     if moves.len() == 1 {
-        let single = moves[0].clone();
+        let single = moves[0];
         let score = evaluate_with_noise(game, noise_amp);
         return Some((single, score));
     }
@@ -94,7 +108,7 @@ fn search_with_searcher_noisy(
         })
         .cloned();
 
-    let mut best_move: Option<Move> = fallback_move.clone();
+    let mut best_move: Option<Move> = fallback_move;
     let mut best_score = -INFINITY;
     let mut stability: usize = 0;
     let mut prev_iter_score: i32 = 0;
@@ -244,13 +258,15 @@ fn negamax_root_noisy(
     let rule50_count = game.halfmove_clock;
     if let Some((_, best)) = super::probe_tt_with_shared(
         searcher,
-        hash,
-        alpha,
-        beta,
-        depth,
-        0,
-        rule50_count,
-        searcher.move_rule_limit,
+        &super::ProbeContext {
+            hash,
+            alpha,
+            beta,
+            depth,
+            ply: 0,
+            rule50_count,
+            rule_limit: searcher.move_rule_limit,
+        },
     ) {
         tt_move = best;
     }
@@ -291,24 +307,42 @@ fn negamax_root_noisy(
         legal_moves += 1;
 
         if fallback_move.is_none() {
-            fallback_move = Some(m.clone());
+            fallback_move = Some(*m);
         }
 
         let score = if legal_moves == 1 {
-            -negamax_noisy(searcher, game, depth - 1, 1, -beta, -alpha, true, noise_amp)
-        } else {
-            let mut s = -negamax_noisy(
+            -negamax_noisy(&mut NegamaxNoisyContext {
                 searcher,
                 game,
-                depth - 1,
-                1,
-                -alpha - 1,
-                -alpha,
-                true,
+                depth: depth - 1,
+                ply: 1,
+                alpha: -beta,
+                beta: -alpha,
+                allow_null: true,
                 noise_amp,
-            );
+            })
+        } else {
+            let mut s = -negamax_noisy(&mut NegamaxNoisyContext {
+                searcher,
+                game,
+                depth: depth - 1,
+                ply: 1,
+                alpha: -alpha - 1,
+                beta: -alpha,
+                allow_null: true,
+                noise_amp,
+            });
             if s > alpha && s < beta {
-                s = -negamax_noisy(searcher, game, depth - 1, 1, -beta, -alpha, true, noise_amp);
+                s = -negamax_noisy(&mut NegamaxNoisyContext {
+                    searcher,
+                    game,
+                    depth: depth - 1,
+                    ply: 1,
+                    alpha: -beta,
+                    beta: -alpha,
+                    allow_null: true,
+                    noise_amp,
+                });
             }
             s
         };
@@ -323,7 +357,7 @@ fn negamax_root_noisy(
 
         if score > best_score {
             best_score = score;
-            best_move = Some(m.clone());
+            best_move = Some(*m);
 
             if score > alpha {
                 alpha = score;
@@ -366,21 +400,32 @@ fn negamax_root_noisy(
     } else {
         TTFlag::Exact
     };
-    super::store_tt_with_shared(searcher, hash, depth, tt_flag, best_score, best_move, 0);
+    super::store_tt_with_shared(
+        searcher,
+        &super::StoreContext {
+            hash,
+            depth,
+            flag: tt_flag,
+            score: best_score,
+            best_move,
+            ply: 0,
+        },
+    );
 
     best_score
 }
 
-fn negamax_noisy(
-    searcher: &mut Searcher,
-    game: &mut GameState,
-    depth: usize,
-    ply: usize,
-    mut alpha: i32,
-    mut beta: i32,
-    allow_null: bool,
-    noise_amp: i32,
-) -> i32 {
+fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
+    let depth = ctx.depth;
+    let ply = ctx.ply;
+    let mut alpha = ctx.alpha;
+    let mut beta = ctx.beta;
+    let allow_null = ctx.allow_null;
+    let noise_amp = ctx.noise_amp;
+
+    // Re-borrow searcher and game to avoid moving them out of ctx which is borrowed
+    let searcher = &mut *ctx.searcher;
+    let game = &mut *ctx.game;
     // Node type classification for search behavior
     let is_pv = beta > alpha + 1;
     let cut_node = !is_pv && beta == alpha + 1;
@@ -449,13 +494,15 @@ fn negamax_noisy(
     let rule50_count = game.halfmove_clock;
     if let Some((score, best)) = super::probe_tt_with_shared(
         searcher,
-        hash,
-        alpha,
-        beta,
-        depth,
-        ply,
-        rule50_count,
-        searcher.move_rule_limit,
+        &super::ProbeContext {
+            hash,
+            alpha,
+            beta,
+            depth,
+            ply,
+            rule50_count,
+            rule_limit: searcher.move_rule_limit,
+        },
     ) {
         tt_move = best;
         // Stockfish's "graph history interaction" workaround:
@@ -536,20 +583,20 @@ fn negamax_noisy(
         if cut_node && allow_null && depth >= nmp_min_depth() {
             let nmp_margin = static_eval - (18 * depth as i32) + 350;
             if nmp_margin >= beta && game.has_non_pawn_material(game.turn) {
-                let saved_ep = game.en_passant.clone();
+                let saved_ep = game.en_passant;
                 game.make_null_move();
 
                 let r = 7 + depth / 3;
-                let null_score = -negamax_noisy(
+                let null_score = -negamax_noisy(&mut NegamaxNoisyContext {
                     searcher,
                     game,
-                    depth.saturating_sub(r),
-                    ply + 1,
-                    -beta,
-                    -beta + 1,
-                    false,
+                    depth: depth.saturating_sub(r),
+                    ply: ply + 1,
+                    alpha: -beta,
+                    beta: -beta + 1,
+                    allow_null: false,
                     noise_amp,
-                );
+                });
 
                 game.unmake_null_move();
                 game.en_passant = saved_ep;
@@ -589,7 +636,7 @@ fn negamax_noisy(
 
     for m in &moves {
         let captured_piece = game.board.get_piece(m.to.x, m.to.y);
-        let is_capture = captured_piece.map_or(false, |p| !p.piece_type().is_neutral_type());
+        let is_capture = captured_piece.is_some_and(|p| !p.piece_type().is_neutral_type());
         let captured_type = captured_piece.map(|p| p.piece_type());
         let is_promotion = m.promotion.is_some();
 
@@ -675,7 +722,7 @@ fn negamax_noisy(
         }
 
         if !is_capture && !is_promotion {
-            quiets_searched.push(m.clone());
+            quiets_searched.push(*m);
         }
 
         let prev_entry_backup = searcher.prev_move_stack[ply];
@@ -685,23 +732,23 @@ fn negamax_noisy(
 
         let move_history_backup = searcher.move_history[ply].take();
         let piece_history_backup = searcher.moved_piece_history[ply];
-        searcher.move_history[ply] = Some(m.clone());
+        searcher.move_history[ply] = Some(*m);
         searcher.moved_piece_history[ply] = m.piece.piece_type() as u8;
 
         legal_moves += 1;
 
         let score;
         if legal_moves == 1 {
-            score = -negamax_noisy(
+            score = -negamax_noisy(&mut NegamaxNoisyContext {
                 searcher,
                 game,
-                depth - 1,
-                ply + 1,
-                -beta,
-                -alpha,
-                true,
+                depth: depth - 1,
+                ply: ply + 1,
+                alpha: -beta,
+                beta: -alpha,
+                allow_null: true,
                 noise_amp,
-            );
+            });
         } else {
             let mut reduction = 0;
             if depth >= lmr_min_depth()
@@ -751,28 +798,28 @@ fn negamax_noisy(
                 new_depth as usize
             };
 
-            let mut s = -negamax_noisy(
+            let mut s = -negamax_noisy(&mut NegamaxNoisyContext {
                 searcher,
                 game,
-                search_depth,
-                ply + 1,
-                -alpha - 1,
-                -alpha,
-                true,
+                depth: search_depth,
+                ply: ply + 1,
+                alpha: -alpha - 1,
+                beta: -alpha,
+                allow_null: true,
                 noise_amp,
-            );
+            });
 
             if s > alpha && (reduction > 0 || s < beta) {
-                s = -negamax_noisy(
+                s = -negamax_noisy(&mut NegamaxNoisyContext {
                     searcher,
                     game,
-                    depth - 1,
-                    ply + 1,
-                    -beta,
-                    -alpha,
-                    true,
+                    depth: depth - 1,
+                    ply: ply + 1,
+                    alpha: -beta,
+                    beta: -alpha,
+                    allow_null: true,
                     noise_amp,
-                );
+                });
             }
             score = s;
         }
@@ -790,7 +837,7 @@ fn negamax_noisy(
 
         if score > best_score {
             best_score = score;
-            best_move = Some(m.clone());
+            best_move = Some(*m);
 
             if score > alpha {
                 alpha = score;
@@ -830,7 +877,7 @@ fn negamax_noisy(
                     searcher.update_low_ply_history(ply, qidx, -bonus);
                 }
 
-                searcher.killers[ply][1] = searcher.killers[ply][0].clone();
+                searcher.killers[ply][1] = searcher.killers[ply][0];
                 searcher.killers[ply][0] = Some(*m);
 
                 if ply > 0 {
@@ -843,8 +890,8 @@ fn negamax_noisy(
 
                 // Continuation history update (Stockfish indices: 0, 1, 2, 3, 5)
                 for &plies_ago in &[0usize, 1, 2, 3, 5] {
-                    if ply > plies_ago {
-                        if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
+                    if ply > plies_ago
+                        && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
                             let prev_piece =
                                 searcher.moved_piece_history[ply - plies_ago - 1] as usize;
                             if prev_piece < 16 {
@@ -865,7 +912,6 @@ fn negamax_noisy(
                                 }
                             }
                         }
-                    }
                 }
             } else if let Some(cap_type) = captured_type {
                 let bonus = (depth * depth) as i32;
@@ -891,12 +937,14 @@ fn negamax_noisy(
 
     super::store_tt_with_shared(
         searcher,
-        hash,
-        depth,
-        flag,
-        best_score,
-        best_move.clone(),
-        ply,
+        &super::StoreContext {
+            hash,
+            depth,
+            flag,
+            score: best_score,
+            best_move,
+            ply,
+        },
     );
 
     best_score
@@ -961,15 +1009,19 @@ fn quiescence_noisy(
         game.get_evasion_moves_into(&mut tactical_moves);
     } else {
         // Normal quiescence: generate captures only
-        get_quiescence_captures(
-            &game.board,
-            game.turn,
-            &game.special_rights,
-            &game.en_passant,
-            &game.game_rules,
-            &game.spatial_indices,
-            &mut tactical_moves,
-        );
+        let enemy_king_pos = match game.turn.opponent() {
+            PlayerColor::White => game.white_king_pos,
+            PlayerColor::Black => game.black_king_pos,
+            _ => None,
+        };
+        let ctx = MoveGenContext {
+            special_rights: &game.special_rights,
+            en_passant: &game.en_passant,
+            game_rules: &game.game_rules,
+            indices: &game.spatial_indices,
+            enemy_king_pos: enemy_king_pos.as_ref(),
+        };
+        get_quiescence_captures(&game.board, game.turn, &ctx, &mut tactical_moves);
     }
 
     sort_captures(game, &mut tactical_moves);

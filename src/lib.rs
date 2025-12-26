@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if)]
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -49,7 +48,7 @@ pub enum Variant {
 }
 
 impl Variant {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "Classical" => Variant::Classical,
             "Confined_Classical" => Variant::ConfinedClassical,
@@ -71,6 +70,14 @@ impl Variant {
             "Chess" => Variant::Chess,
             _ => Variant::Classical, // Default fallback
         }
+    }
+}
+
+impl std::str::FromStr for Variant {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Variant::parse(s))
     }
 }
 
@@ -148,7 +155,7 @@ pub struct JsMove {
     pub promotion: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JsMoveWithEval {
     pub from: String, // "x,y"
     pub to: String,   // "x,y"
@@ -315,25 +322,31 @@ impl Engine {
                 p.y.parse()
                     .map_err(|_| JsValue::from_str("Invalid Y coordinate"))?;
 
-            let piece_type = PieceType::from_str(&p.piece_type).unwrap_or(PieceType::Pawn);
+            let piece_type = p.piece_type.parse::<PieceType>().unwrap_or(PieceType::Pawn);
 
-            let color = PlayerColor::from_str(&p.player).unwrap_or(PlayerColor::White);
+            let color = p
+                .player
+                .parse::<PlayerColor>()
+                .unwrap_or(PlayerColor::White);
 
             board.set_piece(x, y, Piece::new(piece_type, color));
         }
 
         // Starting side (color that moved first) as reported by JS. The engine
         // will reconstruct the current side-to-move by replaying move_history.
-        let js_turn = PlayerColor::from_str(&js_game.turn).unwrap_or(PlayerColor::White);
+        let js_turn = js_game
+            .turn
+            .parse::<PlayerColor>()
+            .unwrap_or(PlayerColor::White);
 
         // Parse initial special rights (castling + pawn double-move)
         let mut special_rights = FxHashSet::default();
         for sr in js_game.special_rights {
             let parts: Vec<&str> = sr.split(',').collect();
-            if parts.len() == 2 {
-                if let (Ok(x), Ok(y)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-                    special_rights.insert(Coordinate::new(x, y));
-                }
+            if parts.len() == 2
+                && let (Ok(x), Ok(y)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>())
+            {
+                special_rights.insert(Coordinate::new(x, y));
             }
         }
 
@@ -388,12 +401,12 @@ impl Engine {
                     let white_wc = wc
                         .white
                         .first()
-                        .and_then(|s| WinCondition::from_str(s))
+                        .and_then(|s| s.parse().ok())
                         .unwrap_or(WinCondition::Checkmate);
                     let black_wc = wc
                         .black
                         .first()
-                        .and_then(|s| WinCondition::from_str(s))
+                        .and_then(|s| s.parse().ok())
                         .unwrap_or(WinCondition::Checkmate);
                     (white_wc, black_wc)
                 } else {
@@ -466,10 +479,7 @@ impl Engine {
             fullmove_number: 1,
             material_score: 0,
             game_rules,
-            variant: js_game
-                .variant
-                .as_deref()
-                .map(|s| crate::Variant::from_str(s)),
+            variant: js_game.variant.as_deref().map(crate::Variant::parse),
             hash: 0, // Will be computed below
             hash_stack: Vec::with_capacity(js_game.move_history.len().saturating_add(8)),
             null_moves: 0,
@@ -533,7 +543,7 @@ impl Engine {
                 if let (Some((from_x, from_y)), Some((to_x, to_y))) =
                     (parse_coords(&hist.from), parse_coords(&hist.to))
                 {
-                    let promo = hist.promotion.as_ref().map(|s| s.as_str());
+                    let promo = hist.promotion.as_deref();
                     game.make_move_coords(from_x, from_y, to_x, to_y, promo);
                 }
             }
@@ -712,8 +722,8 @@ impl Engine {
             self.effective_time_limit_ms(time_limit_ms)
         };
         let silent = silent.unwrap_or(false);
-        let depth = max_depth.unwrap_or(50).max(1).min(50);
-        let strength = self.strength_level.unwrap_or(3).max(1).min(3);
+        let depth = max_depth.unwrap_or(50).clamp(1, 50);
+        let strength = self.strength_level.unwrap_or(3).clamp(1, 3);
 
         // Determine effective noise amplitude:
         // 1. If explicit noise_amp is provided, use it

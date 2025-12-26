@@ -288,17 +288,17 @@ pub fn evaluate_lazy(game: &GameState) -> i32 {
                     if distance_to_promo < 6 {
                         positional_bonus += (6 - distance_to_promo) as i32 * 5;
                     }
-                    if x >= 2 && x <= 5 {
+                    if (2..=5).contains(&x) {
                         positional_bonus += 5;
                     }
                 }
                 PieceType::Knight | PieceType::Bishop => {
-                    if x >= 2 && x <= 5 && y >= 2 && y <= 5 {
+                    if (2..=5).contains(&x) && (2..=5).contains(&y) {
                         positional_bonus += 10;
                     }
                 }
                 _ => {
-                    if x >= 2 && x <= 5 && y >= 2 && y <= 5 {
+                    if (2..=5).contains(&x) && (2..=5).contains(&y) {
                         positional_bonus += 2;
                     }
                 }
@@ -357,41 +357,44 @@ fn evaluate_inner(game: &GameState) -> i32 {
 
     // Check if black is losing (white has material advantage or black has few pieces)
     // SKIP mop-up if white has a promotable pawn to prioritize promotion
-    if black_pieces < 3 && white_pieces > 1 && !white_has_promo {
-        if let Some(_scale) =
+    if black_pieces < 3
+        && white_pieces > 1
+        && !white_has_promo
+        && let Some(_scale) =
             crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black)
-        {
-            // Need enemy king as target
-            if let Some(bk) = &black_king {
-                score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
-                    game,
-                    white_king.as_ref(),
-                    bk,
-                    PlayerColor::White,
-                    PlayerColor::Black,
-                );
-                mop_up_applied = true;
-            }
+    {
+        // Need enemy king as target
+        if let Some(bk) = &black_king {
+            score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
+                game,
+                white_king.as_ref(),
+                bk,
+                PlayerColor::White,
+                PlayerColor::Black,
+            );
+            mop_up_applied = true;
         }
     }
 
     // Check if white is losing (black has material advantage or white has few pieces)
     // SKIP if black has a promotable pawn
-    if !mop_up_applied && white_pieces < 3 && black_pieces > 1 && !black_has_promo {
-        if let Some(_scale) =
+    if !mop_up_applied
+        && white_pieces < 3
+        && black_pieces > 1
+        && !black_has_promo
+        && let Some(_scale) =
             crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White)
-        {
-            // Need enemy king as target
-            if let Some(wk) = &white_king {
-                score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
-                    game,
-                    black_king.as_ref(),
-                    wk,
-                    PlayerColor::Black,
-                    PlayerColor::White,
-                );
-                mop_up_applied = true;
-            }
+    {
+        // Need enemy king as target
+        if let Some(wk) = &white_king {
+            score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
+                game,
+                black_king.as_ref(),
+                wk,
+                PlayerColor::Black,
+                PlayerColor::White,
+            );
+            mop_up_applied = true;
         }
     }
 
@@ -658,26 +661,27 @@ pub fn evaluate_pieces(
 
             if let Some(center) = &cloud_center {
                 let cheb = (x - center.x).abs().max((y - center.y).abs());
-                if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
-                    if cheb > PIECE_CLOUD_CHEB_RADIUS {
-                        let piece_val = get_piece_value(piece.piece_type());
-                        let value_factor = (piece_val / 100).max(1);
-                        let excess = (cheb - PIECE_CLOUD_CHEB_RADIUS)
-                            .min(PIECE_CLOUD_CHEB_MAX_EXCESS)
-                            as i32;
-                        piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
-                    }
+                if piece.piece_type() != PieceType::Pawn
+                    && !piece.piece_type().is_royal()
+                    && cheb > PIECE_CLOUD_CHEB_RADIUS
+                {
+                    let piece_val = get_piece_value(piece.piece_type());
+                    let value_factor = (piece_val / 100).max(1);
+                    let excess =
+                        (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
+                    piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
                 }
             }
 
-            if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
-                if game.starting_squares.contains(&Coordinate::new(x, y)) {
-                    piece_score -= match piece.piece_type() {
-                        PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
-                        PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
-                        _ => 0,
-                    };
-                }
+            if piece.piece_type() != PieceType::Pawn
+                && !piece.piece_type().is_royal()
+                && game.starting_squares.contains(&Coordinate::new(x, y))
+            {
+                piece_score -= match piece.piece_type() {
+                    PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
+                    PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
+                    _ => 0,
+                };
             }
 
             let own_king = if piece.color() == PlayerColor::White {
@@ -685,15 +689,15 @@ pub fn evaluate_pieces(
             } else {
                 &black_king
             };
-            if let Some(ok) = own_king {
-                if !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn {
-                    let dist = (x - ok.x).abs().max((y - ok.y).abs());
-                    if dist <= 3 {
-                        if get_piece_value(piece.piece_type()) < KING_DEFENDER_VALUE_THRESHOLD {
-                            piece_score += KING_DEFENDER_BONUS;
-                        } else {
-                            piece_score -= KING_ATTACKER_NEAR_OWN_KING_PENALTY;
-                        }
+            if let Some(ok) = own_king
+                .filter(|_| !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn)
+            {
+                let dist = (x - ok.x).abs().max((y - ok.y).abs());
+                if dist <= 3 {
+                    if get_piece_value(piece.piece_type()) < KING_DEFENDER_VALUE_THRESHOLD {
+                        piece_score += KING_DEFENDER_BONUS;
+                    } else {
+                        piece_score -= KING_ATTACKER_NEAR_OWN_KING_PENALTY;
                     }
                 }
             }
@@ -781,17 +785,13 @@ pub fn evaluate_rook(
         let mut confinement_bonus = 0;
 
         // Rook on same rank as king - controls king's horizontal movement
-        if y == ek.y {
-            if (x - ek.x).abs() <= 3 {
-                confinement_bonus += 30;
-            }
+        // Rook on same rank as king - controls king's horizontal movement
+        if y == ek.y && (x - ek.x).abs() <= 3 {
+            confinement_bonus += 30;
         }
-
         // Rook on same file as king - controls king's vertical movement
-        if x == ek.x {
-            if (y - ek.y).abs() <= 3 {
-                confinement_bonus += 30;
-            }
+        if x == ek.x && (y - ek.y).abs() <= 3 {
+            confinement_bonus += 30;
         }
 
         // Rook adjacent to king - immediate pressure
@@ -1000,7 +1000,8 @@ pub fn evaluate_knight(
     }
 
     // Mild centralization bonus.
-    if x >= 3 && x <= 5 && y >= 3 && y <= 5 {
+    // Mild centralization bonus.
+    if (3..=5).contains(&x) && (3..=5).contains(&y) {
         bonus += 5;
     }
 
@@ -1380,15 +1381,13 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             }
             let cx = king.x + dx;
             let cy = king.y + dy;
-            if let Some(piece) = game.board.get_piece(cx, cy) {
-                if piece.color() == color {
-                    if piece.piece_type() == PieceType::Pawn
+            if game.board.get_piece(cx, cy).is_some_and(|piece| {
+                piece.color() == color
+                    && (piece.piece_type() == PieceType::Pawn
                         || piece.piece_type() == PieceType::Guard
-                        || piece.piece_type() == PieceType::Void
-                    {
-                        has_ring_cover = true;
-                    }
-                }
+                        || piece.piece_type() == PieceType::Void)
+            }) {
+                has_ring_cover = true;
             }
         }
     }

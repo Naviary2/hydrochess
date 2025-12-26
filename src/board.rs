@@ -48,13 +48,24 @@ pub enum PlayerColor {
     Black = 2,
 }
 
-impl PlayerColor {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for PlayerColor {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "n" | "neutral" => Some(PlayerColor::Neutral),
-            "w" | "white" => Some(PlayerColor::White),
-            "b" | "black" => Some(PlayerColor::Black),
-            _ => None,
+            "n" | "neutral" => Ok(PlayerColor::Neutral),
+            "w" | "white" => Ok(PlayerColor::White),
+            "b" | "black" => Ok(PlayerColor::Black),
+            _ => Err(()),
+        }
+    }
+}
+
+impl PlayerColor {
+    pub fn get_char(&self) -> char {
+        match self {
+            PlayerColor::Neutral => 'n',
+            PlayerColor::White => 'w',
+            PlayerColor::Black => 'b',
         }
     }
 
@@ -113,33 +124,62 @@ pub enum PieceType {
     Pawn = 21,
 }
 
-impl PieceType {
-    /// Parse piece type from single-character string (matches JS typeutil)
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for PieceType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "v" => Some(PieceType::Void),
-            "x" => Some(PieceType::Obstacle),
-            "k" => Some(PieceType::King),
-            "i" => Some(PieceType::Giraffe),
-            "l" => Some(PieceType::Camel),
-            "z" => Some(PieceType::Zebra),
-            "s" => Some(PieceType::Knightrider),
-            "m" => Some(PieceType::Amazon),
-            "q" => Some(PieceType::Queen),
-            "y" => Some(PieceType::RoyalQueen),
-            "h" => Some(PieceType::Hawk),
-            "c" => Some(PieceType::Chancellor),
-            "a" => Some(PieceType::Archbishop),
-            "e" => Some(PieceType::Centaur),
-            "d" => Some(PieceType::RoyalCentaur),
-            "o" => Some(PieceType::Rose),
-            "n" => Some(PieceType::Knight),
-            "g" => Some(PieceType::Guard),
-            "u" => Some(PieceType::Huygen),
-            "r" => Some(PieceType::Rook),
-            "b" => Some(PieceType::Bishop),
-            "p" => Some(PieceType::Pawn),
-            _ => None,
+            "v" => Ok(PieceType::Void),
+            "x" => Ok(PieceType::Obstacle),
+            "k" => Ok(PieceType::King),
+            "i" => Ok(PieceType::Giraffe),
+            "l" => Ok(PieceType::Camel),
+            "z" => Ok(PieceType::Zebra),
+            "s" => Ok(PieceType::Knightrider),
+            "m" => Ok(PieceType::Amazon),
+            "q" => Ok(PieceType::Queen),
+            "y" => Ok(PieceType::RoyalQueen),
+            "h" => Ok(PieceType::Hawk),
+            "c" => Ok(PieceType::Chancellor),
+            "a" => Ok(PieceType::Archbishop),
+            "e" => Ok(PieceType::Centaur),
+            "d" => Ok(PieceType::RoyalCentaur),
+            "o" => Ok(PieceType::Rose),
+            "n" => Ok(PieceType::Knight),
+            "g" => Ok(PieceType::Guard),
+            "u" => Ok(PieceType::Huygen),
+            "r" => Ok(PieceType::Rook),
+            "b" => Ok(PieceType::Bishop),
+            "p" => Ok(PieceType::Pawn),
+            _ => Err(()),
+        }
+    }
+}
+
+impl PieceType {
+    pub fn get_char(&self) -> char {
+        match self {
+            PieceType::Void => 'v',
+            PieceType::Obstacle => 'x',
+            PieceType::King => 'k',
+            PieceType::Giraffe => 'i',
+            PieceType::Camel => 'l',
+            PieceType::Zebra => 'z',
+            PieceType::Knightrider => 's',
+            PieceType::Amazon => 'm',
+            PieceType::Queen => 'q',
+            PieceType::RoyalQueen => 'y',
+            PieceType::Hawk => 'h',
+            PieceType::Chancellor => 'c',
+            PieceType::Archbishop => 'a',
+            PieceType::Centaur => 'e',
+            PieceType::RoyalCentaur => 'd',
+            PieceType::Rose => 'o',
+            PieceType::Knight => 'n',
+            PieceType::Guard => 'g',
+            PieceType::Huygen => 'u',
+            PieceType::Rook => 'r',
+            PieceType::Bishop => 'b',
+            PieceType::Pawn => 'p',
         }
     }
 
@@ -341,7 +381,7 @@ impl Piece {
 // Board
 // ============================================================================
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "BoardRaw", into = "BoardRaw")]
 pub struct Board {
     // HashMap for cold-path access and serialization
@@ -367,17 +407,15 @@ impl From<BoardRaw> for Board {
             .values()
             .any(|p| p.piece_type().is_neutral_type());
 
-        let active_coords = if has_neutral {
+        let active_coords = has_neutral.then_some({
             let mut set = FxHashSet::default();
             for (pos, piece) in &raw.pieces {
                 if !piece.piece_type().is_neutral_type() {
                     set.insert(*pos);
                 }
             }
-            Some(set)
-        } else {
-            None
-        };
+            set
+        });
 
         // Build tiles immediately for hot path usage
         let mut tiles = TileTable::new();
@@ -423,9 +461,15 @@ impl<'a> Iterator for BoardIter<'a> {
 
 impl ExactSizeIterator for BoardIter<'_> {}
 
+impl Default for Board {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Board {
     pub fn new() -> Self {
-        Board {
+        Self {
             pieces: FxHashMap::default(),
             active_coords: None,
             tiles: TileTable::new(),
@@ -537,24 +581,6 @@ impl Board {
         }
     }
 
-    /// BITBOARD: O(1) piece retrieval using tile bitboards.
-    /// Returns packed piece directly from tile array (no HashMap lookup).
-    /// Use when you already know the square is occupied.
-    // #[inline]
-    // pub fn get_piece_fast(&self, x: i64, y: i64) -> Option<Piece> {
-    //     let (cx, cy) = tile_coords(x, y);
-    //     if let Some(tile) = self.tiles.get_tile(cx, cy) {
-    //         let idx = local_index(x, y);
-    //         if (tile.occ_all >> idx) & 1 != 0 {
-    //             let packed = tile.piece[idx];
-    //             if packed != 0 {
-    //                 return Some(Piece::from_packed(packed));
-    //             }
-    //         }
-    //     }
-    //     None
-    // }
-
     pub fn remove_piece(&mut self, x: &i64, y: &i64) -> Option<Piece> {
         let pos = (*x, *y);
         let removed = self.pieces.remove(&pos);
@@ -565,13 +591,13 @@ impl Board {
         if let Some(tile) = self.tiles.get_tile_mut(cx, cy) {
             tile.remove_piece(idx);
         }
-
-        if let Some(ref piece) = removed {
-            if let Some(ref mut active) = self.active_coords {
-                if !piece.piece_type().is_neutral_type() {
-                    active.remove(&pos);
-                }
-            }
+        if let (Some(active), Some(_)) = (
+            self.active_coords.as_mut(),
+            removed
+                .as_ref()
+                .filter(|p| !p.piece_type().is_neutral_type()),
+        ) {
+            active.remove(&pos);
         }
         removed
     }
@@ -661,7 +687,7 @@ mod tests {
     fn test_piece_packed_values() {
         // Test that packed values match JS encoding: color * NUM_TYPES + type
         let white_pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
-        assert_eq!(white_pawn.packed(), 1 * 22 + 21); // White=1, Pawn=21
+        assert_eq!(white_pawn.packed(), 22 + 21); // White=1, Pawn=21
 
         let black_king = Piece::new(PieceType::King, PlayerColor::Black);
         assert_eq!(black_king.packed(), 2 * 22 + 2); // Black=2, King=2
@@ -678,10 +704,19 @@ mod tests {
 
     #[test]
     fn test_player_color_from_str() {
-        assert_eq!(PlayerColor::from_str("white"), Some(PlayerColor::White));
-        assert_eq!(PlayerColor::from_str("black"), Some(PlayerColor::Black));
-        assert_eq!(PlayerColor::from_str("neutral"), Some(PlayerColor::Neutral));
-        assert_eq!(PlayerColor::from_str("invalid"), None);
+        assert_eq!(
+            "white".parse::<PlayerColor>().ok(),
+            Some(PlayerColor::White)
+        );
+        assert_eq!(
+            "black".parse::<PlayerColor>().ok(),
+            Some(PlayerColor::Black)
+        );
+        assert_eq!(
+            "neutral".parse::<PlayerColor>().ok(),
+            Some(PlayerColor::Neutral)
+        );
+        assert_eq!("invalid".parse::<PlayerColor>().ok(), None);
     }
 
     #[test]
@@ -711,15 +746,15 @@ mod tests {
 
     #[test]
     fn test_piece_type_from_str() {
-        assert_eq!(PieceType::from_str("k"), Some(PieceType::King));
-        assert_eq!(PieceType::from_str("q"), Some(PieceType::Queen));
-        assert_eq!(PieceType::from_str("r"), Some(PieceType::Rook));
-        assert_eq!(PieceType::from_str("b"), Some(PieceType::Bishop));
-        assert_eq!(PieceType::from_str("n"), Some(PieceType::Knight));
-        assert_eq!(PieceType::from_str("p"), Some(PieceType::Pawn));
-        assert_eq!(PieceType::from_str("x"), Some(PieceType::Obstacle));
-        assert_eq!(PieceType::from_str("v"), Some(PieceType::Void));
-        assert_eq!(PieceType::from_str("invalid"), None);
+        assert_eq!("k".parse::<PieceType>().ok(), Some(PieceType::King));
+        assert_eq!("q".parse::<PieceType>().ok(), Some(PieceType::Queen));
+        assert_eq!("r".parse::<PieceType>().ok(), Some(PieceType::Rook));
+        assert_eq!("b".parse::<PieceType>().ok(), Some(PieceType::Bishop));
+        assert_eq!("n".parse::<PieceType>().ok(), Some(PieceType::Knight));
+        assert_eq!("p".parse::<PieceType>().ok(), Some(PieceType::Pawn));
+        assert_eq!("x".parse::<PieceType>().ok(), Some(PieceType::Obstacle));
+        assert_eq!("v".parse::<PieceType>().ok(), Some(PieceType::Void));
+        assert_eq!("invalid".parse::<PieceType>().ok(), None);
     }
 
     #[test]
