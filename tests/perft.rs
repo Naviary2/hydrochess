@@ -546,3 +546,69 @@ fn test_rose_check_detection() {
     println!("Rose check detection test PASSED!");
     println!("================================================================");
 }
+
+/// Test that sliders can block a distant diagonal check.
+/// This reproduces a bug where a rook 15 squares away couldn't block a bishop check.
+#[test]
+fn test_distant_slider_block() {
+    use hydrochess_wasm::moves::MoveList;
+
+    println!("\n================================================================");
+    println!("Testing Distant Slider Block");
+    println!("================================================================");
+
+    let mut game = GameState::new();
+    game.board = Board::new();
+    game.special_rights.clear();
+    game.turn = PlayerColor::White;
+
+    // White King at (-4, -2)
+    game.board
+        .set_piece(-4, -2, Piece::new(PieceType::King, PlayerColor::White));
+
+    // White Rook at (7, 2) - can block at (7, -13) which is 15 squares down
+    game.board
+        .set_piece(7, 2, Piece::new(PieceType::Rook, PlayerColor::White));
+
+    // Black Bishop at (26, -32) - giving diagonal check
+    game.board
+        .set_piece(26, -32, Piece::new(PieceType::Bishop, PlayerColor::Black));
+
+    // Black King somewhere else
+    game.board
+        .set_piece(100, 100, Piece::new(PieceType::King, PlayerColor::Black));
+
+    game.recompute_piece_counts();
+    game.recompute_hash();
+
+    // Verify the king is in check
+    assert!(
+        game.is_in_check(),
+        "White king should be in check from distant bishop"
+    );
+
+    // Get evasion moves
+    let mut evasion_moves: MoveList = MoveList::new();
+    game.get_evasion_moves_into(&mut evasion_moves);
+
+    println!("Evasion moves generated: {}", evasion_moves.len());
+    for m in &evasion_moves {
+        println!("  {:?} -> {:?}", m.from, m.to);
+    }
+
+    // Check that the rook blocking move is present
+    // Rook at (7, 2) should be able to move to (7, -13) to block
+    // Check ray: from (-4,-2) towards (26,-32), step (1,-1)
+    // At k=11: (-4+11, -2-11) = (7, -13) - this is where rook blocks!
+    let rook_block = evasion_moves
+        .iter()
+        .any(|m| m.from.x == 7 && m.from.y == 2 && m.to.x == 7 && m.to.y == -13);
+
+    assert!(
+        rook_block,
+        "Rook at (7,2) should be able to block at (7,-13)"
+    );
+
+    println!("Distant slider block test PASSED!");
+    println!("================================================================");
+}

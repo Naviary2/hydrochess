@@ -280,6 +280,9 @@ pub const DIAG_MASK: PieceTypeMask = make_mask(&[
     PieceType::RoyalQueen,
 ]);
 
+/// Knightrider mask
+pub const KNIGHTRIDER_MASK: PieceTypeMask = make_mask(&[PieceType::Knightrider]);
+
 /// Check if a piece type matches a mask
 #[inline]
 pub const fn matches_mask(pt: PieceType, mask: PieceTypeMask) -> bool {

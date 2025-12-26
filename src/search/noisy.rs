@@ -732,7 +732,6 @@ fn negamax_noisy(
             {
                 let idx = hash_move_dest(m);
                 let value = searcher.history[m.piece.piece_type() as usize][idx];
-
                 if value < hlp_history_reduce() {
                     new_depth -= 1;
 
@@ -844,7 +843,7 @@ fn negamax_noisy(
 
                 // Continuation history update (Stockfish indices: 0, 1, 2, 3, 5)
                 for &plies_ago in &[0usize, 1, 2, 3, 5] {
-                    if ply >= plies_ago + 1 {
+                    if ply > plies_ago {
                         if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
                             let prev_piece =
                                 searcher.moved_piece_history[ply - plies_ago - 1] as usize;

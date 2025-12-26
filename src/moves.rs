@@ -176,6 +176,92 @@ pub fn in_bounds(x: i64, y: i64) -> bool {
     unsafe { x >= COORD_MIN_X && x <= COORD_MAX_X && y >= COORD_MIN_Y && y <= COORD_MAX_Y }
 }
 
+/// Check if a piece at `from` attacks square `to`.
+/// Optimized for sliders and leapers; falls back to full movegen for complex fairy pieces.
+pub fn is_piece_attacking_square(
+    board: &Board,
+    piece: &Piece,
+    from: &Coordinate,
+    to: &Coordinate,
+    indices: &SpatialIndices,
+    game_rules: &GameRules,
+) -> bool {
+    use crate::attacks::{is_diag_slider, is_ortho_slider, is_slider};
+
+    let pt = piece.piece_type();
+    let our_color = piece.color();
+
+    // 1. Sliders (optimized via spatial indices)
+    if is_slider(pt) {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+
+        let mut on_ray = false;
+        let mut step_x = 0;
+        let mut step_y = 0;
+
+        if dx == 0 && dy != 0 && is_ortho_slider(pt) {
+            on_ray = true;
+            step_y = dy.signum();
+        } else if dy == 0 && dx != 0 && is_ortho_slider(pt) {
+            on_ray = true;
+            step_x = dx.signum();
+        } else if dx.abs() == dy.abs() && dx != 0 && is_diag_slider(pt) {
+            on_ray = true;
+            step_x = dx.signum();
+            step_y = dy.signum();
+        }
+
+        if on_ray {
+            let (closest_dist, _) =
+                find_blocker_via_indices(board, from, step_x, step_y, indices, our_color);
+            let target_dist = dx.abs().max(dy.abs());
+            return target_dist <= closest_dist;
+        }
+    }
+
+    // 2. Leapers
+    match pt {
+        PieceType::Knight => {
+            let dx = (to.x - from.x).abs();
+            let dy = (to.y - from.y).abs();
+            return (dx == 1 && dy == 2) || (dx == 2 && dy == 1);
+        }
+        PieceType::Pawn => {
+            let direction = if our_color == PlayerColor::White {
+                1
+            } else {
+                -1
+            };
+            let dy = to.y - from.y;
+            let dx = (to.x - from.x).abs();
+            return dy == direction && dx == 1;
+        }
+        PieceType::King | PieceType::Guard => {
+            let dx = (to.x - from.x).abs();
+            let dy = (to.y - from.y).abs();
+            return dx <= 1 && dy <= 1 && (dx != 0 || dy != 0);
+        }
+        _ => {}
+    }
+
+    // 3. Fallback for complex fairy pieces (Huygen, Rose, Knightrider, etc.)
+    let mut moves = MoveList::new();
+    get_pseudo_legal_moves_for_piece_into(
+        board,
+        piece,
+        from,
+        &FxHashSet::default(),
+        &None,
+        indices,
+        game_rules,
+        false,
+        &mut moves,
+        None,
+    );
+    moves.iter().any(|m| m.to.x == to.x && m.to.y == to.y)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SpatialIndices {
     /// Row index: y -> [(x, packed_piece), ...] sorted by x

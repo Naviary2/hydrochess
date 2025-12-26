@@ -2341,7 +2341,7 @@ fn negamax(
                     // Update continuation histories at ply offsets -1, -2, -4
                     // (matching the existing beta-cutoff update pattern)
                     for &plies_ago in &[0usize, 1, 3] {
-                        if ply >= plies_ago + 1 {
+                        if ply > plies_ago {
                             if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
                             {
                                 let prev_piece =

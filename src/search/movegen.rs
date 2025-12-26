@@ -26,6 +26,8 @@ const GOOD_QUIET_THRESHOLD: i32 = -14000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveStage {
     TTMove,
+    EvasionInit,
+    Evasion,
     CaptureInit,
     GoodCapture,
     Killer1,
@@ -113,6 +115,11 @@ impl StagedMoveGen {
             skip_quiets: false,
             excluded_move: None,
         }
+    }
+
+    /// Check if the position is in check and should use evasion stages
+    fn is_in_check(game: &GameState) -> bool {
+        game.is_in_check() && game.must_escape_check()
     }
 
     /// Create with exclusion for singular extension.
@@ -247,7 +254,6 @@ impl StagedMoveGen {
         score += 2 * searcher.history[m.piece.piece_type() as usize][idx];
 
         // Continuation history - Stockfish uses indices 0, 1, 2, 3, 5
-        // These correspond to plies_ago: 0 (ply-1), 1 (ply-2), 2 (ply-3), 3 (ply-4), 5 (ply-6)
         let cur_from_hash = hash_coord_32(m.from.x, m.from.y);
         let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
@@ -352,17 +358,63 @@ impl StagedMoveGen {
         false
     }
 
+    /// Score an evasion move using standard heuristics
+    fn score_evasion(&self, game: &GameState, searcher: &Searcher, m: &Move) -> i32 {
+        if game.board.is_occupied(m.to.x, m.to.y) {
+            // Evasion capture: high priority + capture heuristics
+            30_000_000 + Self::score_capture(game, searcher, m)
+        } else {
+            // Evasion quiet: use score_quiet (includes Killers, History, etc.)
+            self.score_quiet(game, searcher, m)
+        }
+    }
+
     /// Get next move (Stockfish-style next_move())
     pub fn next(&mut self, game: &GameState, searcher: &Searcher) -> Option<Move> {
         loop {
             match self.stage {
                 MoveStage::TTMove => {
-                    self.stage = MoveStage::CaptureInit;
+                    if Self::is_in_check(game) {
+                        self.stage = MoveStage::EvasionInit;
+                    } else {
+                        self.stage = MoveStage::CaptureInit;
+                    }
+
                     if let Some(ref m) = self.tt_move {
                         if !self.is_excluded(m) && Self::is_pseudo_legal(game, m) {
                             return Some(m.clone());
                         }
                     }
+                }
+
+                MoveStage::EvasionInit => {
+                    // Generate all legal evasions
+                    let mut evasions: MoveList = MoveList::new();
+                    game.get_evasion_moves_into(&mut evasions);
+
+                    // Score evasions
+                    for m in evasions {
+                        if self.is_tt_move(&m) || self.is_excluded(&m) {
+                            continue;
+                        }
+                        let score = self.score_evasion(game, searcher, &m);
+                        self.moves.push(ScoredMove { m, score });
+                    }
+
+                    if !self.moves.is_empty() {
+                        sort_moves_by_score(&mut self.moves);
+                    }
+                    self.cur = 0;
+                    self.stage = MoveStage::Evasion;
+                }
+
+                MoveStage::Evasion => {
+                    if self.cur < self.moves.len() {
+                        let m = self.moves[self.cur].m.clone();
+                        self.cur += 1;
+                        return Some(m);
+                    }
+                    self.stage = MoveStage::Done;
                 }
 
                 MoveStage::CaptureInit => {
@@ -503,13 +555,14 @@ impl StagedMoveGen {
                     }
 
                     // Select quiets with score > goodQuietThreshold
-                    while self.cur < self.end_generated {
+                    if self.cur < self.end_generated {
                         if self.moves[self.cur].score > GOOD_QUIET_THRESHOLD {
-                            let m = self.moves[self.cur].m.clone();
+                            let m = self.moves[self.cur].m;
                             self.cur += 1;
                             return Some(m);
                         }
                         self.cur += 1;
+                        continue; // Go to next quiet or next stage
                     }
 
                     // Setup for bad captures
@@ -519,9 +572,8 @@ impl StagedMoveGen {
 
                 MoveStage::BadCapture => {
                     // Stockfish: iterate bad captures (swapped to front during GOOD_CAPTURE)
-                    // cur starts at 0, iterate to end_bad_captures
-                    while self.cur < self.end_bad_captures {
-                        let m = self.moves[self.cur].m.clone();
+                    if self.cur < self.end_bad_captures {
+                        let m = self.moves[self.cur].m;
                         self.cur += 1;
                         return Some(m);
                     }
@@ -538,13 +590,14 @@ impl StagedMoveGen {
                     }
 
                     // Select quiets with score <= goodQuietThreshold
-                    while self.cur < self.end_generated {
+                    if self.cur < self.end_generated {
                         if self.moves[self.cur].score <= GOOD_QUIET_THRESHOLD {
-                            let m = self.moves[self.cur].m.clone();
+                            let m = self.moves[self.cur].m;
                             self.cur += 1;
                             return Some(m);
                         }
                         self.cur += 1;
+                        continue; // Go to next quiet or next stage
                     }
                     self.stage = MoveStage::Done;
                 }

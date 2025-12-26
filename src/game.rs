@@ -2,7 +2,7 @@ use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
 use crate::evaluation::{calculate_initial_material, get_piece_value};
 use crate::moves::{
     Move, MoveList, SpatialIndices, get_legal_moves, get_legal_moves_into,
-    get_pseudo_legal_moves_for_piece, is_square_attacked,
+    get_pseudo_legal_moves_for_piece_into, is_square_attacked,
 };
 use arrayvec::ArrayVec;
 use rustc_hash::FxHashSet;
@@ -630,6 +630,131 @@ impl GameState {
         None // Infinite ray
     }
 
+    fn is_on_check_ray(
+        &self,
+        target: &Coordinate,
+        king_sq: &Coordinate,
+        step_x: i64,
+        step_y: i64,
+        check_dist: i64,
+    ) -> bool {
+        let dx = target.x - king_sq.x;
+        let dy = target.y - king_sq.y;
+
+        // For the target to be on the check ray, it must satisfy:
+        // target = king + k * (step_x, step_y) for some k in 1..=check_dist
+        // This means: dx = k * step_x and dy = k * step_y for the same k
+
+        // Handle horizontal/vertical/diagonal rays
+        let k = if step_x != 0 && step_y != 0 {
+            // Diagonal: both dx and dy must give the same k
+            if dx % step_x != 0 || dy % step_y != 0 {
+                return false;
+            }
+            let kx = dx / step_x;
+            let ky = dy / step_y;
+            if kx != ky || kx <= 0 {
+                return false;
+            }
+            kx
+        } else if step_x != 0 {
+            // Horizontal ray (step_y == 0): dy must be 0
+            if dy != 0 || dx % step_x != 0 {
+                return false;
+            }
+            let kx = dx / step_x;
+            if kx <= 0 {
+                return false;
+            }
+            kx
+        } else if step_y != 0 {
+            // Vertical ray (step_x == 0): dx must be 0
+            if dx != 0 || dy % step_y != 0 {
+                return false;
+            }
+            let ky = dy / step_y;
+            if ky <= 0 {
+                return false;
+            }
+            ky
+        } else {
+            // step_x == 0 && step_y == 0 shouldn't happen (not a valid ray)
+            return false;
+        };
+
+        k <= check_dist
+    }
+
+    /// Check if a rook/queen can move from `from` to `to` (orthogonal move).
+    /// Uses spatial indices to find the first blocker on the ray.
+    #[inline]
+    fn is_path_clear_for_rook(&self, from: &Coordinate, to: &Coordinate) -> bool {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+        // Must be orthogonal
+        if dx != 0 && dy != 0 {
+            return false;
+        }
+        let step_x = dx.signum();
+        let step_y = dy.signum();
+        let dist = dx.abs().max(dy.abs());
+        if dist <= 1 {
+            // Target is adjacent, check if occupied by friendly
+            if let Some(p) = self.board.get_piece(to.x, to.y) {
+                return p.color() != self.turn; // Can capture enemy
+            }
+            return true;
+        }
+        // Use find_first_blocker_on_ray to check path
+        if let Some((bx, by)) = self.find_first_blocker_on_ray(from.x, from.y, step_x, step_y) {
+            let blocker_dist = (bx - from.x).abs().max((by - from.y).abs());
+            // Path is clear if blocker is at or beyond target (i.e., blocker_dist >= dist)
+            if blocker_dist < dist {
+                return false;
+            }
+            // If blocker is exactly at target, check if it's enemy (capture) or friendly
+            if blocker_dist == dist {
+                if let Some(p) = self.board.get_piece(bx, by) {
+                    return p.color() != self.turn;
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if a bishop/queen can move from `from` to `to` (diagonal move).
+    /// Uses spatial indices to find the first blocker on the ray.
+    #[inline]
+    fn is_path_clear_for_bishop(&self, from: &Coordinate, to: &Coordinate) -> bool {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+        // Must be diagonal
+        if dx.abs() != dy.abs() || dx == 0 {
+            return false;
+        }
+        let step_x = dx.signum();
+        let step_y = dy.signum();
+        let dist = dx.abs();
+        if dist <= 1 {
+            if let Some(p) = self.board.get_piece(to.x, to.y) {
+                return p.color() != self.turn;
+            }
+            return true;
+        }
+        if let Some((bx, by)) = self.find_first_blocker_on_ray(from.x, from.y, step_x, step_y) {
+            let blocker_dist = (bx - from.x).abs();
+            if blocker_dist < dist {
+                return false;
+            }
+            if blocker_dist == dist {
+                if let Some(p) = self.board.get_piece(bx, by) {
+                    return p.color() != self.turn;
+                }
+            }
+        }
+        true
+    }
+
     /// Initialize starting_squares from the current board: all non-pawn,
     /// non-royal pieces' current coordinates are treated as their original
     /// squares. Intended to be called once when constructing a GameState
@@ -950,7 +1075,15 @@ impl GameState {
 
     /// Returns pseudo-legal moves. Legality (not leaving king in check)
     /// is checked in the search after making each move.
+    /// When in check and must escape, uses the optimized evasion generator.
     pub fn get_legal_moves(&self) -> MoveList {
+        // Check if we're in check and need to use the optimized evasion generator
+        if self.is_in_check() && self.must_escape_check() {
+            let mut out = MoveList::new();
+            self.get_evasion_moves_into(&mut out);
+            return out;
+        }
+
         get_legal_moves(
             &self.board,
             self.turn,
@@ -963,7 +1096,28 @@ impl GameState {
     }
 
     /// Fill a pre-allocated buffer with pseudo-legal moves for the current side.
+    /// When in check and must escape (checkmate win condition), uses the optimized
+    /// evasion generator that handles long-range blocking moves correctly.
     pub fn get_legal_moves_into(&self, out: &mut MoveList) {
+        if self.is_in_check() {
+            self.get_evasion_moves_into(out);
+            // Strict legality filtering (pins/leaving king in check)
+            let mut i = 0;
+            let mut s_mut = self.clone();
+            while i < out.len() {
+                let m = out[i];
+                let undo = s_mut.make_move(&m);
+                if s_mut.is_move_illegal() {
+                    s_mut.undo_move(&m, undo);
+                    out.remove(i);
+                } else {
+                    s_mut.undo_move(&m, undo);
+                    i += 1;
+                }
+            }
+            return;
+        }
+
         get_legal_moves_into(
             &self.board,
             self.turn,
@@ -997,197 +1151,76 @@ impl GameState {
         let our_color = self.turn;
         let their_color = our_color.opponent();
 
+        // Use cached king position for efficiency
+        let king_sq = match our_color {
+            PlayerColor::White => self.white_king_pos,
+            PlayerColor::Black => self.black_king_pos,
+            PlayerColor::Neutral => None,
+        };
+
+        let king_sq = match king_sq {
+            Some(pos) => pos,
+            None => return, // No king found, no evasion possible
+        };
+
+        let king_piece = match self.board.get_piece(king_sq.x, king_sq.y) {
+            Some(p) => *p,
+            None => return,
+        };
+
+        // Use stack-allocated array for checkers
+        let mut checkers: [Coordinate; 16] = [Coordinate::new(0, 0); 16];
+        let mut checker_count = 0;
+
+        // COMPREHENSIVE CHECKER DETECTION (Sync with is_square_attacked)
+        // Check all enemy pieces to see if they attack our king
+        let indices = &self.spatial_indices;
         if let Some(active) = &self.board.active_coords {
-            for (x, y) in active {
-                let piece = match self.board.get_piece(*x, *y) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if piece.color() == PlayerColor::Neutral {
-                    continue;
-                }
-                match piece.piece_type() {
-                    PieceType::King
-                    | PieceType::Queen
-                    | PieceType::Rook
-                    | PieceType::Bishop
-                    | PieceType::Knight
-                    | PieceType::Pawn
-                    | PieceType::RoyalQueen
-                    | PieceType::RoyalCentaur => {}
-                    _ => {
-                        self.get_legal_moves_into(out);
-                        return;
+            for &(ax, ay) in active {
+                if let Some(p) = self.board.get_piece(ax, ay) {
+                    if p.color() == their_color {
+                        if crate::moves::is_piece_attacking_square(
+                            &self.board,
+                            p,
+                            &Coordinate::new(ax, ay),
+                            &king_sq,
+                            indices,
+                            &self.game_rules,
+                        ) {
+                            if checker_count < 16 {
+                                checkers[checker_count] = Coordinate::new(ax, ay);
+                                checker_count += 1;
+                            }
+                        }
                     }
                 }
             }
         } else {
-            for (_, piece) in self.board.iter() {
-                if piece.color() == PlayerColor::Neutral {
-                    continue;
-                }
-                match piece.piece_type() {
-                    PieceType::King
-                    | PieceType::Queen
-                    | PieceType::Rook
-                    | PieceType::Bishop
-                    | PieceType::Knight
-                    | PieceType::Pawn
-                    | PieceType::RoyalQueen
-                    | PieceType::RoyalCentaur => {}
-                    _ => {
-                        self.get_legal_moves_into(out);
-                        return;
+            for (&(ax, ay), p) in self.board.iter() {
+                if p.color() == their_color {
+                    if crate::moves::is_piece_attacking_square(
+                        &self.board,
+                        p,
+                        &Coordinate::new(ax, ay),
+                        &king_sq,
+                        indices,
+                        &self.game_rules,
+                    ) {
+                        if checker_count < 16 {
+                            checkers[checker_count] = Coordinate::new(ax, ay);
+                            checker_count += 1;
+                        }
                     }
                 }
             }
         }
 
-        let mut royal_pos: Option<(Coordinate, Piece)> = None;
-        if let Some(active) = &self.board.active_coords {
-            for (x, y) in active {
-                let piece = match self.board.get_piece(*x, *y) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if piece.color() == our_color && piece.piece_type().is_royal() {
-                    if royal_pos.is_some() {
-                        self.get_legal_moves_into(out);
-                        return;
-                    }
-                    royal_pos = Some((Coordinate::new(*x, *y), *piece));
-                }
-            }
-        } else {
-            for ((x, y), piece) in self.board.iter() {
-                if piece.color() == our_color && piece.piece_type().is_royal() {
-                    if royal_pos.is_some() {
-                        self.get_legal_moves_into(out);
-                        return;
-                    }
-                    royal_pos = Some((Coordinate::new(*x, *y), *piece));
-                }
-            }
+        if checker_count == 0 {
+            return; // No checkers found
         }
 
-        let (king_sq, king_piece) = match royal_pos {
-            Some(v) => v,
-            None => {
-                self.get_legal_moves_into(out);
-                return;
-            }
-        };
-
-        let mut checkers: Vec<Coordinate> = Vec::new();
-
-        // Import static attack patterns
-        use crate::attacks::{DIAG_DIRS, KING_OFFSETS, KNIGHT_OFFSETS, ORTHO_DIRS};
-
-        let pawn_dir: i64 = match their_color {
-            PlayerColor::White => 1,
-            PlayerColor::Black => -1,
-            PlayerColor::Neutral => 0,
-        };
-        if pawn_dir != 0 {
-            let pawn_y = king_sq.y - pawn_dir;
-            for dx in [-1i64, 1] {
-                let px = king_sq.x + dx;
-                if let Some(p) = self.board.get_piece(px, pawn_y) {
-                    if p.color() == their_color && p.piece_type() == PieceType::Pawn {
-                        checkers.push(Coordinate::new(px, pawn_y));
-                    }
-                }
-            }
-        }
-
-        // Use static knight offsets
-        for &(dx, dy) in &KNIGHT_OFFSETS {
-            let x = king_sq.x + dx;
-            let y = king_sq.y + dy;
-            if let Some(p) = self.board.get_piece(x, y) {
-                if p.color() == their_color && p.piece_type() == PieceType::Knight {
-                    checkers.push(Coordinate::new(x, y));
-                }
-            }
-        }
-
-        // Use static king offsets
-        for &(dx, dy) in &KING_OFFSETS {
-            let x = king_sq.x + dx;
-            let y = king_sq.y + dy;
-            if let Some(p) = self.board.get_piece(x, y) {
-                if p.color() == their_color && p.piece_type() == PieceType::King {
-                    checkers.push(Coordinate::new(x, y));
-                }
-            }
-        }
-
-        // Use SpatialIndices for O(log n) slider detection - unlimited range!
-        for &(dx, dy) in &ORTHO_DIRS {
-            let line_vec = if dx == 0 {
-                self.spatial_indices.cols.get(&king_sq.x)
-            } else {
-                self.spatial_indices.rows.get(&king_sq.y)
-            };
-
-            if let Some(vec) = line_vec {
-                let val = if dx == 0 { king_sq.y } else { king_sq.x };
-                let step_dir = if dx == 0 { dy } else { dx };
-
-                if let Some((coord, packed)) = SpatialIndices::find_nearest(vec, val, step_dir) {
-                    let p = Piece::from_packed(packed);
-                    if p.color() == their_color
-                        && (p.piece_type() == PieceType::Rook || p.piece_type() == PieceType::Queen)
-                    {
-                        // Calculate actual position
-                        let (cx, cy) = if dx == 0 {
-                            (king_sq.x, coord)
-                        } else {
-                            (coord, king_sq.y)
-                        };
-                        checkers.push(Coordinate::new(cx, cy));
-                    }
-                }
-            }
-        }
-
-        for &(dx, dy) in &DIAG_DIRS {
-            let diag_key = if dx == dy {
-                king_sq.x - king_sq.y
-            } else {
-                king_sq.x + king_sq.y
-            };
-            let line_vec = if dx == dy {
-                self.spatial_indices.diag1.get(&diag_key)
-            } else {
-                self.spatial_indices.diag2.get(&diag_key)
-            };
-
-            if let Some(vec) = line_vec {
-                if let Some((coord, packed)) = SpatialIndices::find_nearest(vec, king_sq.x, dx) {
-                    let p = Piece::from_packed(packed);
-                    if p.color() == their_color
-                        && (p.piece_type() == PieceType::Bishop
-                            || p.piece_type() == PieceType::Queen)
-                    {
-                        // For diagonals, x-coord is stored; y = x - diag_key or y = diag_key - x
-                        let cy = if dx == dy {
-                            coord - diag_key
-                        } else {
-                            diag_key - coord
-                        };
-                        checkers.push(Coordinate::new(coord, cy));
-                    }
-                }
-            }
-        }
-
-        if checkers.is_empty() {
-            self.get_legal_moves_into(out);
-            return;
-        }
-
-        let king_moves = get_pseudo_legal_moves_for_piece(
+        // 1. King escapes (Legal regardless of checker count, as long as target not attacked)
+        get_pseudo_legal_moves_for_piece_into(
             &self.board,
             &king_piece,
             &king_sq,
@@ -1195,269 +1228,346 @@ impl GameState {
             &self.en_passant,
             &self.spatial_indices,
             &self.game_rules,
-            false,
+            true, // Allow check-related filtering
+            out,
             self.enemy_king_pos(),
         );
-        out.extend(king_moves);
 
-        if checkers.len() >= 2 {
-            return;
+        if checker_count >= 2 {
+            return; // Double check - only king moves can escape
         }
 
+        // 2. Capture checker or block attack (Only in single check)
         let checker_sq = checkers[0];
         let dx_check = checker_sq.x - king_sq.x;
         let dy_check = checker_sq.y - king_sq.y;
 
-        let mut block_squares: Vec<Coordinate> = Vec::new();
-        let is_slider = dx_check == 0 || dy_check == 0 || dx_check.abs() == dy_check.abs();
+        // Identify if checker is a slider (Ortho, Diag, or Knightrider)
+        use crate::attacks::{DIAG_MASK, KNIGHTRIDER_MASK, ORTHO_MASK, matches_mask};
+        let checker_p = self.board.get_piece(checker_sq.x, checker_sq.y).unwrap();
+        let is_slider = matches_mask(
+            checker_p.piece_type(),
+            ORTHO_MASK | DIAG_MASK | KNIGHTRIDER_MASK,
+        );
+
         let check_dist = dx_check.abs().max(dy_check.abs());
         let step_x = dx_check.signum();
         let step_y = dy_check.signum();
 
-        // Instead of generating all block squares (O(distance)), we'll check if moves
-        // land on the ray dynamically. Only generate a small number of nearby blocks
-        // for move filtering, the rest is checked via ray math.
-        if is_slider {
-            // Generate only first 50 block squares for filtering
-            let blocks_to_gen = check_dist.min(50);
-            for i in 1..blocks_to_gen {
-                let x = king_sq.x + step_x * i;
-                let y = king_sq.y + step_y * i;
-                block_squares.push(Coordinate::new(x, y));
+        let process_piece = |s: &GameState, from: Coordinate, piece: &Piece, out: &mut MoveList| {
+            if piece.color() != our_color || (from.x == king_sq.x && from.y == king_sq.y) {
+                return;
             }
-        }
 
-        let mut targets: Vec<Coordinate> = Vec::new();
-        targets.push(checker_sq);
-        targets.extend(block_squares.iter().copied());
+            let pt = piece.piece_type();
 
-        if targets.is_empty() {
-            return;
-        }
+            // Import attack utilities
+            use crate::attacks::{
+                CAMEL_OFFSETS, GIRAFFE_OFFSETS, HAWK_OFFSETS, KING_OFFSETS, KNIGHT_OFFSETS,
+                KNIGHTRIDER_DIRS, ZEBRA_OFFSETS, attacks_like_king, attacks_like_knight,
+                is_diag_slider, is_ortho_slider,
+            };
 
-        if let Some(active) = &self.board.active_coords {
-            for (x, y) in active {
-                let piece = match self.board.get_piece(*x, *y) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                if piece.color() != our_color {
-                    continue;
+            let can_ortho = is_ortho_slider(pt);
+            let can_diag = is_diag_slider(pt);
+            let can_knight = attacks_like_knight(pt);
+            let can_king = attacks_like_king(pt);
+
+            // Helper to check if target is valid for blocking (empty or enemy)
+            let can_block_at = |tx: i64, ty: i64| -> bool {
+                if let Some(target_p) = s.board.get_piece(tx, ty) {
+                    target_p.color() != our_color
+                } else {
+                    true
                 }
-                if *x == king_sq.x && *y == king_sq.y {
-                    continue;
+            };
+
+            // ==========================================
+            // SLIDER BLOCKING (Rook/Bishop/Queen/etc)
+            // Direct intersection calculation - O(1), works for infinite distances
+            // ==========================================
+            if is_slider && can_ortho {
+                // Horizontal line y=from.y intersects check ray
+                if step_y != 0 {
+                    let k = (from.y - king_sq.y) / step_y;
+                    let rem = (from.y - king_sq.y) % step_y;
+                    if rem == 0 && k >= 1 && k <= check_dist {
+                        let tx = king_sq.x + k * step_x;
+                        let ty = from.y;
+                        if tx != from.x && s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty))
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
                 }
-                let from = Coordinate::new(*x, *y);
+                // Vertical line x=from.x intersects check ray
+                if step_x != 0 {
+                    let k = (from.x - king_sq.x) / step_x;
+                    let rem = (from.x - king_sq.x) % step_x;
+                    if rem == 0 && k >= 1 && k <= check_dist {
+                        let tx = from.x;
+                        let ty = king_sq.y + k * step_y;
+                        if ty != from.y && s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty))
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+            }
 
-                let mut may_reach = false;
-                for target in &targets {
-                    let tx = target.x;
-                    let ty = target.y;
-                    let ddx = tx - from.x;
-                    let ddy = ty - from.y;
+            if is_slider && can_diag {
+                // Diagonal x-y=c intersects check ray
+                let s_diff = step_x - step_y;
+                if s_diff != 0 {
+                    let d_diff = (from.x - from.y) - (king_sq.x - king_sq.y);
+                    let k = d_diff / s_diff;
+                    let rem = d_diff % s_diff;
+                    if rem == 0 && k >= 1 && k <= check_dist {
+                        let tx = king_sq.x + k * step_x;
+                        let ty = king_sq.y + k * step_y;
+                        if !(tx == from.x && ty == from.y)
+                            && s.is_path_clear_for_bishop(&from, &Coordinate::new(tx, ty))
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+                // Anti-diagonal x+y=c intersects check ray
+                let s_sum = step_x + step_y;
+                if s_sum != 0 {
+                    let d_sum = (from.x + from.y) - (king_sq.x + king_sq.y);
+                    let k = d_sum / s_sum;
+                    let rem = d_sum % s_sum;
+                    if rem == 0 && k >= 1 && k <= check_dist {
+                        let tx = king_sq.x + k * step_x;
+                        let ty = king_sq.y + k * step_y;
+                        if !(tx == from.x && ty == from.y)
+                            && s.is_path_clear_for_bishop(&from, &Coordinate::new(tx, ty))
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+            }
 
-                    match piece.piece_type() {
-                        PieceType::Pawn => {
-                            let dir = match our_color {
-                                PlayerColor::White => 1,
-                                PlayerColor::Black => -1,
-                                PlayerColor::Neutral => 0,
-                            };
-                            if dir != 0 {
-                                if ddy == dir && (ddx == -1 || ddx == 1) {
-                                    may_reach = true;
-                                } else if ddx == 0 && (ddy == dir || ddy == dir * 2) {
-                                    may_reach = true;
+            // ==========================================
+            // KNIGHTRIDER BLOCKING
+            // Slider along knight directions - intersection calculation
+            // ==========================================
+            if is_slider && pt == PieceType::Knightrider {
+                for &(ndx, ndy) in &KNIGHTRIDER_DIRS {
+                    // Knightrider line: from + t*(ndx, ndy) for t >= 1
+                    // Check ray: king + k*(step_x, step_y) for k in 1..=check_dist
+                    // Find t, k such that both equations are satisfied
+                    let det = ndx * step_y - ndy * step_x;
+                    if det != 0 {
+                        let dx = king_sq.x - from.x;
+                        let dy = king_sq.y - from.y;
+                        let t_num = dx * step_y - dy * step_x;
+                        let k_num = dx * ndy - dy * ndx;
+                        if t_num % det == 0 && k_num % det == 0 {
+                            let t = t_num / det;
+                            let k = k_num / det;
+                            if t >= 1 && k >= 1 && k <= check_dist {
+                                let tx = from.x + t * ndx;
+                                let ty = from.y + t * ndy;
+                                // Check path is clear for knightrider
+                                let mut path_clear = true;
+                                for i in 1..t {
+                                    if s.board
+                                        .get_piece(from.x + i * ndx, from.y + i * ndy)
+                                        .is_some()
+                                    {
+                                        path_clear = false;
+                                        break;
+                                    }
+                                }
+                                if path_clear && can_block_at(tx, ty) {
+                                    out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                                 }
                             }
                         }
-                        PieceType::Knight => {
-                            if (ddx.abs() == 1 && ddy.abs() == 2)
-                                || (ddx.abs() == 2 && ddy.abs() == 1)
-                            {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Bishop => {
-                            if ddx.abs() == ddy.abs() && ddx != 0 {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Rook => {
-                            if (ddx == 0 && ddy != 0) || (ddy == 0 && ddx != 0) {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Queen => {
-                            if (ddx == 0 && ddy != 0)
-                                || (ddy == 0 && ddx != 0)
-                                || (ddx.abs() == ddy.abs() && ddx != 0)
-                            {
-                                may_reach = true;
-                            }
-                        }
-                        _ => {}
                     }
+                }
+            }
 
-                    if may_reach {
-                        break;
+            // ==========================================
+            // LEAPER BLOCKING (Knight, Camel, Zebra, Giraffe, Guard, Hawk)
+            // Enumerate fixed jump patterns - O(jumps)
+            // ==========================================
+            if is_slider {
+                // Knight-like blocking
+                if can_knight {
+                    for &(dx, dy) in &KNIGHT_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
                     }
                 }
 
-                if !may_reach {
+                // King/Guard-like blocking (1-square moves)
+                if can_king {
+                    for &(dx, dy) in &KING_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+
+                // Camel blocking
+                if pt == PieceType::Camel {
+                    for &(dx, dy) in &CAMEL_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+
+                // Zebra blocking
+                if pt == PieceType::Zebra {
+                    for &(dx, dy) in &ZEBRA_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+
+                // Giraffe blocking
+                if pt == PieceType::Giraffe {
+                    for &(dx, dy) in &GIRAFFE_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+
+                // Hawk blocking
+                if pt == PieceType::Hawk {
+                    for &(dx, dy) in &HAWK_OFFSETS {
+                        let tx = from.x + dx;
+                        let ty = from.y + dy;
+                        if s.is_on_check_ray(
+                            &Coordinate::new(tx, ty),
+                            &king_sq,
+                            step_x,
+                            step_y,
+                            check_dist,
+                        ) && can_block_at(tx, ty)
+                        {
+                            out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
+                        }
+                    }
+                }
+            }
+
+            // ==========================================
+            // PAWN BLOCKING
+            // Pawns only move 1-2 squares, so pseudo-legal generation handles them fine
+            // They'll be processed in the fallback section below
+            // ==========================================
+
+            // ==========================================
+            // CAPTURE DETECTION (for ALL pieces)
+            // Uses pseudo-legal move generation - handles captures from ANY direction
+            // Also catches blocking for complex pieces (Rose, etc)
+            // ==========================================
+            let mut pseudo = MoveList::new();
+            get_pseudo_legal_moves_for_piece_into(
+                &s.board,
+                piece,
+                &from,
+                &s.special_rights,
+                &s.en_passant,
+                &s.spatial_indices,
+                &s.game_rules,
+                true,
+                &mut pseudo,
+                s.enemy_king_pos(),
+            );
+
+            for m in pseudo {
+                // Capture of checker (from any direction)
+                if m.to.x == checker_sq.x && m.to.y == checker_sq.y {
+                    out.push(m);
                     continue;
                 }
 
-                let pseudo = get_pseudo_legal_moves_for_piece(
-                    &self.board,
-                    piece,
-                    &from,
-                    &self.special_rights,
-                    &self.en_passant,
-                    &self.spatial_indices,
-                    &self.game_rules,
-                    true,
-                    self.enemy_king_pos(),
-                );
-                for m in pseudo {
-                    let mut is_valid = false;
-                    // Check explicit targets
-                    for target in &targets {
-                        if m.to.x == target.x && m.to.y == target.y {
-                            is_valid = true;
-                            break;
+                // For pieces not handled above (Rose, Husky, Obstacle, Void, etc),
+                // check if any move lands on the check ray (blocking)
+                if is_slider {
+                    let handled_blocking = can_ortho
+                        || can_diag
+                        || can_knight
+                        || can_king
+                        || pt == PieceType::Camel
+                        || pt == PieceType::Zebra
+                        || pt == PieceType::Giraffe
+                        || pt == PieceType::Hawk
+                        || pt == PieceType::Knightrider;
+
+                    if !handled_blocking {
+                        if s.is_on_check_ray(&m.to, &king_sq, step_x, step_y, check_dist) {
+                            out.push(m);
                         }
                     }
-                    // For sliders, also check if move lands on the ray beyond generated blocks
-                    if !is_valid && is_slider && check_dist > 50 {
-                        let to_dx = m.to.x - king_sq.x;
-                        let to_dy = m.to.y - king_sq.y;
-                        // Check if move is on the same ray as the check
-                        let on_ray = (step_x == 0 && to_dx == 0 && to_dy.signum() == step_y)
-                            || (step_y == 0 && to_dy == 0 && to_dx.signum() == step_x)
-                            || (step_x != 0
-                                && step_y != 0
-                                && to_dx.abs() == to_dy.abs()
-                                && to_dx.signum() == step_x
-                                && to_dy.signum() == step_y);
-                        let move_dist = to_dx.abs().max(to_dy.abs());
-                        if on_ray && move_dist > 0 && move_dist < check_dist {
-                            is_valid = true;
-                        }
-                    }
-                    if is_valid {
-                        out.push(m);
-                    }
+                }
+            }
+        };
+
+        if let Some(active) = &self.board.active_coords {
+            for &(ax, ay) in active {
+                if let Some(p) = self.board.get_piece(ax, ay) {
+                    process_piece(self, Coordinate::new(ax, ay), p, out);
                 }
             }
         } else {
-            for ((x, y), piece) in self.board.iter() {
-                if piece.color() != our_color {
-                    continue;
-                }
-                if *x == king_sq.x && *y == king_sq.y {
-                    continue;
-                }
-                let from = Coordinate::new(*x, *y);
-
-                let mut may_reach = false;
-                for target in &targets {
-                    let tx = target.x;
-                    let ty = target.y;
-                    let ddx = tx - from.x;
-                    let ddy = ty - from.y;
-
-                    match piece.piece_type() {
-                        PieceType::Pawn => {
-                            let dir = match our_color {
-                                PlayerColor::White => 1,
-                                PlayerColor::Black => -1,
-                                PlayerColor::Neutral => 0,
-                            };
-                            if dir != 0 {
-                                if ddy == dir && (ddx == -1 || ddx == 1) {
-                                    may_reach = true;
-                                } else if ddx == 0 && (ddy == dir || ddy == dir * 2) {
-                                    may_reach = true;
-                                }
-                            }
-                        }
-                        PieceType::Knight => {
-                            if (ddx.abs() == 1 && ddy.abs() == 2)
-                                || (ddx.abs() == 2 && ddy.abs() == 1)
-                            {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Bishop => {
-                            if ddx.abs() == ddy.abs() && ddx != 0 {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Rook => {
-                            if (ddx == 0 && ddy != 0) || (ddy == 0 && ddx != 0) {
-                                may_reach = true;
-                            }
-                        }
-                        PieceType::Queen => {
-                            if (ddx == 0 && ddy != 0)
-                                || (ddy == 0 && ddx != 0)
-                                || (ddx.abs() == ddy.abs() && ddx != 0)
-                            {
-                                may_reach = true;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    if may_reach {
-                        break;
-                    }
-                }
-
-                if !may_reach {
-                    continue;
-                }
-
-                let pseudo = get_pseudo_legal_moves_for_piece(
-                    &self.board,
-                    piece,
-                    &from,
-                    &self.special_rights,
-                    &self.en_passant,
-                    &self.spatial_indices,
-                    &self.game_rules,
-                    true,
-                    self.enemy_king_pos(),
-                );
-                for m in pseudo {
-                    let mut is_valid = false;
-                    for target in &targets {
-                        if m.to.x == target.x && m.to.y == target.y {
-                            is_valid = true;
-                            break;
-                        }
-                    }
-                    // For sliders, also check if move lands on the ray beyond generated blocks
-                    if !is_valid && is_slider && check_dist > 50 {
-                        let to_dx = m.to.x - king_sq.x;
-                        let to_dy = m.to.y - king_sq.y;
-                        let on_ray = (step_x == 0 && to_dx == 0 && to_dy.signum() == step_y)
-                            || (step_y == 0 && to_dy == 0 && to_dx.signum() == step_x)
-                            || (step_x != 0
-                                && step_y != 0
-                                && to_dx.abs() == to_dy.abs()
-                                && to_dx.signum() == step_x
-                                && to_dy.signum() == step_y);
-                        let move_dist = to_dx.abs().max(to_dy.abs());
-                        if on_ray && move_dist > 0 && move_dist < check_dist {
-                            is_valid = true;
-                        }
-                    }
-                    if is_valid {
-                        out.push(m);
-                    }
-                }
+            for (&(ax, ay), p) in self.board.iter() {
+                process_piece(self, Coordinate::new(ax, ay), p, out);
             }
         }
     }
@@ -1542,6 +1652,7 @@ impl GameState {
         false
     }
 
+    #[inline(always)]
     pub fn is_in_check(&self) -> bool {
         let indices = &self.spatial_indices;
         let attacker_color = self.turn.opponent();
@@ -1575,8 +1686,12 @@ impl GameState {
 
     /// Full board scan for check detection. Used as fallback for variants with
     /// multiple royal pieces or when cached king position is unavailable.
-    #[inline(never)]
-    fn is_in_check_full_scan(&self, attacker_color: PlayerColor, indices: &SpatialIndices) -> bool {
+    #[inline(always)]
+    pub fn is_in_check_full_scan(
+        &self,
+        attacker_color: PlayerColor,
+        indices: &SpatialIndices,
+    ) -> bool {
         if let Some(active) = &self.board.active_coords {
             for (x, y) in active {
                 let piece = match self.board.get_piece(*x, *y) {
@@ -2399,6 +2514,104 @@ mod tests {
     }
 
     // ======================== Repetition Tests ========================
+
+    #[test]
+    fn test_rose_check_detection() {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.special_rights.clear();
+        game.turn = PlayerColor::Black;
+
+        // White rose at (3,7)
+        game.board
+            .set_piece(3, 7, Piece::new(PieceType::Rose, PlayerColor::White));
+
+        // Black king at (5,8)
+        game.board
+            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
+
+        // White king somewhere else
+        game.board
+            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
+
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        // Build spatial indices
+        game.spatial_indices = SpatialIndices::new(&game.board);
+
+        // Test: The king at (5,8) should be attacked by the white rose at (3,7)
+        let king_pos = Coordinate::new(5, 8);
+        let is_attacked = crate::moves::is_square_attacked(
+            &game.board,
+            &king_pos,
+            PlayerColor::White,
+            &game.spatial_indices,
+        );
+
+        assert!(
+            is_attacked,
+            "Rose at (3,7) should give check to king at (5,8)"
+        );
+
+        // Also test that the game correctly identifies it's in check
+        assert!(game.is_in_check(), "Game should report being in check");
+
+        // And test that non-king moves are illegal (must respond to check)
+        let mut all_moves = MoveList::new();
+        game.get_legal_moves_into(&mut all_moves);
+
+        // All legal moves should either move the king or block/capture the rose
+        for m in all_moves.iter() {
+            if m.piece.piece_type() != PieceType::King {
+                // If it's not a king move, it must capture the rose
+                assert_eq!(
+                    (m.to.x, m.to.y),
+                    (3, 7),
+                    "Non-king move {:?} should capture the rose at (3,7)",
+                    m
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_distant_slider_block() {
+        let mut game = GameState::new();
+        game.board = Board::new();
+        game.special_rights.clear();
+        game.turn = PlayerColor::White;
+
+        // White King at (-4, -2)
+        game.board
+            .set_piece(-4, -2, Piece::new(PieceType::King, PlayerColor::White));
+        // White Rook at (7, 2)
+        game.board
+            .set_piece(7, 2, Piece::new(PieceType::Rook, PlayerColor::White));
+        // Black Bishop at (26, -32) - giving diagonal check
+        game.board
+            .set_piece(26, -32, Piece::new(PieceType::Bishop, PlayerColor::Black));
+        // Black King
+        game.board
+            .set_piece(100, 100, Piece::new(PieceType::King, PlayerColor::Black));
+
+        game.recompute_piece_counts();
+        game.recompute_hash();
+
+        assert!(game.is_in_check(), "White king should be in check");
+
+        let mut moves = MoveList::new();
+        game.get_legal_moves_into(&mut moves);
+
+        // Rook at (7, 2) should be able to move to (7, -13) to block
+        let can_block = moves
+            .iter()
+            .any(|m| m.from.x == 7 && m.from.y == 2 && m.to.x == 7 && m.to.y == -13);
+        assert!(
+            can_block,
+            "Rook should be able to block distant bishop check"
+        );
+    }
 
     #[test]
     fn test_is_repetition_no_repetition() {

@@ -92,7 +92,7 @@ pub fn score_move(
             let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
             for &plies_ago in &[0usize, 1, 2, 3, 5] {
-                if ply >= plies_ago + 1 {
+                if ply > plies_ago {
                     if let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
                         let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
                         if prev_piece < 16 {
