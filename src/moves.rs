@@ -2113,8 +2113,10 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
 
     // Iterate all pieces on the board once
     for (px, py, p) in board.tiles.iter_all_pieces() {
-        // Skip same position or same color
-        if (px == from.x && py == from.y) || p.color() == our_color {
+        // Skip only the piece at our exact position (can't target ourselves)
+        // Note: we process both enemy and friendly pieces - enemy pieces can be attacked,
+        // and friendly pieces contribute to the reachable area via wiggle room extension
+        if px == from.x && py == from.y {
             continue;
         }
 
