@@ -2288,7 +2288,11 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
     fn distance_wiggle(dist: i64, is_enemy: bool, base_wiggle: i64) -> i64 {
         if dist <= 10 {
             base_wiggle
-        } else if is_enemy { 1 } else { 0 }
+        } else if is_enemy {
+            1
+        } else {
+            0
+        }
     }
 
     let ek_ref = enemy_king_pos;
@@ -2566,19 +2570,44 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
                 let ky = ek.y;
                 let piece_type = piece.piece_type();
 
-                // For orthogonal rays, check if we can give diagonal check
+                // Check if piece can attack orthogonally (Rook, Queen, Chancellor, Amazon)
+                let can_ortho = matches!(
+                    piece_type,
+                    crate::board::PieceType::Queen
+                        | crate::board::PieceType::Rook
+                        | crate::board::PieceType::RoyalQueen
+                        | crate::board::PieceType::Chancellor
+                        | crate::board::PieceType::Amazon
+                );
+
+                // Check if piece can attack diagonally (Bishop, Queen, Archbishop, Amazon)
+                let can_diag = matches!(
+                    piece_type,
+                    crate::board::PieceType::Queen
+                        | crate::board::PieceType::Bishop
+                        | crate::board::PieceType::RoyalQueen
+                        | crate::board::PieceType::Archbishop
+                        | crate::board::PieceType::Amazon
+                );
+
                 if is_horizontal {
-                    // Horizontal ray: find column where diagonal check is possible
+                    // Horizontal ray: moving along y=from.y with varying x
+
+                    // 1. ORTHOGONAL CHECK: If king.x is reachable, we can attack vertically
+                    // Distance to reach x=kx is |kx - from.x| in our direction
+                    if can_ortho && kx != from.x {
+                        let dx = kx - from.x;
+                        if dx.signum() == dir_x.signum() {
+                            let d = dx.abs();
+                            if d <= max_dist && d <= MAX_INTERCEPTION_DIST {
+                                target_dists.push(d);
+                            }
+                        }
+                    }
+
+                    // 2. DIAGONAL CHECK: Find column where diagonal check is possible
                     // From (tx, from.y), can attack (kx, ky) diagonally if |tx - kx| == |from.y - ky|
-                    if from.y != ky
-                        && matches!(
-                            piece_type,
-                            crate::board::PieceType::Queen
-                                | crate::board::PieceType::Bishop
-                                | crate::board::PieceType::Archbishop
-                                | crate::board::PieceType::Amazon
-                        )
-                    {
+                    if can_diag && from.y != ky {
                         let diff = (from.y - ky).abs();
                         for target_x in [kx + diff, kx - diff] {
                             let dx = target_x - from.x;
@@ -2591,17 +2620,22 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
                         }
                     }
                 } else if is_vertical {
-                    // Vertical ray: find row where diagonal check is possible
+                    // Vertical ray: moving along x=from.x with varying y
+
+                    // 1. ORTHOGONAL CHECK: If king.y is reachable, we can attack horizontally
+                    if can_ortho && ky != from.y {
+                        let dy = ky - from.y;
+                        if dy.signum() == dir_y.signum() {
+                            let d = dy.abs();
+                            if d <= max_dist && d <= MAX_INTERCEPTION_DIST {
+                                target_dists.push(d);
+                            }
+                        }
+                    }
+
+                    // 2. DIAGONAL CHECK: Find row where diagonal check is possible
                     // From (from.x, ty), can attack (kx, ky) diagonally if |from.x - kx| == |ty - ky|
-                    if from.x != kx
-                        && matches!(
-                            piece_type,
-                            crate::board::PieceType::Queen
-                                | crate::board::PieceType::Bishop
-                                | crate::board::PieceType::Archbishop
-                                | crate::board::PieceType::Amazon
-                        )
-                    {
+                    if can_diag && from.x != kx {
                         let diff = (from.x - kx).abs();
                         for target_y in [ky + diff, ky - diff] {
                             let dy = target_y - from.y;
