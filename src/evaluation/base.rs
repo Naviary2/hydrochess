@@ -869,7 +869,7 @@ pub fn evaluate_queen(
 
         if same_file || same_rank || same_diag {
             // Reward only if the line is clear between queen and king (direct pressure).
-            if is_clear_line_between(&game.board, &from, ek) {
+            if is_clear_line_between_fast(&game.spatial_indices, &from, ek) {
                 // Base line-attack bonus - reduced to avoid queen chasing king too eagerly
                 let mut line_bonus: i32 = 15;
                 let lin_dist = dx.abs().max(dy.abs()) as i32;
@@ -1536,9 +1536,9 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
                 continue;
             }
 
-            // Now use the O(#pieces) line-of-sight check
+            // Now use the O(log n) line-of-sight check via spatial indices
             let from = Coordinate { x, y };
-            if is_clear_line_between(&game.board, &from, king) {
+            if is_clear_line_between_fast(&game.spatial_indices, &from, king) {
                 enemy_slider_threats += 1;
             }
         }
@@ -1567,9 +1567,13 @@ pub fn evaluate_pawn_structure(game: &GameState) -> i32 {
     // Store in cache (limit cache size to avoid unbounded growth)
     PAWN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        // Clear cache if it grows too large (simple LRU alternative)
-        if cache.len() > 16384 {
-            cache.clear();
+        // Evict ~40% of entries if cache grows too large (better than full clear)
+        if cache.len() > 32768 {
+            let to_remove = cache.len() * 2 / 5; // Remove ~40%
+            let keys: Vec<_> = cache.keys().take(to_remove).copied().collect();
+            for k in keys {
+                cache.remove(&k);
+            }
         }
         cache.insert(pawn_hash, score);
     });
@@ -1814,6 +1818,97 @@ pub fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) 
             {
                 return false;
             }
+        }
+    }
+
+    true
+}
+
+/// O(log n) version of is_clear_line_between using SpatialIndices.
+/// Uses binary search on sorted coordinate arrays instead of iterating all pieces.
+#[inline]
+pub fn is_clear_line_between_fast(
+    indices: &crate::moves::SpatialIndices,
+    from: &Coordinate,
+    to: &Coordinate,
+) -> bool {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+
+    // Not collinear in rook/bishop directions
+    if !(dx == 0 || dy == 0 || dx.abs() == dy.abs()) {
+        return false;
+    }
+
+    // Early exit for adjacent squares
+    if dx.abs() <= 1 && dy.abs() <= 1 {
+        return true;
+    }
+
+    // Horizontal line (same rank)
+    if dy == 0 {
+        if let Some(row) = indices.rows.get(&from.y) {
+            let (min_x, max_x) = if from.x < to.x {
+                (from.x, to.x)
+            } else {
+                (to.x, from.x)
+            };
+            // Binary search for first piece with x > min_x
+            let start = row.partition_point(|(x, _)| *x <= min_x);
+            // Check if any piece exists before max_x
+            if start < row.len() && row[start].0 < max_x {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Vertical line (same file)
+    if dx == 0 {
+        if let Some(col) = indices.cols.get(&from.x) {
+            let (min_y, max_y) = if from.y < to.y {
+                (from.y, to.y)
+            } else {
+                (to.y, from.y)
+            };
+            // Binary search for first piece with y > min_y
+            let start = col.partition_point(|(y, _)| *y <= min_y);
+            // Check if any piece exists before max_y
+            if start < col.len() && col[start].0 < max_y {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Diagonal (x - y constant) - for dx.signum() == dy.signum()
+    if dx.signum() == dy.signum() {
+        let diag_key = from.x - from.y;
+        if let Some(diag) = indices.diag1.get(&diag_key) {
+            let (min_x, max_x) = if from.x < to.x {
+                (from.x, to.x)
+            } else {
+                (to.x, from.x)
+            };
+            let start = diag.partition_point(|(x, _)| *x <= min_x);
+            if start < diag.len() && diag[start].0 < max_x {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Anti-diagonal (x + y constant) - for dx.signum() != dy.signum()
+    let diag_key = from.x + from.y;
+    if let Some(diag) = indices.diag2.get(&diag_key) {
+        let (min_x, max_x) = if from.x < to.x {
+            (from.x, to.x)
+        } else {
+            (to.x, from.x)
+        };
+        let start = diag.partition_point(|(x, _)| *x <= min_x);
+        if start < diag.len() && diag[start].0 < max_x {
+            return false;
         }
     }
 

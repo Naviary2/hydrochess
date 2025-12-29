@@ -12,7 +12,7 @@ use crate::game::GameState;
 // ==================== Constants ====================
 
 // Piece Values
-const PAWN_VALUE: i32 = 90; // Higher base value for horde pawns
+const PAWN_VALUE: i32 = 90;
 
 // White (Horde) Bonuses
 const PHALANX_BONUS: i32 = 12; // Side-by-side pawns
@@ -41,12 +41,12 @@ pub fn evaluate(game: &GameState) -> i32 {
     let mut score = 0;
 
     // 1. Gather Piece Lists
-    let mut white_pawns: Vec<Coordinate> = Vec::with_capacity(36);
+    let mut white_pawns: Vec<Coordinate> = Vec::with_capacity(56);
     let mut black_pieces: Vec<(Coordinate, PieceType)> = Vec::with_capacity(16);
     let mut black_king_pos = Coordinate::new(5, 8); // Default fallback
 
     // Map for quick lookup of pawn locations
-    // Using a simple vector check is fast enough for ~36 items
+    // Using a simple vector check is fast enough for 56 items
 
     for ((x, y), piece) in game.board.iter() {
         let coord = Coordinate::new(*x, *y);
@@ -69,16 +69,6 @@ pub fn evaluate(game: &GameState) -> i32 {
             }
             _ => {}
         }
-    }
-
-    // Win conditions: No pawns = Black wins
-    if white_pawns.is_empty() && game.white_piece_count == 0 {
-        // Check piece count too in case of promotions
-        return if game.turn == PlayerColor::Black {
-            30000
-        } else {
-            -30000
-        };
     }
 
     // 2. White Logic (Horde)
