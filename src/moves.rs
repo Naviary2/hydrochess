@@ -2085,8 +2085,9 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
     let piece_type = ctx.piece_type;
     let enemy_wiggle = ctx.enemy_wiggle;
     let friend_wiggle = ctx.friend_wiggle;
-    // Filter by piece type attack capabilities
-    let checks_ortho = matches!(
+
+    // Check OUR piece's attack capabilities
+    let our_attacks_ortho = matches!(
         piece_type,
         PieceType::Queen
             | PieceType::RoyalQueen
@@ -2094,7 +2095,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
             | PieceType::Chancellor
             | PieceType::Amazon
     );
-    let checks_diag = matches!(
+    let our_attacks_diag = matches!(
         piece_type,
         PieceType::Queen
             | PieceType::RoyalQueen
@@ -2103,7 +2104,8 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
             | PieceType::Amazon
     );
 
-    if !checks_ortho && !checks_diag {
+    // If our piece can't attack in any direction, no cross-ray targets
+    if !our_attacks_ortho && !our_attacks_diag {
         return;
     }
 
@@ -2112,10 +2114,10 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
     let ray_sum = dir_x + dir_y;
 
     // Early termination: stop after finding enough targets to avoid excessive computation
-    const MAX_CROSS_RAY_TARGETS: usize = 12;
+    const MAX_CROSS_RAY_TARGETS: usize = 16;
 
     // Distance limit for friendly piece cross-ray contributions (rarely useful beyond this)
-    const FRIENDLY_CROSS_RAY_LIMIT: i64 = 15;
+    const FRIENDLY_CROSS_RAY_LIMIT: i64 = 20;
 
     // Iterate all pieces on the board once
     for (px, py, p) in board.tiles.iter_all_pieces() {
@@ -2125,8 +2127,6 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
         }
 
         // Skip only the piece at our exact position (can't target ourselves)
-        // Note: we process both enemy and friendly pieces - enemy pieces can be attacked,
-        // and friendly pieces contribute to the reachable area via wiggle room extension
         if px == from.x && py == from.y {
             continue;
         }
@@ -2148,9 +2148,10 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
             friend_wiggle
         };
 
-        // 1. Orthogonal Cross-Rays (Vertical/Horizontal)
-        if checks_ortho {
-            // Vertical cross: S.x = px
+        // 1. Orthogonal Cross-Rays (if OUR piece can attack orthogonally)
+        // From an intersection point on our ray, can we attack this piece orthogonally?
+        if our_attacks_ortho {
+            // Vertical cross: S.x = px (piece is on same column as intersection)
             if dir_x != 0 {
                 let num = px - from.x;
                 if num.signum() == dir_x.signum() && num % dir_x == 0 {
@@ -2207,8 +2208,9 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
             }
         }
 
-        // 2. Diagonal Cross-Rays
-        if checks_diag {
+        // 2. Diagonal Cross-Rays (if OUR piece can attack diagonally)
+        // From an intersection point on our ray, can we attack this piece diagonally?
+        if our_attacks_diag {
             // Diag1: S.x - S.y = px - py
             if ray_diff != 0 {
                 let num = (px - py) - (from.x - from.y);
