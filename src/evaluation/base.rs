@@ -168,6 +168,10 @@ const DOUBLED_PAWN_PENALTY: i32 = 8;
 const BISHOP_PAIR_BONUS: i32 = 60;
 const QUEEN_IDEAL_LINE_DIST: i32 = 4;
 
+// ==================== NEW: Piece Cloud Physics Constants ====================
+const SLIDER_ALIGNMENT_RADIUS: i64 = 4; // Sliders are "aligned" if within 4 squares of a major axis from the center
+const SLIDER_ALIGNMENT_PENALTY: i32 = 1; // 1cp penalty per excess square of misalignment
+
 // ==================== Fairy Piece Evaluation ====================
 
 // Leaper positioning (tropism to kings and piece cloud)
@@ -217,30 +221,48 @@ const UNDEVELOPED_MINORS_THRESHOLD: i32 = 2;
 const DEVELOPMENT_PHASE_ATTACK_SCALE: i32 = 50;
 const DEVELOPED_PHASE_ATTACK_SCALE: i32 = 100;
 
-/// Compute the centroid of all non-obstacle, non-void pieces on the board.
-/// Used for piece cloud calculations. (Made public for variant modules.)
+/// Compute the centroid of pieces on the board, prioritizing the "Nucleus".
+/// The Nucleus consists of non-sliding pieces (Pawns, Kings, Leapers), which
+/// define the center of the battle. Sliders are only used as a fallback if no
+/// nucleus pieces exist.
 pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
-    let mut sum_x: i64 = 0;
-    let mut sum_y: i64 = 0;
-    let mut count: i64 = 0;
+    let mut nucleus_sum_x: i64 = 0;
+    let mut nucleus_sum_y: i64 = 0;
+    let mut nucleus_count: i64 = 0;
+    let mut slider_sum_x: i64 = 0;
+    let mut slider_sum_y: i64 = 0;
+    let mut slider_count: i64 = 0;
 
     // BITBOARD: O(1) per tile summation using bitwise helpers
     for (cx, cy, tile) in board.tiles.iter() {
-        let bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
-        if bits == 0 {
-            continue;
-        }
+        let slider_mask = tile.occ_ortho_sliders | tile.occ_diag_sliders;
+        // Nucleus = All pieces (including pawns) MINUS sliders and voids.
+        let nucleus_mask = (tile.occ_all & !tile.occ_void) & !slider_mask;
 
-        let n = bits.count_ones() as i64;
-        sum_x += n * cx * 8 + tile.sum_lx(bits) as i64;
-        sum_y += n * cy * 8 + tile.sum_ly(bits) as i64;
-        count += n;
+        if nucleus_mask != 0 {
+            let n = nucleus_mask.count_ones() as i64;
+            nucleus_sum_x += n * cx * 8 + tile.sum_lx(nucleus_mask) as i64;
+            nucleus_sum_y += n * cy * 8 + tile.sum_ly(nucleus_mask) as i64;
+            nucleus_count += n;
+        }
+        if slider_mask != 0 {
+            let n = slider_mask.count_ones() as i64;
+            slider_sum_x += n * cx * 8 + tile.sum_lx(slider_mask) as i64;
+            slider_sum_y += n * cy * 8 + tile.sum_ly(slider_mask) as i64;
+            slider_count += n;
+        }
     }
 
-    if count > 0 {
+    if nucleus_count > 0 {
         Some(Coordinate {
-            x: sum_x / count,
-            y: sum_y / count,
+            x: nucleus_sum_x / nucleus_count,
+            y: nucleus_sum_y / nucleus_count,
+        })
+    } else if slider_count > 0 {
+        // Fallback for slider-only endgames (e.g., R vs R)
+        Some(Coordinate {
+            x: slider_sum_x / slider_count,
+            y: slider_sum_y / slider_count,
         })
     } else {
         None
@@ -429,9 +451,12 @@ pub fn evaluate_pieces(
     let mut black_bishops = 0;
     let mut white_bishop_colors: (bool, bool) = (false, false);
     let mut black_bishop_colors: (bool, bool) = (false, false);
-    let mut cloud_sum_x: i64 = 0;
-    let mut cloud_sum_y: i64 = 0;
-    let mut cloud_count: i64 = 0;
+    let mut nucleus_sum_x: i64 = 0;
+    let mut nucleus_sum_y: i64 = 0;
+    let mut nucleus_count: i64 = 0;
+    let mut slider_sum_x: i64 = 0;
+    let mut slider_sum_y: i64 = 0;
+    let mut slider_count: i64 = 0;
 
     for (cx, cy, tile) in game.board.tiles.iter() {
         // SIMD: Fast skip empty tiles using parallel zero check
@@ -439,12 +464,20 @@ pub fn evaluate_pieces(
             continue;
         }
 
-        let cloud_bits = tile.occ_all & !tile.occ_void & !tile.occ_pawns;
-        if cloud_bits != 0 {
-            let n = cloud_bits.count_ones() as i64;
-            cloud_sum_x += n * cx * 8 + tile.sum_lx(cloud_bits) as i64;
-            cloud_sum_y += n * cy * 8 + tile.sum_ly(cloud_bits) as i64;
-            cloud_count += n;
+        let slider_mask = tile.occ_ortho_sliders | tile.occ_diag_sliders;
+        let nucleus_mask = (tile.occ_all & !tile.occ_void) & !slider_mask;
+
+        if nucleus_mask != 0 {
+            let n = nucleus_mask.count_ones() as i64;
+            nucleus_sum_x += n * cx * 8 + tile.sum_lx(nucleus_mask) as i64;
+            nucleus_sum_y += n * cy * 8 + tile.sum_ly(nucleus_mask) as i64;
+            nucleus_count += n;
+        }
+        if slider_mask != 0 {
+            let n = slider_mask.count_ones() as i64;
+            slider_sum_x += n * cx * 8 + tile.sum_lx(slider_mask) as i64;
+            slider_sum_y += n * cy * 8 + tile.sum_ly(slider_mask) as i64;
+            slider_count += n;
         }
 
         // SIMD: Compute both color minor masks simultaneously
@@ -495,10 +528,15 @@ pub fn evaluate_pieces(
         }
     }
 
-    let cloud_center = if cloud_count > 0 {
+    let cloud_center = if nucleus_count > 0 {
         Some(Coordinate {
-            x: cloud_sum_x / cloud_count,
-            y: cloud_sum_y / cloud_count,
+            x: nucleus_sum_x / nucleus_count,
+            y: nucleus_sum_y / nucleus_count,
+        })
+    } else if slider_count > 0 {
+        Some(Coordinate {
+            x: slider_sum_x / slider_count,
+            y: slider_sum_y / slider_count,
         })
     } else {
         None
@@ -659,17 +697,42 @@ pub fn evaluate_pieces(
                 _ => 0,
             };
 
+            // Apply positional penalty based on piece type: gravity for nucleus, alignment for sliders.
             if let Some(center) = &cloud_center {
-                let cheb = (x - center.x).abs().max((y - center.y).abs());
-                if piece.piece_type() != PieceType::Pawn
-                    && !piece.piece_type().is_royal()
-                    && cheb > PIECE_CLOUD_CHEB_RADIUS
-                {
-                    let piece_val = get_piece_value(piece.piece_type());
-                    let value_factor = (piece_val / 100).max(1);
-                    let excess =
-                        (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
-                    piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
+                let p_type = piece.piece_type();
+                use crate::attacks::{is_diag_slider, is_ortho_slider, is_slider};
+
+                if is_slider(p_type) {
+                    // SLIDER ALIGNMENT: Penalize sliders for being far from the battle axes.
+                    let can_ortho = is_ortho_slider(p_type);
+                    let can_diag = is_diag_slider(p_type);
+
+                    let mut misalignment: i64 = i64::MAX;
+
+                    if can_ortho {
+                        let ortho_dist = (x - center.x).abs().min((y - center.y).abs());
+                        misalignment = misalignment.min(ortho_dist);
+                    }
+                    if can_diag {
+                        let diag_dist = ((x - y) - (center.x - center.y)).abs()
+                            .min(((x + y) - (center.x + center.y)).abs());
+                        misalignment = misalignment.min(diag_dist);
+                    }
+                    
+                    if misalignment > SLIDER_ALIGNMENT_RADIUS {
+                        let excess = (misalignment - SLIDER_ALIGNMENT_RADIUS) as i32;
+                        piece_score -= excess * SLIDER_ALIGNMENT_PENALTY;
+                    }
+
+                } else if p_type != PieceType::Pawn && !p_type.is_royal() {
+                    // NUCLEUS GRAVITY: Penalize leapers/kings for being too far from the centroid.
+                    let cheb = (x - center.x).abs().max((y - center.y).abs());
+                    if cheb > PIECE_CLOUD_CHEB_RADIUS {
+                        let piece_val = get_piece_value(p_type);
+                        let value_factor = (piece_val / 100).max(1);
+                        let excess = (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
+                        piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
+                    }
                 }
             }
 
