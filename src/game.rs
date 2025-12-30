@@ -1588,6 +1588,37 @@ impl GameState {
             }
 
             // ==========================================
+            // DIRECT SLIDER CAPTURE OF CHECKER
+            // O(1) checks for infinite-range slider captures - no move gen needed
+            // ==========================================
+            if can_ortho {
+                // Check if checker is on same row or column
+                if from.x == checker_sq.x && from.y != checker_sq.y {
+                    // Same column - vertical capture
+                    if s.is_path_clear_for_rook(&from, &checker_sq) {
+                        out.push(Move::new(from, checker_sq, *piece));
+                    }
+                } else if from.y == checker_sq.y && from.x != checker_sq.x {
+                    // Same row - horizontal capture
+                    if s.is_path_clear_for_rook(&from, &checker_sq) {
+                        out.push(Move::new(from, checker_sq, *piece));
+                    }
+                }
+            }
+
+            if can_diag {
+                // Check if checker is on same diagonal
+                let dx = checker_sq.x - from.x;
+                let dy = checker_sq.y - from.y;
+                if dx != 0 && dx.abs() == dy.abs() {
+                    // On a diagonal
+                    if s.is_path_clear_for_bishop(&from, &checker_sq) {
+                        out.push(Move::new(from, checker_sq, *piece));
+                    }
+                }
+            }
+
+            // ==========================================
             // CAPTURE & BLOCKING DETECTION (for remaining pieces)
             // Uses pseudo-legal move generation for captures
             // ==========================================
