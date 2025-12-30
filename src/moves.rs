@@ -1,6 +1,6 @@
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
 use crate::game::{EnPassantState, GameRules};
-use crate::utils::is_prime_i64;
+use crate::utils::{PRIMES_UNDER_128, is_prime_fast};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
@@ -1119,7 +1119,7 @@ pub fn is_square_attacked(
                     if abs_dist > HUYGEN_ATTACK_LIMIT {
                         continue;
                     }
-                    if abs_dist > 0 && is_prime_i64(abs_dist) {
+                    if abs_dist > 0 && is_prime_fast(abs_dist) {
                         // This is a piece at a prime distance in this direction
                         // Check if it's closer than the current closest
                         if closest_prime_piece.is_none()
@@ -2756,6 +2756,13 @@ fn find_blocker_via_indices(
     (i64::MAX, false)
 }
 
+/// OPTIMIZED Huygens move generation using precomputed primes and spatial indices.
+///
+/// Key optimizations:
+/// 1. Uses PRIMES_UNDER_128 array for direct iteration instead of primality testing
+/// 2. O(log n) binary search in spatial indices for blocker detection
+/// 3. When no blocker, only generates moves to "interesting" squares aligned with cross-ray pieces
+/// 4. is_prime_fast() for O(1) primality checks instead of O(√n)
 fn generate_huygen_moves(
     board: &Board,
     from: &Coordinate,
@@ -2764,186 +2771,176 @@ fn generate_huygen_moves(
     fallback: bool,
 ) -> MoveList {
     let mut moves = MoveList::new();
-    let directions = [(1, 0), (0, 1)];
-    const FALLBACK_LIMIT: i64 = 10;
 
-    for (dx_raw, dy_raw) in directions {
-        for sign in [1, -1] {
-            let dir_x = dx_raw * sign;
-            let dir_y = dy_raw * sign;
+    // Four orthogonal directions: right, left, up, down
+    const ORTHO_DIRECTIONS: [(i64, i64); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
-            let mut closest_prime_dist: Option<i64> = None;
-            let mut closest_piece_color: Option<PlayerColor> = None;
+    // Limit for moves when no blocker is found (use cross-ray logic beyond this)
+    const OPEN_RAY_LIMIT: i64 = 50;
 
-            let mut found_via_indices = false;
+    for &(dir_x, dir_y) in &ORTHO_DIRECTIONS {
+        // Find the closest blocker at a prime distance in this direction
+        let (blocker_dist, blocker_color) =
+            find_huygen_blocker(board, from, dir_x, dir_y, indices, piece.color(), fallback);
 
-            // Fallback mode: scan step-by-step but still respect prime distance requirement.
-            if fallback {
-                const PRIMES: [i64; 4] = [2, 3, 5, 7];
-
-                for &target_dist in &PRIMES {
-                    if target_dist > FALLBACK_LIMIT {
-                        break;
-                    }
-
-                    let tx = from.x + dir_x * target_dist;
-                    let ty = from.y + dir_y * target_dist;
-
-                    // Check if path is clear up to target_dist - 1
-                    let mut path_blocked = false;
-                    for step in 1..target_dist {
-                        let sx = from.x + dir_x * step;
-                        let sy = from.y + dir_y * step;
-                        if board.get_piece(sx, sy).is_some() {
-                            path_blocked = true;
-                            break;
-                        }
-                    }
-
-                    if path_blocked {
-                        break; // Can't reach any further primes in this direction
-                    }
-
-                    // Check target square
-                    if let Some(target) = board.get_piece(tx, ty) {
-                        // Void blocks like friendly
-                        if target.piece_type() == PieceType::Void {
-                            break;
-                        }
-                        // Obstacles are neutral but capturable - check is_uncapturable()
-                        let is_enemy = target.color() != piece.color()
-                            && !target.piece_type().is_uncapturable();
-                        if is_enemy {
-                            moves.push(Move::new(*from, Coordinate::new(tx, ty), *piece));
-                        }
-                        break; // blocked at this prime, can't go further
-                    } else {
-                        // Empty square at prime distance - valid move
-                        moves.push(Move::new(*from, Coordinate::new(tx, ty), *piece));
-                    }
+        if blocker_dist < i64::MAX {
+            // CASE 1: Blocker found at prime distance
+            // Generate all prime-distance moves up to (and including if capturable) the blocker
+            for &prime_dist in &PRIMES_UNDER_128 {
+                if prime_dist > blocker_dist {
+                    break;
                 }
-                continue;
-            }
 
-            let line_vec = if dx_raw == 0 {
-                indices.cols.get(&from.x)
-            } else {
-                indices.rows.get(&from.y)
-            };
-            if let Some(vec) = line_vec {
-                let val = if dx_raw == 0 { from.y } else { from.x };
-                // Binary search by coordinate only
-                if let Ok(idx) = vec.binary_search_by_key(&val, |(c, _)| *c) {
-                    let step_dir = if dx_raw == 0 { dir_y } else { dir_x };
-                    if step_dir > 0 {
-                        for (next_coord, packed) in vec.iter().skip(idx + 1) {
-                            let dist = next_coord - val;
-                            if is_prime_i64(dist) {
-                                closest_prime_dist = Some(dist);
-                                let p = Piece::from_packed(*packed);
-                                // Treat Void as friendly for capture purposes
-                                closest_piece_color = Some(if p.piece_type() == PieceType::Void {
-                                    piece.color()
-                                } else {
-                                    p.color()
-                                });
-                                break;
-                            }
-                        }
-                    } else {
-                        for (prev_coord, packed) in vec.iter().take(idx).rev() {
-                            let dist = val - prev_coord;
-                            if is_prime_i64(dist) {
-                                closest_prime_dist = Some(dist);
-                                let p = Piece::from_packed(*packed);
-                                // Treat Void as friendly for capture purposes
-                                closest_piece_color = Some(if p.piece_type() == PieceType::Void {
-                                    piece.color()
-                                } else {
-                                    p.color()
-                                });
-                                break;
-                            }
-                        }
-                    }
-                    found_via_indices = true;
-                }
-            }
+                let to_x = from.x + dir_x * prime_dist;
+                let to_y = from.y + dir_y * prime_dist;
 
-            if !found_via_indices {
-                for ((px, py), target_piece) in board.iter() {
-                    let dx = px - from.x;
-                    let dy = py - from.y;
-                    let k = if dir_x != 0 {
-                        (dx % dir_x == 0 && dy == 0).then_some(dx / dir_x)
-                    } else {
-                        (dy % dir_y == 0 && dx == 0).then_some(dy / dir_y)
-                    };
-
-                    if let Some(dist) = k.filter(|&d| {
-                        d > 0 && is_prime_i64(d) && closest_prime_dist.is_none_or(|cur_d| d < cur_d)
-                    }) {
-                        closest_prime_dist = Some(dist);
-                        // Treat Void as friendly for capture purposes
-                        closest_piece_color =
-                            Some(if target_piece.piece_type() == PieceType::Void {
-                                piece.color()
-                            } else {
-                                target_piece.color()
-                            });
-                    }
-                }
-            }
-
-            let limit = closest_prime_dist.unwrap_or(100);
-
-            if closest_prime_dist.is_some() {
-                // Original behavior: generate all prime-distance squares up to
-                // the blocking piece at `limit`.
-                for s in 2..=limit {
-                    if is_prime_i64(s) {
-                        let to_x = from.x + (dir_x * s);
-                        let to_y = from.y + (dir_y * s);
-
-                        if s == limit {
-                            if closest_piece_color != Some(piece.color()) {
-                                moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
-                            }
-                        } else {
+                if prime_dist == blocker_dist {
+                    // At blocker - can only move here if enemy (capture)
+                    if let Some(color) = blocker_color {
+                        if color != piece.color() {
                             moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
                         }
                     }
+                } else {
+                    // Before blocker - empty square, valid move
+                    moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
                 }
-            } else {
-                // No blocking piece at any prime distance along this ray.
-                // Instead of generating all prime squares up to 50, only keep
-                // those whose destination is aligned with *some* piece on the
-                // orthogonal axis (file for horizontal moves, rank for
-                // vertical moves).
-                let scan_limit = 50i64;
+            }
+        } else {
+            // CASE 2: No blocker found at any prime distance
+            // Only generate moves to "interesting" squares that are aligned with pieces on cross-rays
+            // This prevents move explosion on infinite boards
+            for &prime_dist in &PRIMES_UNDER_128 {
+                if prime_dist > OPEN_RAY_LIMIT {
+                    break;
+                }
 
-                for s in 2..=scan_limit {
-                    if !is_prime_i64(s) {
-                        continue;
-                    }
+                let to_x = from.x + dir_x * prime_dist;
+                let to_y = from.y + dir_y * prime_dist;
 
-                    let to_x = from.x + (dir_x * s);
-                    let to_y = from.y + (dir_y * s);
+                // Check if this destination is "interesting" - aligned with some piece on cross-ray
+                let aligned = if dir_x != 0 {
+                    // Moving horizontally - check if to_x column has any pieces
+                    indices.cols.get(&to_x).is_some_and(|v| !v.is_empty())
+                } else {
+                    // Moving vertically - check if to_y row has any pieces
+                    indices.rows.get(&to_y).is_some_and(|v| !v.is_empty())
+                };
 
-                    let aligned = if dir_x != 0 {
-                        indices.cols.get(&to_x).is_some_and(|v| !v.is_empty())
-                    } else {
-                        indices.rows.get(&to_y).is_some_and(|v| !v.is_empty())
-                    };
-
-                    if aligned {
-                        moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
-                    }
+                if aligned {
+                    moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
                 }
             }
         }
     }
+
     moves
+}
+
+/// Find the closest blocker at a prime distance for Huygens using spatial indices.
+/// Returns (distance_to_blocker, blocker_color). If no blocker, returns (i64::MAX, None).
+#[inline]
+fn find_huygen_blocker(
+    board: &Board,
+    from: &Coordinate,
+    dir_x: i64,
+    dir_y: i64,
+    indices: &SpatialIndices,
+    our_color: PlayerColor,
+    fallback: bool,
+) -> (i64, Option<PlayerColor>) {
+    // Get the appropriate spatial index line (row or column)
+    let is_horizontal = dir_x != 0;
+    let line_vec = if is_horizontal {
+        indices.rows.get(&from.y)
+    } else {
+        indices.cols.get(&from.x)
+    };
+
+    let our_coord = if is_horizontal { from.x } else { from.y };
+
+    if let Some(vec) = line_vec {
+        // Binary search for our position in the sorted list
+        match vec.binary_search_by_key(&our_coord, |(c, _)| *c) {
+            Ok(idx) => {
+                // Found our position, iterate in the direction to find first blocker at prime distance
+                if (is_horizontal && dir_x > 0) || (!is_horizontal && dir_y > 0) {
+                    // Positive direction: iterate forward from idx+1
+                    for (coord, packed) in vec.iter().skip(idx + 1) {
+                        let dist = coord - our_coord;
+                        // O(1) prime check
+                        if is_prime_fast(dist) {
+                            let p = Piece::from_packed(*packed);
+                            // Void blocks like friendly
+                            let effective_color = if p.piece_type() == PieceType::Void {
+                                our_color
+                            } else {
+                                p.color()
+                            };
+                            return (dist, Some(effective_color));
+                        }
+                    }
+                } else {
+                    // Negative direction: iterate backward from idx-1
+                    for (coord, packed) in vec.iter().take(idx).rev() {
+                        let dist = our_coord - coord;
+                        // O(1) prime check
+                        if is_prime_fast(dist) {
+                            let p = Piece::from_packed(*packed);
+                            let effective_color = if p.piece_type() == PieceType::Void {
+                                our_color
+                            } else {
+                                p.color()
+                            };
+                            return (dist, Some(effective_color));
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Piece not in index (shouldn't happen), use fallback
+            }
+        }
+    }
+
+    // Fallback: quick O(n) scan if spatial indices fail (rare case)
+    if fallback {
+        let mut closest = i64::MAX;
+        let mut closest_color = None;
+
+        for ((px, py), target_piece) in board.iter() {
+            let dx = px - from.x;
+            let dy = py - from.y;
+
+            // Check if on the ray
+            let dist = if is_horizontal {
+                if dy == 0 && dx.signum() == dir_x {
+                    dx.abs()
+                } else {
+                    continue;
+                }
+            } else if dx == 0 && dy.signum() == dir_y {
+                dy.abs()
+            } else {
+                continue;
+            };
+
+            if dist > 0 && is_prime_fast(dist) && dist < closest {
+                closest = dist;
+                closest_color = Some(if target_piece.piece_type() == PieceType::Void {
+                    our_color
+                } else {
+                    target_piece.color()
+                });
+            }
+        }
+
+        if closest < i64::MAX {
+            return (closest, closest_color);
+        }
+    }
+
+    (i64::MAX, None)
 }
 
 fn generate_rose_moves(board: &Board, from: &Coordinate, piece: &Piece) -> MoveList {
