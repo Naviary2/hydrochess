@@ -940,4 +940,9 @@ impl Engine {
 
         serde_wasm_bindgen::to_value(&legal_moves).unwrap_or(JsValue::NULL)
     }
+
+    /// Returns true if the current side to move is in check.
+    pub fn is_in_check(&self) -> bool {
+        self.game.is_in_check()
+    }
 }

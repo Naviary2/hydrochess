@@ -363,6 +363,8 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
             termination = `Win by capturing all White pieces in ${displayVariantName}`;
         } else if (endReason === 'checkmate') {
             termination = 'Checkmate';
+        } else if (endReason === 'stalemate') {
+            termination = 'Draw by stalemate';
         } else if (endReason === 'threefold') {
             termination = 'Draw by threefold repetition';
         } else if (endReason === 'fifty_move') {

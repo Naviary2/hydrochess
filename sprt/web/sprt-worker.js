@@ -520,7 +520,7 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
 
                 let hasLegalMoves = false;
                 try {
-                    const checker = new EngineClass(gameInput);
+                    const checker = new EngineNew(gameInput);
                     if (typeof checker.get_legal_moves_js === 'function') {
                         const legal = checker.get_legal_moves_js();
                         if (Array.isArray(legal) && legal.length > 0) {
@@ -537,14 +537,13 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                 let reason = null;
 
                 if (!hasLegalMoves) {
-                    // True terminal: no legal moves for sideToMove. From SPRT's
-                    // perspective this is a loss for that side (checkmate or
-                    // stalemate-as-loss), with one special-case variant below.
-                    reason = 'checkmate';
+                    // True terminal: no legal moves for sideToMove.
+                    const checker = new EngineNew(gameInput);
+                    const inCheck = typeof checker.is_in_check === 'function' && checker.is_in_check();
+                    checker.free();
 
                     // Special handling for Pawn_Horde: Black also wins by
-                    // eliminating all White pieces (the pawn horde). If that
-                    // condition holds, record a distinct reason.
+                    // eliminating all White pieces (the pawn horde).
                     if (variantName === 'Pawn_Horde') {
                         const whitePieces = position.board.pieces.filter((p) =>
                             p.player === 'w' && p.piece_type !== 'x' && p.piece_type !== 'v'
@@ -552,6 +551,19 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                         if (whitePieces.length === 0) {
                             winningColor = 'b';
                             reason = 'horde_elimination';
+                        }
+                    }
+
+                    if (!reason) {
+                        if (inCheck) {
+                            reason = 'checkmate';
+                        } else {
+                            reason = 'stalemate';
+                            for (const s of texelSamples) {
+                                s.result_token = '1/2-1/2';
+                            }
+                            moveLines.push('# No move returned; treated as stalemate for ' + (sideToMove === 'w' ? 'White' : 'Black') + '.');
+                            return { result: 'draw', log: moveLines.join('\n'), reason, samples: texelSamples };
                         }
                     }
                 } else {
