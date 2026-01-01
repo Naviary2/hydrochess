@@ -1078,13 +1078,13 @@ pub fn is_square_attacked(
     }
 
     // Huygen check (prime distances) - O(1) early exit if no Huygens exist
-    // CRITICAL: is_prime_i64 is O(sqrt(n)) - skip huge distances to avoid 31M+ iterations
+    // CRITICAL: Blocking is from the HUYGENS's perspective, not the target's!
     // A Huygens at prime distance D attacks the target ONLY if there is no other piece
-    // at any prime distance closer than D (blocking pieces at prime squares block the attack).
+    // at any prime distance from the HUYGENS that is closer than D (between Huygens and target).
     if indices.has_huygen[attacker_idx] {
         const HUYGEN_ATTACK_LIMIT: i64 = 100; // Huygen pieces realistically attack within this range
 
-        // Check each orthogonal direction separately (positive and negative)
+        // Check each orthogonal direction from the target to find Huygens
         for &(dx, dy) in &ORTHO_DIRS {
             let line_vec = if dx == 0 {
                 indices.cols.get(&target.x)
@@ -1092,48 +1092,78 @@ pub fn is_square_attacked(
                 indices.rows.get(&target.y)
             };
             if let Some(vec) = line_vec {
-                // Find the CLOSEST piece at a prime distance in this direction
-                let mut closest_prime_piece: Option<(i64, Piece)> = None;
-
+                // First pass: find any Huygens of attacker color in this direction
                 for &(coord, packed) in vec {
-                    let dist = if dx == 0 {
+                    let piece = Piece::from_packed(packed);
+                    if piece.piece_type() != PieceType::Huygen || piece.color() != attacker_color {
+                        continue;
+                    }
+
+                    // Calculate distance from target to this Huygens
+                    let dist_to_target = if dx == 0 {
                         coord - target.y
                     } else {
                         coord - target.x
                     };
 
-                    // Filter by direction: only consider pieces in the direction we're checking
-                    // For direction (dx, dy), we want dist to have the same sign as dx (if horizontal) or dy (if vertical)
+                    // Check direction: the Huygens must be in the direction we're checking
                     let in_right_direction = if dx == 0 {
-                        (dy > 0 && dist > 0) || (dy < 0 && dist < 0)
+                        (dy > 0 && dist_to_target > 0) || (dy < 0 && dist_to_target < 0)
                     } else {
-                        (dx > 0 && dist > 0) || (dx < 0 && dist < 0)
+                        (dx > 0 && dist_to_target > 0) || (dx < 0 && dist_to_target < 0)
                     };
 
                     if !in_right_direction {
                         continue;
                     }
 
-                    let abs_dist = dist.abs();
-                    // Skip huge distances - is_prime_i64 is O(sqrt(n))!
-                    if abs_dist > HUYGEN_ATTACK_LIMIT {
+                    let abs_dist_to_target = dist_to_target.abs();
+                    if abs_dist_to_target > HUYGEN_ATTACK_LIMIT {
                         continue;
                     }
-                    if abs_dist > 0 && is_prime_fast(abs_dist) {
-                        // This is a piece at a prime distance in this direction
-                        // Check if it's closer than the current closest
-                        if closest_prime_piece.is_none()
-                            || abs_dist < closest_prime_piece.unwrap().0
-                        {
-                            closest_prime_piece = Some((abs_dist, Piece::from_packed(packed)));
+
+                    // Target must be at a prime distance from the Huygens
+                    if !is_prime_fast(abs_dist_to_target) {
+                        continue;
+                    }
+
+                    // Now check if any piece blocks at a CLOSER prime distance FROM THE HUYGENS
+                    // The Huygens is at `coord`, target is at distance `abs_dist_to_target`
+                    // We need to check all primes < abs_dist_to_target for blocking pieces
+                    let huygen_coord = coord;
+                    let mut blocked = false;
+
+                    // Check all pieces in the line between Huygens and target
+                    for &(other_coord, _other_packed) in vec {
+                        // Calculate distance from HUYGENS to this piece
+                        let dist_from_huygen = other_coord - huygen_coord;
+
+                        // Piece must be between Huygens and target (in the direction toward target, closer distance)
+                        // dist_to_target = huygen_coord - target_coord:
+                        //   - If dist_to_target > 0: Huygens is at HIGHER coord than target, so blockers are TOWARD target (negative dist_from_huygen)
+                        //   - If dist_to_target < 0: Huygens is at LOWER coord than target, so blockers are TOWARD target (positive dist_from_huygen)
+                        let toward_target = if dist_to_target > 0 {
+                            // Huygens at higher coord, target at lower coord -> blockers have negative dist (toward target)
+                            dist_from_huygen < 0 && dist_from_huygen.abs() < abs_dist_to_target
+                        } else {
+                            // Huygens at lower coord, target at higher coord -> blockers have positive dist (toward target)
+                            dist_from_huygen > 0 && dist_from_huygen < abs_dist_to_target
+                        };
+
+                        if !toward_target {
+                            continue;
+                        }
+
+                        let abs_dist_from_huygen = dist_from_huygen.abs();
+                        // If this piece is at a prime distance from the Huygens, it blocks!
+                        if is_prime_fast(abs_dist_from_huygen) {
+                            blocked = true;
+                            break;
                         }
                     }
-                }
 
-                // If the closest prime-distance piece is a Huygens of the attacker color, it attacks
-                if let Some((_, piece)) = closest_prime_piece {
-                    if piece.color() == attacker_color && piece.piece_type() == PieceType::Huygen {
-                        return true;
+                    if !blocked {
+                        return true; // Huygens attacks the target!
                     }
                 }
             }

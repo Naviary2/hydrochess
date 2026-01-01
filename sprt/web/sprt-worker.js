@@ -236,22 +236,23 @@ function applyMove(position, move) {
     const dy = toYi - fromYi;
 
     if (isKing && dy === 0 && Math.abs(dx) > 1) {
-        const rookDir = dx > 0 ? 1 : -1;
-        let rookXi = toXi + rookDir; // search beyond king's destination
-        // We stop if we run into any non-rook piece or wander too far.
-        while (Math.abs(rookXi - toXi) <= 16) {
-            const rookXStr = String(rookXi);
-            const pieceAt = pieces.find(p => p.x === rookXStr && p.y === fromY);
+        const castleDir = dx > 0 ? 1 : -1;
+        let partnerXi = toXi + castleDir; // search beyond king's destination
+        // Look for any friendly piece (not just rooks) - engine supports castling with Guards etc.
+        while (Math.abs(partnerXi - toXi) <= 16) {
+            const partnerXStr = String(partnerXi);
+            const pieceAt = pieces.find(p => p.x === partnerXStr && p.y === fromY);
             if (pieceAt) {
-                if (pieceAt.player === movingPiece.player && pieceAt.piece_type === 'r') {
-                    // Move rook to the square the king jumped over
-                    const rookToXi = toXi - rookDir;
-                    pieceAt.x = String(rookToXi);
+                // Accept any friendly piece as the castling partner (rook, guard, etc.)
+                if (pieceAt.player === movingPiece.player) {
+                    // Move the castling partner to the square the king jumped over
+                    const partnerToXi = toXi - castleDir;
+                    pieceAt.x = String(partnerToXi);
                     pieceAt.y = fromY;
                 }
                 break;
             }
-            rookXi += rookDir;
+            partnerXi += castleDir;
         }
     }
 

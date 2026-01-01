@@ -2,6 +2,17 @@ import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
 import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
 import { VARIANTS, getVariantData } from './variants.js';
 
+// Map internal engine piece letters to infinitechess.org ICN codes (lowercase for ICN)
+function engineLetterToICNCode(letter) {
+    const map = {
+        'k': 'k', 'q': 'q', 'r': 'r', 'b': 'b', 'n': 'n', 'p': 'p',
+        'm': 'am', 'c': 'ch', 'a': 'ar', 'h': 'ha', 'g': 'gu',
+        'l': 'ca', 'i': 'gi', 'z': 'ze', 'e': 'ce', 'y': 'rq',
+        'd': 'rc', 's': 'nr', 'u': 'hu', 'o': 'ro', 'x': 'ob', 'v': 'vo'
+    };
+    return map[letter] || letter;
+}
+
 // UI Elements
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
@@ -430,16 +441,23 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
     }).filter(Boolean);
 
     const movesStr = moves.join('|');
-    // Determine promotion ranks for the variant (default to standard 8 for white, 1 for black)
+    // Determine promotion ranks and allowed promotions for the variant
+    // Default to standard 8 for white, 1 for black, with q,r,b,n allowed
     let whiteRank = '8';
     let blackRank = '1';
+    let promotionsAllowed = ['q', 'r', 'b', 'n'];
     let worldBoundsStr = '';
     try {
         const vdata = getVariantData(variantName);
-        if (vdata && vdata.game_rules && vdata.game_rules.promotion_ranks) {
-            const ranks = vdata.game_rules.promotion_ranks;
-            if (ranks.white && ranks.white.length > 0) whiteRank = ranks.white[0];
-            if (ranks.black && ranks.black.length > 0) blackRank = ranks.black[0];
+        if (vdata && vdata.game_rules) {
+            if (vdata.game_rules.promotion_ranks) {
+                const ranks = vdata.game_rules.promotion_ranks;
+                if (ranks.white && ranks.white.length > 0) whiteRank = ranks.white[0];
+                if (ranks.black && ranks.black.length > 0) blackRank = ranks.black[0];
+            }
+            if (vdata.game_rules.promotions_allowed && Array.isArray(vdata.game_rules.promotions_allowed)) {
+                promotionsAllowed = vdata.game_rules.promotions_allowed;
+            }
         }
         // Compute world bounds: if worldBorder is a number, calculate finite bounds
         // Otherwise, use infinite bounds
@@ -476,7 +494,10 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
         // Use infinite bounds on error
         worldBoundsStr = '-999999999999999,1000000000000008,-999999999999999,1000000000000008';
     }
-    const promotionRanksToken = `(${whiteRank}|${blackRank})`;
+    // Build promotion token: (whiteRank;promo1,promo2,...|blackRank;promo1,promo2,...)
+    // Convert engine piece letters to ICN codes (e.g., 'm' -> 'am')
+    const promotionsICN = promotionsAllowed.map(p => engineLetterToICNCode(p)).join(',');
+    const promotionRanksToken = `(${whiteRank};${promotionsICN}|${blackRank};${promotionsICN})`;
     return `${headers} ${nextTurn} ${halfmove}/100 ${fullmove} ${promotionRanksToken} ${worldBoundsStr} ${startPositionStr}${movesStr ? ' ' + movesStr : ''}`;
 }
 
