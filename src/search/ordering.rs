@@ -27,9 +27,12 @@ pub fn score_move(
 
     // Hash move bonus (highest priority)
     if let Some(ttm) = tt_move
-        && m.from == ttm.from && m.to == ttm.to && m.promotion == ttm.promotion {
-            return sort_hash(); // Early return - TT move always first
-        }
+        && m.from == ttm.from
+        && m.to == ttm.to
+        && m.promotion == ttm.promotion
+    {
+        return sort_hash(); // Early return - TT move always first
+    }
 
     // Capture scoring
     if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
@@ -55,13 +58,15 @@ pub fn score_move(
         // Quiet move scoring
 
         // Killer moves
-        if searcher.killers[ply][0].as_ref().is_some_and(|k| {
-            m.from == k.from && m.to == k.to && m.promotion == k.promotion
-        }) {
+        if searcher.killers[ply][0]
+            .as_ref()
+            .is_some_and(|k| m.from == k.from && m.to == k.to && m.promotion == k.promotion)
+        {
             score += sort_killer1();
-        } else if searcher.killers[ply][1].as_ref().is_some_and(|k| {
-            m.from == k.from && m.to == k.to && m.promotion == k.promotion
-        }) {
+        } else if searcher.killers[ply][1]
+            .as_ref()
+            .is_some_and(|k| m.from == k.from && m.to == k.to && m.promotion == k.promotion)
+        {
             score += sort_killer2();
         } else {
             // Countermove check
@@ -92,14 +97,15 @@ pub fn score_move(
 
             for &plies_ago in &[0usize, 1, 2, 3, 5] {
                 if ply > plies_ago
-                    && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1] {
-                        let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
-                        if prev_piece < 16 {
-                            let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
-                            score += searcher.cont_history[prev_piece][prev_to_hash][cur_from_hash]
-                                [cur_to_hash];
-                        }
+                    && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
+                {
+                    let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                    if prev_piece < 16 {
+                        let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
+                        score += searcher.cont_history[prev_piece][prev_to_hash][cur_from_hash]
+                            [cur_to_hash];
                     }
+                }
             }
 
             // Low-ply history bonus (Stockfish technique)

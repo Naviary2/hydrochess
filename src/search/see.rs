@@ -195,11 +195,14 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                     }
                 } else {
                     // Diagonal ray
-                    if odx.abs() == ody.abs() && odx.abs() > 0
-                        && odx.signum() == dx.signum() && ody.signum() == dy.signum()
-                            && odx.abs() < adx {
-                                return false; // Blocker found
-                            }
+                    if odx.abs() == ody.abs()
+                        && odx.abs() > 0
+                        && odx.signum() == dx.signum()
+                        && ody.signum() == dy.signum()
+                        && odx.abs() < adx
+                    {
+                        return false; // Blocker found
+                    }
                 }
             }
             true
@@ -309,11 +312,47 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                 false
             }
 
-            // Huygen: prime-distance orthogonal slider (approximate, ignore blockers)
+            // Huygen: prime-distance orthogonal slider with blocker check
             Huygen => {
                 if (dx == 0 && dy != 0) || (dy == 0 && dx != 0) {
                     let d = if dx == 0 { ady } else { adx };
                     if d > 0 && crate::utils::is_prime_i64(d) {
+                        // Check for blockers at closer prime distances
+                        let dir = if dx == 0 { dy.signum() } else { dx.signum() };
+                        for other in pieces.iter() {
+                            if !other.alive {
+                                continue;
+                            }
+                            // Skip self
+                            if other.x == p.x && other.y == p.y {
+                                continue;
+                            }
+                            // Check if other piece is on the same line
+                            let odx = other.x - p.x;
+                            let ody = other.y - p.y;
+                            let (other_dist, on_line) = if dx == 0 {
+                                // Vertical movement
+                                if odx == 0 && ody.signum() == dir {
+                                    (ody.abs(), true)
+                                } else {
+                                    (0, false)
+                                }
+                            } else {
+                                // Horizontal movement
+                                if ody == 0 && odx.signum() == dir {
+                                    (odx.abs(), true)
+                                } else {
+                                    (0, false)
+                                }
+                            };
+
+                            if on_line && other_dist < d && other_dist > 0 {
+                                // If this blocker is at a prime distance, Huygen is blocked
+                                if crate::utils::is_prime_i64(other_dist) {
+                                    return false;
+                                }
+                            }
+                        }
                         return true;
                     }
                 }

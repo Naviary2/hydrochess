@@ -1,6 +1,6 @@
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
 use crate::game::{EnPassantState, GameRules};
-use crate::utils::{PRIMES_UNDER_128, is_prime_fast};
+use crate::utils::{PRIMES_UNDER_128, is_prime_fast, is_prime_i64};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
@@ -275,7 +275,60 @@ pub fn is_piece_attacking_square(
         _ => {}
     }
 
-    // 3. Fallback for complex fairy pieces (Huygen, Rose, Knightrider, etc.)
+    // 3. Optimized Huygen check (prime-distance orthogonal slider)
+    // Avoids fallback to move generation which has limits
+    if pt == PieceType::Huygen {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+
+        // Must be on same row or column (orthogonal)
+        if dx != 0 && dy != 0 {
+            return false;
+        }
+
+        // Must be different square
+        if dx == 0 && dy == 0 {
+            return false;
+        }
+
+        let dist = dx.abs().max(dy.abs());
+
+        // Must be at prime distance
+        if !is_prime_i64(dist) {
+            return false;
+        }
+
+        // Check for blocker at closer prime distance using spatial indices
+        let is_horizontal = dy == 0;
+        let line_vec = if is_horizontal {
+            indices.rows.get(&from.y)
+        } else {
+            indices.cols.get(&from.x)
+        };
+
+        let our_coord = if is_horizontal { from.x } else { from.y };
+        let target_coord = if is_horizontal { to.x } else { to.y };
+        let sign = (target_coord - our_coord).signum();
+
+        if let Some(vec) = line_vec {
+            // Check all pieces between Huygen and target for blockers at prime distances
+            for &(coord, _packed) in vec {
+                let d = (coord - our_coord) * sign; // Distance in direction of target
+                if d <= 0 || d >= dist {
+                    continue; // Not between Huygen and target
+                }
+
+                // If this piece is at a prime distance from the Huygen, it blocks
+                if is_prime_i64(d) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // 4. Fallback for complex fairy pieces (Rose, Knightrider, etc.)
     let mut moves = MoveList::new();
     let ctx = MoveGenContext {
         special_rights: &FxHashSet::default(),
@@ -1082,8 +1135,6 @@ pub fn is_square_attacked(
     // A Huygens at prime distance D attacks the target ONLY if there is no other piece
     // at any prime distance from the HUYGENS that is closer than D (between Huygens and target).
     if indices.has_huygen[attacker_idx] {
-        const HUYGEN_ATTACK_LIMIT: i64 = 100; // Huygen pieces realistically attack within this range
-
         // Check each orthogonal direction from the target to find Huygens
         for &(dx, dy) in &ORTHO_DIRS {
             let line_vec = if dx == 0 {
@@ -1118,12 +1169,10 @@ pub fn is_square_attacked(
                     }
 
                     let abs_dist_to_target = dist_to_target.abs();
-                    if abs_dist_to_target > HUYGEN_ATTACK_LIMIT {
-                        continue;
-                    }
 
                     // Target must be at a prime distance from the Huygens
-                    if !is_prime_fast(abs_dist_to_target) {
+                    // Use is_prime_i64 for arbitrary distances (handles extreme coordinates)
+                    if !is_prime_i64(abs_dist_to_target) {
                         continue;
                     }
 
@@ -1156,7 +1205,8 @@ pub fn is_square_attacked(
 
                         let abs_dist_from_huygen = dist_from_huygen.abs();
                         // If this piece is at a prime distance from the Huygens, it blocks!
-                        if is_prime_fast(abs_dist_from_huygen) {
+                        // Use is_prime_i64 for arbitrary distances
+                        if is_prime_i64(abs_dist_from_huygen) {
                             blocked = true;
                             break;
                         }
@@ -2801,6 +2851,19 @@ fn generate_huygen_moves(
                 } else {
                     // Before blocker - empty square, valid move
                     moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
+                }
+            }
+
+            // IMPORTANT: Handle captures at prime distances > 127
+            // The loop above only covers primes up to 127, but blocker could be further
+            if blocker_dist > 127 {
+                if let Some(color) = blocker_color {
+                    if color != piece.color() {
+                        // Blocker is enemy at prime distance > 127 - generate capture
+                        let to_x = from.x + dir_x * blocker_dist;
+                        let to_y = from.y + dir_y * blocker_dist;
+                        moves.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
+                    }
                 }
             }
         } else {
