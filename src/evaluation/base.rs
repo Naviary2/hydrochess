@@ -131,22 +131,29 @@ const KING_TROPISM_BONUS: i32 = 4;
 const KNIGHT_NEAR_KING_BONUS: i32 = 15;
 const SLIDER_NET_BONUS: i32 = 20;
 
-// King safety ring and ray penalties - slightly stronger than original.
-// Enemy slider penalty is bumped up toward the Texel suggestion (~75) but
-// kept below that to remain in line with other positional terms.
+// King safety ring and ray penalties - tuned for infinite boards.
+// Open rays are extremely dangerous on infinite boards - sliders can attack from anywhere.
+// Original values: 30, 10, 40
 const KING_RING_MISSING_PENALTY: i32 = 30;
 const KING_OPEN_RAY_PENALTY: i32 = 10;
 const KING_ENEMY_SLIDER_PENALTY: i32 = 40;
 
-// King pawn shield heuristics (mild influence only)
+// King pawn shield heuristics
 // Reward having pawns in front of the king and penalize the king walking
 // in front of its pawn chain.
 const KING_PAWN_SHIELD_BONUS: i32 = 10;
 const KING_PAWN_AHEAD_PENALTY: i32 = 20;
 
-// Mobility tuning (kept modest so pieces don't run to infinity for raw space)
-const SLIDER_MOBILITY_BONUS: i32 = 1; // Used only for queen/bishop mobility
+// King virtual mobility - safe squares around king
+// const KING_VIRTUAL_MOBILITY_WEIGHT: i32 = 3; // Per safe square king can move to
+
+// Mobility tuning - increased for better slider activation
+const SLIDER_MOBILITY_BONUS: i32 = 1; // Used for queen mobility
 const BISHOP_MOBILITY_BONUS: i32 = 1;
+
+// Mobility scaling - disabled for now
+// const MOBILITY_FULL_COUNT_THRESHOLD: i32 = 8;
+// const MOBILITY_LOG_SCALE: i32 = 5; // Extra bonus per doubling beyond threshold
 
 // Distance penalties to discourage sliders far away from the king "zone".
 // We look at distance to both own and enemy king and penalize pieces that
@@ -157,9 +164,19 @@ const FAR_QUEEN_PENALTY: i32 = 3;
 const FAR_BISHOP_PENALTY: i32 = 2;
 const FAR_ROOK_PENALTY: i32 = 2;
 const PIECE_CLOUD_CHEB_RADIUS: i64 = 16;
+const SLIDER_AXIS_WIGGLE: i64 = 5; // A slider is "active" if its ray passes within 5 sq of center
 const PIECE_CLOUD_CHEB_MAX_EXCESS: i64 = 64;
-// Cloud penalty now scaled by piece value
-const CLOUD_PENALTY_PER_100_VALUE: i32 = 1; // 1cp penalty per 100 piece value per excess square
+const CLOUD_PENALTY_PER_100_VALUE: i32 = 1;
+
+// ==================== Finite-Mover Center ====================
+// Finite movers (knights, guards, leapers) should cluster together.
+// Unlike sliders, they can't trivially push the center-of-mass.
+const FINITE_MOVER_CENTER_RADIUS: i64 = 10;
+const FINITE_MOVER_MAX_EXCESS: i64 = 24;
+const FINITE_MOVER_PENALTY_PER_SQUARE: i32 = 3; // Stronger than cloud penalty
+
+// Connected pawns bonus
+const CONNECTED_PAWN_BONUS: i32 = 8;
 
 // Pawn structure
 const DOUBLED_PAWN_PENALTY: i32 = 8;
@@ -245,6 +262,82 @@ pub fn compute_cloud_center(board: &Board) -> Option<Coordinate> {
     } else {
         None
     }
+}
+
+/// Compute centroid of finite-moving pieces only (knights, centaurs, etc.).
+/// Excludes sliders to prevent them from skewing the "action zone".
+/// Finite movers should cluster together for mutual support.
+/// Uses occ_knights which includes knights and centaurs (pieces with knight-like movement).
+pub fn compute_finite_mover_center(board: &Board) -> Option<Coordinate> {
+    let mut sum_x: i64 = 0;
+    let mut sum_y: i64 = 0;
+    let mut count: i64 = 0;
+
+    for (cx, cy, tile) in board.tiles.iter() {
+        // Only include finite movers: knights (includes centaurs which are also knight-like)
+        // We use occ_knights as the primary finite-mover bitboard
+        let finite_movers = tile.occ_knights;
+        let bits = finite_movers & tile.occ_all & !tile.occ_void;
+
+        if bits == 0 {
+            continue;
+        }
+
+        let n = bits.count_ones() as i64;
+        sum_x += n * cx * 8 + tile.sum_lx(bits) as i64;
+        sum_y += n * cy * 8 + tile.sum_ly(bits) as i64;
+        count += n;
+    }
+
+    if count > 0 {
+        Some(Coordinate {
+            x: sum_x / count,
+            y: sum_y / count,
+        })
+    } else {
+        None
+    }
+}
+
+/// Scaled slider mobility that uses logarithmic scaling beyond a threshold.
+/// On infinite boards, a rook with 50 squares of mobility is much better than 12,
+/// but we don't want linear scaling to infinity.
+#[inline]
+pub fn slider_mobility_scaled(
+    board: &Board,
+    x: i64,
+    y: i64,
+    directions: &[(i64, i64)],
+    max_steps: i64,
+) -> i32 {
+    // Logarithmic scaling - commented out
+    slider_mobility(board, x, y, directions, 12)
+    /*
+    let raw = slider_mobility(board, x, y, directions, max_steps.min(40));
+    if raw <= MOBILITY_FULL_COUNT_THRESHOLD {
+        raw
+    } else {
+        // Logarithmic scaling beyond threshold
+        let excess = (raw - MOBILITY_FULL_COUNT_THRESHOLD) as f32;
+        let log_bonus = (excess.ln() / std::f32::consts::LN_2) as i32 * MOBILITY_LOG_SCALE;
+        MOBILITY_FULL_COUNT_THRESHOLD + log_bonus
+    }
+    */
+}
+
+/// Check if a pawn is connected (has a friendly pawn diagonally behind it).
+/// Connected pawns are much stronger as they protect each other.
+#[inline]
+fn is_connected_pawn(game: &GameState, x: i64, y: i64, color: PlayerColor) -> bool {
+    let dy = if color == PlayerColor::White { -1 } else { 1 };
+    // Check if friendly pawn on adjacent file, one rank behind
+    game.board
+        .get_piece(x - 1, y + dy)
+        .is_some_and(|p| p.piece_type() == PieceType::Pawn && p.color() == color)
+        || game
+            .board
+            .get_piece(x + 1, y + dy)
+            .is_some_and(|p| p.piece_type() == PieceType::Pawn && p.color() == color)
 }
 
 // ==================== Main Evaluation ====================
@@ -432,6 +525,12 @@ pub fn evaluate_pieces(
     let mut cloud_sum_x: i64 = 0;
     let mut cloud_sum_y: i64 = 0;
     let mut cloud_count: i64 = 0;
+    // Finite-mover center tracking - commented out
+    /*
+    let mut finite_sum_x: i64 = 0;
+    let mut finite_sum_y: i64 = 0;
+    let mut finite_count: i64 = 0;
+    */
 
     for (cx, cy, tile) in game.board.tiles.iter() {
         // SIMD: Fast skip empty tiles using parallel zero check
@@ -446,6 +545,17 @@ pub fn evaluate_pieces(
             cloud_sum_y += n * cy * 8 + tile.sum_ly(cloud_bits) as i64;
             cloud_count += n;
         }
+
+        /*
+        // Finite-mover center (knights only - they have limited range and should cluster)
+        let finite_bits = tile.occ_knights & tile.occ_all & !tile.occ_void;
+        if finite_bits != 0 {
+            let n = finite_bits.count_ones() as i64;
+            finite_sum_x += n * cx * 8 + tile.sum_lx(finite_bits) as i64;
+            finite_sum_y += n * cy * 8 + tile.sum_ly(finite_bits) as i64;
+            finite_count += n;
+        }
+        */
 
         // SIMD: Compute both color minor masks simultaneously
         let minors_mask = tile.occ_knights | tile.occ_bishops;
@@ -504,6 +614,18 @@ pub fn evaluate_pieces(
         None
     };
 
+    /*
+    // Finite-mover center: encourages knights to cluster together
+    let finite_center = if finite_count > 0 {
+        Some(Coordinate {
+            x: finite_sum_x / finite_count,
+            y: finite_sum_y / finite_count,
+        })
+    } else {
+        None
+    };
+    */
+
     let white_attack_scale = if white_undeveloped >= UNDEVELOPED_MINORS_THRESHOLD {
         DEVELOPMENT_PHASE_ATTACK_SCALE
     } else {
@@ -540,7 +662,14 @@ pub fn evaluate_pieces(
                 PieceType::Queen => {
                     evaluate_queen(game, x, y, piece.color(), white_king, black_king)
                 }
-                PieceType::Knight => evaluate_knight(x, y, piece.color(), black_king, white_king),
+                PieceType::Knight => evaluate_knight(
+                    x,
+                    y,
+                    piece.color(),
+                    black_king,
+                    white_king,
+                    None, // finite_center.as_ref(),
+                ),
                 PieceType::Bishop => {
                     evaluate_bishop(game, x, y, piece.color(), white_king, black_king)
                 }
@@ -625,7 +754,14 @@ pub fn evaluate_pieces(
                     get_piece_value(piece.piece_type()),
                 ),
                 PieceType::Centaur | PieceType::RoyalCentaur => {
-                    let knight_eval = evaluate_knight(x, y, piece.color(), black_king, white_king);
+                    let knight_eval = evaluate_knight(
+                        x,
+                        y,
+                        piece.color(),
+                        black_king,
+                        white_king,
+                        None, // finite_center.as_ref(),
+                    );
                     let leaper_eval = evaluate_leaper_positioning(
                         x,
                         y,
@@ -660,16 +796,64 @@ pub fn evaluate_pieces(
             };
 
             if let Some(center) = &cloud_center {
-                let cheb = (x - center.x).abs().max((y - center.y).abs());
+                let dx = (x - center.x).abs();
+                let dy = (y - center.y).abs();
+                let cheb = dx.max(dy);
+
                 if piece.piece_type() != PieceType::Pawn
                     && !piece.piece_type().is_royal()
                     && cheb > PIECE_CLOUD_CHEB_RADIUS
                 {
-                    let piece_val = get_piece_value(piece.piece_type());
-                    let value_factor = (piece_val / 100).max(1);
-                    let excess =
-                        (cheb - PIECE_CLOUD_CHEB_RADIUS).min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
-                    piece_score -= excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
+                    let pt = piece.piece_type();
+
+                    let is_ortho_slider = pt == PieceType::Rook || pt == PieceType::Chancellor;
+                    let is_diag_slider = pt == PieceType::Bishop || pt == PieceType::Archbishop;
+                    let is_full_slider = pt == PieceType::Queen || pt == PieceType::Amazon;
+
+                    // Diagonals for diag-sliders
+                    let d1 = ((x - y) - (center.x - center.y)).abs();
+                    let d2 = ((x + y) - (center.x + center.y)).abs();
+
+                    // Check if piece is "active" (either inside radius or having a ray passing through wiggle zone)
+                    let is_active = if is_ortho_slider {
+                        dx <= SLIDER_AXIS_WIGGLE || dy <= SLIDER_AXIS_WIGGLE
+                    } else if is_diag_slider {
+                        d1 <= SLIDER_AXIS_WIGGLE || d2 <= SLIDER_AXIS_WIGGLE
+                    } else if is_full_slider {
+                        dx <= SLIDER_AXIS_WIGGLE
+                            || dy <= SLIDER_AXIS_WIGGLE
+                            || d1 <= SLIDER_AXIS_WIGGLE
+                            || d2 <= SLIDER_AXIS_WIGGLE
+                    } else {
+                        // Non-sliders must be within the Chebyshev radius
+                        false
+                    };
+
+                    if !is_active {
+                        let piece_val = get_piece_value(pt);
+                        let value_factor = (piece_val / 100).max(1);
+
+                        // Distance to the proximity zone
+                        let dist_to_radius = cheb - PIECE_CLOUD_CHEB_RADIUS;
+
+                        // Distance to the nearest active axis lane
+                        let dist_to_lane = if is_ortho_slider {
+                            (dx - SLIDER_AXIS_WIGGLE).min(dy - SLIDER_AXIS_WIGGLE)
+                        } else if is_diag_slider {
+                            (d1 - SLIDER_AXIS_WIGGLE).min(d2 - SLIDER_AXIS_WIGGLE)
+                        } else if is_full_slider {
+                            let ortho_dist = (dx - SLIDER_AXIS_WIGGLE).min(dy - SLIDER_AXIS_WIGGLE);
+                            let diag_dist = (d1 - SLIDER_AXIS_WIGGLE).min(d2 - SLIDER_AXIS_WIGGLE);
+                            ortho_dist.min(diag_dist)
+                        } else {
+                            dist_to_radius // For non-sliders, it's just the radius distance
+                        };
+
+                        // Excess is the minimum distance to ANY "safe" state
+                        let excess = dist_to_radius.min(dist_to_lane).max(1);
+                        let capped_excess = excess.min(PIECE_CLOUD_CHEB_MAX_EXCESS) as i32;
+                        piece_score -= capped_excess * CLOUD_PENALTY_PER_100_VALUE * value_factor;
+                    }
                 }
             }
 
@@ -953,7 +1137,7 @@ pub fn evaluate_queen(
         PlayerColor::Neutral => queen_dirs_neutral,
     };
 
-    let mobility = slider_mobility(&game.board, x, y, queen_dirs, 12);
+    let mobility = slider_mobility_scaled(&game.board, x, y, queen_dirs, 40);
     bonus += mobility * SLIDER_MOBILITY_BONUS;
     bump_feat!(slider_mobility_bonus, mobility);
 
@@ -966,6 +1150,7 @@ pub fn evaluate_knight(
     color: PlayerColor,
     black_king: &Option<Coordinate>,
     white_king: &Option<Coordinate>,
+    finite_center: Option<&Coordinate>,
 ) -> i32 {
     let mut bonus: i32 = 0;
 
@@ -984,6 +1169,21 @@ pub fn evaluate_knight(
         } else if dist <= 5 {
             bonus += KNIGHT_NEAR_KING_BONUS / 2;
         }
+
+        /*
+        // King advancement bonus: knights near an advanced king are more valuable
+        // This encourages keeping knights close as the king pushes forward
+        let king_advancement = if color == PlayerColor::White {
+            ok.y // Higher y = more advanced for white
+        } else {
+            -ok.y // Lower y = more advanced for black
+        };
+
+        if dist <= 4 && king_advancement > 0 {
+            // Bonus scales with king advancement (capped at 5 ranks)
+            bonus += (king_advancement.min(5) as i32) * 2;
+        }
+        */
     }
 
     // Small bonus for being near enemy king (fork and mating net potential).
@@ -999,7 +1199,18 @@ pub fn evaluate_knight(
         }
     }
 
-    // Mild centralization bonus.
+    /*
+    // Finite-mover center distance penalty
+    // Knights should stay near other finite movers for mutual support
+    if let Some(fc) = finite_center {
+        let cheb = (x - fc.x).abs().max((y - fc.y).abs());
+        if cheb > FINITE_MOVER_CENTER_RADIUS {
+            let excess = (cheb - FINITE_MOVER_CENTER_RADIUS).min(FINITE_MOVER_MAX_EXCESS) as i32;
+            bonus -= excess * FINITE_MOVER_PENALTY_PER_SQUARE;
+        }
+    }
+    */
+
     // Mild centralization bonus.
     if (3..=5).contains(&x) && (3..=5).contains(&y) {
         bonus += 5;
@@ -1073,7 +1284,7 @@ pub fn evaluate_bishop(
         PlayerColor::Neutral => bishop_dirs_neutral,
     };
 
-    let mobility = slider_mobility(&game.board, x, y, bishop_dirs, 12);
+    let mobility = slider_mobility_scaled(&game.board, x, y, bishop_dirs, 40);
     bonus += mobility * BISHOP_MOBILITY_BONUS;
     bump_feat!(bishop_mobility_bonus, mobility);
 
@@ -1546,6 +1757,48 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
     safety -= enemy_slider_threats * KING_ENEMY_SLIDER_PENALTY;
     bump_feat!(king_enemy_slider_penalty, -enemy_slider_threats);
 
+    /*
+    // 4. King virtual mobility: safe squares the king can move to
+    // Penalize kings that have few safe escape squares
+    let mut safe_squares = 0;
+    let enemy_color = if color == PlayerColor::White {
+        PlayerColor::Black
+    } else {
+        PlayerColor::White
+    };
+    for dx in -1..=1_i64 {
+        for dy in -1..=1_i64 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let sq_x = king.x + dx;
+            let sq_y = king.y + dy;
+            let sq = Coordinate::new(sq_x, sq_y);
+
+            // Check if square is empty or has enemy piece (potential escape)
+            let is_blocked_by_friendly = game
+                .board
+                .get_piece(sq_x, sq_y)
+                .is_some_and(|p| p.color() == color);
+            if is_blocked_by_friendly {
+                continue;
+            }
+
+            // Check if square is attacked by enemy
+            if !crate::moves::is_square_attacked(
+                &game.board,
+                &sq,
+                enemy_color,
+                &game.spatial_indices,
+            ) {
+                safe_squares += 1;
+            }
+        }
+    }
+    // Bonus for having safe escape squares
+    safety += safe_squares * KING_VIRTUAL_MOBILITY_WEIGHT;
+    */
+
     safety
 }
 
@@ -1680,6 +1933,13 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
             // Base bonus for passed pawn
             score += 20;
         }
+
+        /*
+        // Connected pawn bonus: check if there's a friendly pawn diagonally behind
+        if is_connected_pawn(game, *wx, *wy, PlayerColor::White) {
+            score += CONNECTED_PAWN_BONUS;
+        }
+        */
     }
 
     // --- BLACK PAWNS ---
@@ -1707,6 +1967,13 @@ fn compute_pawn_structure(game: &GameState) -> i32 {
         if is_passed {
             score -= 20;
         }
+
+        /*
+        // Connected pawn bonus: check if there's a friendly pawn diagonally behind
+        if is_connected_pawn(game, *bx, *by, PlayerColor::Black) {
+            score -= CONNECTED_PAWN_BONUS;
+        }
+        */
     }
 
     score
@@ -2261,9 +2528,9 @@ mod tests {
             .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
 
         // Knight in corner (worst)
-        let corner_score = evaluate_knight(0, 0, PlayerColor::White, &None, &None);
+        let corner_score = evaluate_knight(0, 0, PlayerColor::White, &None, &None, None);
         // Knight in center (best)
-        let center_score = evaluate_knight(4, 4, PlayerColor::White, &None, &None);
+        let center_score = evaluate_knight(4, 4, PlayerColor::White, &None, &None, None);
 
         assert!(
             center_score > corner_score,

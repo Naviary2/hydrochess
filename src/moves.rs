@@ -2351,6 +2351,11 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
     // Fallback limit for short-range slider moves
     const FALLBACK_LIMIT: i64 = 10;
 
+    // Far move generation for slider activation
+    // Generates one ~50 square move for each open ray to help activate dormant rooks/queens
+    const FAR_MOVE_DISTANCE: i64 = 50;
+    const FAR_MOVE_BORDER_SAFETY: i64 = 100;
+
     let mut moves = MoveList::new();
     let our_color = piece.color();
 
@@ -2461,6 +2466,16 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
             for d in 1..=ENEMY_WIGGLE {
                 target_dists.push(d);
             }
+
+            // ACTIVATION MOVE: Generate one additional "far" move to help activate dormant sliders.
+            // Only if the ray is open beyond the distance and we are safely away from the world border.
+            // if max_dist >= FAR_MOVE_DISTANCE {
+            //     if let Some(border_dist) = ray_border_distance(from, dir_x, dir_y) {
+            //         if border_dist >= FAR_MOVE_BORDER_SAFETY {
+            //             target_dists.push(FAR_MOVE_DISTANCE);
+            //         }
+            //     }
+            // }
 
             // CRITICAL: Always add direct capture distance if there's an enemy piece
             // This is O(1) via spatial indices and covers ANY distance
