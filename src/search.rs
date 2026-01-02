@@ -150,7 +150,10 @@ pub(crate) use see::see_ge;
 pub(crate) use see::static_exchange_eval_impl as static_exchange_eval;
 
 pub mod zobrist;
-pub use zobrist::{SIDE_KEY, en_passant_key, material_key, pawn_key, piece_key, special_right_key};
+pub use zobrist::{
+    SIDE_KEY, castling_rights_key, castling_rights_key_from_bitfield, en_passant_key, material_key,
+    pawn_key, pawn_special_right_key, piece_key,
+};
 
 mod noisy;
 pub use noisy::get_best_move_with_noise;

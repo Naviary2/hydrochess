@@ -538,6 +538,8 @@ impl Engine {
             repetition: 0,
             white_non_pawn_material: false,
             black_non_pawn_material: false,
+            effective_castling_rights: 0,
+            castling_partner_counts: [0; 4],
         };
 
         game.material_score = calculate_initial_material(&game.board);

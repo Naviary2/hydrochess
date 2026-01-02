@@ -3,7 +3,7 @@
 //! Uses computed hashes based on coordinates since we can't pre-compute a table
 //! for an infinite board. The hash is maintained incrementally in GameState.
 
-use crate::board::{Coordinate, PieceType, PlayerColor};
+use crate::board::{PieceType, PlayerColor};
 
 /// Number of piece types (used for indexing into piece keys)
 const NUM_PIECE_TYPES: usize = 22;
@@ -38,9 +38,6 @@ static PIECE_KEYS: [[u64; NUM_COLORS]; NUM_PIECE_TYPES] = {
 
 /// Key for side to move (XOR when black to move)
 pub const SIDE_KEY: u64 = 0x9E3779B97F4A7C15;
-
-/// Keys for castling rights (indexed by normalized coordinate hash)
-const CASTLING_KEY_MIXER: u64 = 0xDEADBEEF12345678;
 
 /// Key for en passant file
 const EN_PASSANT_KEY_MIXER: u64 = 0xCAFEBABE87654321;
@@ -85,16 +82,86 @@ pub fn piece_key(piece_type: PieceType, color: PlayerColor, x: i64, y: i64) -> u
     coord_hash ^ pk
 }
 
-/// Get the key for a special right (castling/pawn double-move) at a coordinate
+/// Pre-computed keys for effective castling rights
+/// Indexed by: [0] = white kingside, [1] = white queenside, [2] = black kingside, [3] = black queenside
+const CASTLING_RIGHTS_KEYS: [u64; 4] = [
+    0x31D71DCE64B2C310, // White kingside
+    0x1A8419B523E6D19D, // White queenside
+    0x2E2B87D53B9A1C4F, // Black kingside
+    0x7C8F5A0E6D3B2A1F, // Black queenside
+];
+
+/// Precomputed table for all 16 possible castling combinations
+static CASTLING_COMBINATIONS: [u64; 16] = {
+    let mut table = [0u64; 16];
+    let mut i = 0;
+    while i < 16 {
+        let mut h = 0u64;
+        if i & 1 != 0 {
+            h ^= CASTLING_RIGHTS_KEYS[0];
+        } // WKS
+        if i & 2 != 0 {
+            h ^= CASTLING_RIGHTS_KEYS[1];
+        } // WQS
+        if i & 4 != 0 {
+            h ^= CASTLING_RIGHTS_KEYS[2];
+        } // BKS
+        if i & 8 != 0 {
+            h ^= CASTLING_RIGHTS_KEYS[3];
+        } // BQS
+        table[i] = h;
+        i += 1;
+    }
+    table
+};
+
+/// Get the Zobrist key for effective castling rights from a 4-bit bitfield.
+/// Bit 0=WKS, 1=WQS, 2=BKS, 3=BQS.
 #[inline(always)]
-pub fn special_right_key(coord: &Coordinate) -> u64 {
-    hash_coordinate(coord.x, coord.y) ^ CASTLING_KEY_MIXER
+pub fn castling_rights_key_from_bitfield(bits: u8) -> u64 {
+    CASTLING_COMBINATIONS[(bits & 0xF) as usize]
+}
+
+/// Get the Zobrist key for effective castling rights.
+/// This hashes the ABILITY to castle (king + partner both have rights), not individual piece rights.
+/// Much more efficient than hashing all individual special rights.
+#[inline(always)]
+pub fn castling_rights_key(
+    white_kingside: bool,
+    white_queenside: bool,
+    black_kingside: bool,
+    black_queenside: bool,
+) -> u64 {
+    let mut bits = 0u8;
+    if white_kingside {
+        bits |= 1;
+    }
+    if white_queenside {
+        bits |= 2;
+    }
+    if black_kingside {
+        bits |= 4;
+    }
+    if black_queenside {
+        bits |= 8;
+    }
+    castling_rights_key_from_bitfield(bits)
 }
 
 /// Get the key for en passant square
 #[inline(always)]
 pub fn en_passant_key(x: i64, y: i64) -> u64 {
     hash_coordinate(x, y) ^ EN_PASSANT_KEY_MIXER
+}
+
+/// Key for pawn double-push special rights (not castling)
+const PAWN_SPECIAL_RIGHT_MIXER: u64 = 0x5A5A5A5A3C3C3C3C;
+
+/// Get the key for a pawn's double-push special right at a coordinate.
+/// Used for hashing pawn special rights separately from castling rights.
+#[inline(always)]
+pub fn pawn_special_right_key(x: i64, y: i64) -> u64 {
+    hash_coordinate(x, y) ^ PAWN_SPECIAL_RIGHT_MIXER
 }
 
 /// Key for pawn structure hash (used by correction history).
