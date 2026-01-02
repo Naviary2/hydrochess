@@ -37,10 +37,6 @@ pub struct EvalFeatures {
     // Rook activity
     pub rook_idle_penalty: i32,
 
-    // Slider mobility
-    pub slider_mobility_bonus: i32,
-    pub bishop_mobility_bonus: i32,
-
     // Pawn structure
     pub doubled_pawn_penalty: i32,
 
@@ -133,27 +129,15 @@ const SLIDER_NET_BONUS: i32 = 20;
 
 // King safety ring and ray penalties - tuned for infinite boards.
 // Open rays are extremely dangerous on infinite boards - sliders can attack from anywhere.
-// Original values: 30, 10, 40
-const KING_RING_MISSING_PENALTY: i32 = 30;
-const KING_OPEN_RAY_PENALTY: i32 = 10;
-const KING_ENEMY_SLIDER_PENALTY: i32 = 40;
+const KING_RING_MISSING_PENALTY: i32 = 45;
+const KING_OPEN_RAY_PENALTY: i32 = 30; // Open rays are very dangerous on infinite boards
+const KING_ENEMY_SLIDER_PENALTY: i32 = 65; // Per Texel tuning suggestions
 
 // King pawn shield heuristics
 // Reward having pawns in front of the king and penalize the king walking
 // in front of its pawn chain.
-const KING_PAWN_SHIELD_BONUS: i32 = 10;
+const KING_PAWN_SHIELD_BONUS: i32 = 18;
 const KING_PAWN_AHEAD_PENALTY: i32 = 20;
-
-// King virtual mobility - safe squares around king
-// const KING_VIRTUAL_MOBILITY_WEIGHT: i32 = 3; // Per safe square king can move to
-
-// Mobility tuning - increased for better slider activation
-const SLIDER_MOBILITY_BONUS: i32 = 1; // Used for queen mobility
-const BISHOP_MOBILITY_BONUS: i32 = 1;
-
-// Mobility scaling - disabled for now
-// const MOBILITY_FULL_COUNT_THRESHOLD: i32 = 8;
-// const MOBILITY_LOG_SCALE: i32 = 5; // Extra bonus per doubling beyond threshold
 
 // Distance penalties to discourage sliders far away from the king "zone".
 // We look at distance to both own and enemy king and penalize pieces that
@@ -167,13 +151,6 @@ const PIECE_CLOUD_CHEB_RADIUS: i64 = 16;
 const SLIDER_AXIS_WIGGLE: i64 = 5; // A slider is "active" if its ray passes within 5 sq of center
 const PIECE_CLOUD_CHEB_MAX_EXCESS: i64 = 64;
 const CLOUD_PENALTY_PER_100_VALUE: i32 = 1;
-
-// ==================== Finite-Mover Center ====================
-// Finite movers (knights, guards, leapers) should cluster together.
-// Unlike sliders, they can't trivially push the center-of-mass.
-const FINITE_MOVER_CENTER_RADIUS: i64 = 10;
-const FINITE_MOVER_MAX_EXCESS: i64 = 24;
-const FINITE_MOVER_PENALTY_PER_SQUARE: i32 = 3; // Stronger than cloud penalty
 
 // Connected pawns bonus
 const CONNECTED_PAWN_BONUS: i32 = 8;
@@ -208,8 +185,6 @@ const KNIGHTRIDER_RAY_BONUS: i32 = 3; // Per square of knight-ray mobility
 const PAWN_FULL_VALUE_THRESHOLD: i64 = 6; // Within 6 ranks = full value
 const PAWN_PAST_PROMO_PENALTY: i32 = 90; // Massive penalty for pawns that can't promote (worth 10x less)
 const PAWN_FAR_FROM_PROMO_PENALTY: i32 = 50; // Flat penalty for back pawns (no benefit from advancing)
-
-// ==================== King Infinite Exposure ====================
 
 // ==================== Development ====================
 
@@ -297,32 +272,6 @@ pub fn compute_finite_mover_center(board: &Board) -> Option<Coordinate> {
     } else {
         None
     }
-}
-
-/// Scaled slider mobility that uses logarithmic scaling beyond a threshold.
-/// On infinite boards, a rook with 50 squares of mobility is much better than 12,
-/// but we don't want linear scaling to infinity.
-#[inline]
-pub fn slider_mobility_scaled(
-    board: &Board,
-    x: i64,
-    y: i64,
-    directions: &[(i64, i64)],
-    max_steps: i64,
-) -> i32 {
-    // Logarithmic scaling - commented out
-    slider_mobility(board, x, y, directions, 12)
-    /*
-    let raw = slider_mobility(board, x, y, directions, max_steps.min(40));
-    if raw <= MOBILITY_FULL_COUNT_THRESHOLD {
-        raw
-    } else {
-        // Logarithmic scaling beyond threshold
-        let excess = (raw - MOBILITY_FULL_COUNT_THRESHOLD) as f32;
-        let log_bonus = (excess.ln() / std::f32::consts::LN_2) as i32 * MOBILITY_LOG_SCALE;
-        MOBILITY_FULL_COUNT_THRESHOLD + log_bonus
-    }
-    */
 }
 
 /// Check if a pawn is connected (has a friendly pawn diagonally behind it).
@@ -662,14 +611,7 @@ pub fn evaluate_pieces(
                 PieceType::Queen => {
                     evaluate_queen(game, x, y, piece.color(), white_king, black_king)
                 }
-                PieceType::Knight => evaluate_knight(
-                    x,
-                    y,
-                    piece.color(),
-                    black_king,
-                    white_king,
-                    None, // finite_center.as_ref(),
-                ),
+                PieceType::Knight => evaluate_knight(x, y, piece.color(), black_king, white_king),
                 PieceType::Bishop => {
                     evaluate_bishop(game, x, y, piece.color(), white_king, black_king)
                 }
@@ -754,14 +696,7 @@ pub fn evaluate_pieces(
                     get_piece_value(piece.piece_type()),
                 ),
                 PieceType::Centaur | PieceType::RoyalCentaur => {
-                    let knight_eval = evaluate_knight(
-                        x,
-                        y,
-                        piece.color(),
-                        black_king,
-                        white_king,
-                        None, // finite_center.as_ref(),
-                    );
+                    let knight_eval = evaluate_knight(x, y, piece.color(), black_king, white_king);
                     let leaper_eval = evaluate_leaper_positioning(
                         x,
                         y,
@@ -1102,45 +1037,6 @@ pub fn evaluate_queen(
         }
     }
 
-    // Queen mobility
-    // Directional: we mostly care about mobility towards the enemy side and
-    // along central files/ranks, not running off to infinity behind our own
-    // king.
-    let queen_dirs_white: &[(i64, i64)] = &[
-        (1, 0),  // horizontal
-        (-1, 0), // horizontal
-        (0, 1),  // forward (towards black)
-        (1, 1),  // forward diagonals
-        (-1, 1),
-    ];
-    let queen_dirs_black: &[(i64, i64)] = &[
-        (1, 0),  // horizontal
-        (-1, 0), // horizontal
-        (0, -1), // forward (towards white)
-        (1, -1), // forward diagonals
-        (-1, -1),
-    ];
-    let queen_dirs_neutral: &[(i64, i64)] = &[
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (1, -1),
-        (-1, 1),
-        (-1, -1),
-    ];
-
-    let queen_dirs: &[(i64, i64)] = match color {
-        PlayerColor::White => queen_dirs_white,
-        PlayerColor::Black => queen_dirs_black,
-        PlayerColor::Neutral => queen_dirs_neutral,
-    };
-
-    let mobility = slider_mobility_scaled(&game.board, x, y, queen_dirs, 40);
-    bonus += mobility * SLIDER_MOBILITY_BONUS;
-    bump_feat!(slider_mobility_bonus, mobility);
-
     bonus
 }
 
@@ -1150,12 +1046,10 @@ pub fn evaluate_knight(
     color: PlayerColor,
     black_king: &Option<Coordinate>,
     white_king: &Option<Coordinate>,
-    finite_center: Option<&Coordinate>,
 ) -> i32 {
     let mut bonus: i32 = 0;
 
     // Knights are weak in infinite chess overall, but we still reward good king-related placement.
-
     // Small bonus for being near friendly king (defensive knight).
     let own_king = if color == PlayerColor::White {
         white_king
@@ -1169,21 +1063,6 @@ pub fn evaluate_knight(
         } else if dist <= 5 {
             bonus += KNIGHT_NEAR_KING_BONUS / 2;
         }
-
-        /*
-        // King advancement bonus: knights near an advanced king are more valuable
-        // This encourages keeping knights close as the king pushes forward
-        let king_advancement = if color == PlayerColor::White {
-            ok.y // Higher y = more advanced for white
-        } else {
-            -ok.y // Lower y = more advanced for black
-        };
-
-        if dist <= 4 && king_advancement > 0 {
-            // Bonus scales with king advancement (capped at 5 ranks)
-            bonus += (king_advancement.min(5) as i32) * 2;
-        }
-        */
     }
 
     // Small bonus for being near enemy king (fork and mating net potential).
@@ -1199,18 +1078,6 @@ pub fn evaluate_knight(
         }
     }
 
-    /*
-    // Finite-mover center distance penalty
-    // Knights should stay near other finite movers for mutual support
-    if let Some(fc) = finite_center {
-        let cheb = (x - fc.x).abs().max((y - fc.y).abs());
-        if cheb > FINITE_MOVER_CENTER_RADIUS {
-            let excess = (cheb - FINITE_MOVER_CENTER_RADIUS).min(FINITE_MOVER_MAX_EXCESS) as i32;
-            bonus -= excess * FINITE_MOVER_PENALTY_PER_SQUARE;
-        }
-    }
-    */
-
     // Mild centralization bonus.
     if (3..=5).contains(&x) && (3..=5).contains(&y) {
         bonus += 5;
@@ -1220,7 +1087,7 @@ pub fn evaluate_knight(
 }
 
 pub fn evaluate_bishop(
-    game: &GameState,
+    _game: &GameState,
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -1270,23 +1137,6 @@ pub fn evaluate_bishop(
             bonus -= excess * FAR_BISHOP_PENALTY;
         }
     }
-
-    // Bishop mobility: prefer activity on diagonals pointing towards the
-    // enemy side. Backward diagonals are mostly defensive and should not
-    // encourage bishops to run off to infinity behind our own king.
-    let bishop_dirs_white: &[(i64, i64)] = &[(1, 1), (-1, 1)];
-    let bishop_dirs_black: &[(i64, i64)] = &[(1, -1), (-1, -1)];
-    let bishop_dirs_neutral: &[(i64, i64)] = &[(1, 1), (1, -1), (-1, 1), (-1, -1)];
-
-    let bishop_dirs: &[(i64, i64)] = match color {
-        PlayerColor::White => bishop_dirs_white,
-        PlayerColor::Black => bishop_dirs_black,
-        PlayerColor::Neutral => bishop_dirs_neutral,
-    };
-
-    let mobility = slider_mobility_scaled(&game.board, x, y, bishop_dirs, 40);
-    bonus += mobility * BISHOP_MOBILITY_BONUS;
-    bump_feat!(bishop_mobility_bonus, mobility);
 
     bonus
 }
@@ -2017,31 +1867,6 @@ fn is_between(a: i64, b: i64, c: i64) -> bool {
     a > minv && a < maxv
 }
 
-pub fn slider_mobility(
-    board: &Board,
-    x: i64,
-    y: i64,
-    directions: &[(i64, i64)],
-    max_steps: i64,
-) -> i32 {
-    let mut count: i32 = 0;
-
-    for (dx, dy) in directions {
-        let mut cx = x;
-        let mut cy = y;
-        for _ in 0..max_steps {
-            cx += dx;
-            cy += dy;
-            if board.get_piece(cx, cy).is_some() {
-                break;
-            }
-            count += 1;
-        }
-    }
-
-    count
-}
-
 /// Returns true if the straight line between `from` and `to` is not blocked by any piece.
 /// Works for ranks, files, and diagonals on an unbounded board by checking only existing pieces.
 pub fn is_clear_line_between(board: &Board, from: &Coordinate, to: &Coordinate) -> bool {
@@ -2259,19 +2084,6 @@ mod tests {
         assert!(!is_between(7, 3, 7));
         assert!(!is_between(2, 3, 7));
         assert!(!is_between(8, 3, 7));
-    }
-
-    #[test]
-    fn test_slider_mobility() {
-        let mut board = Board::new();
-        // Empty board should give max mobility in limited steps
-        let mobility = slider_mobility(&board, 4, 4, &[(1, 0), (-1, 0), (0, 1), (0, -1)], 5);
-        assert_eq!(mobility, 20); // 4 directions * 5 steps each
-
-        // Place a blocking piece
-        board.set_piece(6, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
-        let mobility = slider_mobility(&board, 4, 4, &[(1, 0)], 5);
-        assert_eq!(mobility, 1); // Only 1 step before blocked (at 5,4)
     }
 
     #[test]
@@ -2524,9 +2336,9 @@ mod tests {
             .set_piece(7, 7, Piece::new(PieceType::King, PlayerColor::Black));
 
         // Knight in corner (worst)
-        let corner_score = evaluate_knight(0, 0, PlayerColor::White, &None, &None, None);
+        let corner_score = evaluate_knight(0, 0, PlayerColor::White, &None, &None);
         // Knight in center (best)
-        let center_score = evaluate_knight(4, 4, PlayerColor::White, &None, &None, None);
+        let center_score = evaluate_knight(4, 4, PlayerColor::White, &None, &None);
 
         assert!(
             center_score > corner_score,

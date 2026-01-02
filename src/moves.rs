@@ -2353,8 +2353,8 @@ pub fn generate_sliding_moves(ctx: &SlidingMoveContext) -> MoveList {
 
     // Far move generation for slider activation
     // Generates one ~50 square move for each open ray to help activate dormant rooks/queens
-    const FAR_MOVE_DISTANCE: i64 = 50;
-    const FAR_MOVE_BORDER_SAFETY: i64 = 100;
+    // const FAR_MOVE_DISTANCE: i64 = 50;
+    // const FAR_MOVE_BORDER_SAFETY: i64 = 100;
 
     let mut moves = MoveList::new();
     let our_color = piece.color();
