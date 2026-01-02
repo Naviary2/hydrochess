@@ -275,19 +275,10 @@ function applyMove(position, move) {
 //   - repetition (threefold) and 50-move rule
 //   - time forfeits
 //   - illegal moves / engine failure
+//   - insufficient material (via engine's is_sufficient_material() function)
 //
 // Several variants (e.g. Pawn_Horde) are *designed* to have only one king
 // on the board, so treating "kings < 2" as checkmate is incorrect and was
-// causing games to end after a single move in SPRT logs. To avoid
-// hardcoding variant-specific rules here (and to keep the harness fast), we
-// no longer try to detect wins or draws based solely on king count or total
-// piece count.
-//
-// For now, this helper never declares the game over; we rely entirely on
-// the engine and the explicit adjudication logic above.
-function isGameOver(_position) {
-    return { over: false };
-}
 
 function clonePosition(position) {
     // Simple deep clone for our small position objects
@@ -674,27 +665,10 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                 comment += textComment;
             }
 
-            // Calculate counters *before* applying the move, because applyMove updates the board
-            {
-                const pieces = position.board.pieces;
-                const [fromX, fromY] = move.from.split(',');
-                const [toX, toY] = move.to.split(',');
-                const movingPiece = pieces.find(p => p.x === fromX && p.y === fromY);
-                // Check for capture: is there a piece at dest?
-                const targetPiece = pieces.find(p => p.x === toX && p.y === toY);
-                const isCapture = !!targetPiece;
-                const isPawn = movingPiece && movingPiece.piece_type === 'p';
-
-                if (isPawn || isCapture) {
-                    halfmoveClock = 0;
-                } else {
-                    halfmoveClock++;
-                }
-
-                // If it was Black's turn, increment fullmove number
-                if (position.turn === 'b') {
-                    fullmoveNumber++;
-                }
+            // Increment fullmove number after Black's move (position.turn is already flipped)
+            // Note: We check for 'w' because applyMove already toggled the turn
+            if (position.turn === 'w') {
+                fullmoveNumber++;
             }
 
             moveLines.push(
@@ -729,20 +703,24 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                 return { result: 'draw', log: moveLines.join('\n'), reason: 'fifty_move', samples: texelSamples };
             }
 
-            const gameState = isGameOver(position);
-            if (gameState.over) {
-                if (gameState.reason === 'draw') {
+            // Check for insufficient material using the engine's detection
+            // The engine has comprehensive rules for infinite chess including K+B vs K, K+N vs K, etc.
+            try {
+                const checker = new EngineNew(gameInput);
+                const hasSufficientMaterial = typeof checker.is_sufficient_material === 'function'
+                    ? checker.is_sufficient_material()
+                    : true; // Default to true if function doesn't exist (old engine builds)
+                checker.free();
+
+                if (!hasSufficientMaterial) {
                     for (const s of texelSamples) {
                         s.result_token = '1/2-1/2';
                     }
+                    moveLines.push('# Draw by insufficient material');
                     return { result: 'draw', log: moveLines.join('\n'), reason: 'insufficient_material', samples: texelSamples };
                 }
-                const result = sideToMove === newColor ? 'win' : 'loss';
-                const result_token = result === 'win' ? '1-0' : '0-1';
-                for (const s of texelSamples) {
-                    s.result_token = result_token;
-                }
-                return { result, log: moveLines.join('\n'), reason: gameState.reason || 'checkmate', samples: texelSamples };
+            } catch (e) {
+                // If the check fails, continue the game
             }
         }
     } catch (e) {
@@ -750,6 +728,44 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
         e.moveLines = moveLines;
         e.moveHistory = moveHistory;
         throw e;
+    }
+
+    // Before declaring max_moves draw, check if the last move delivered checkmate/stalemate
+    // This prevents checkmate being incorrectly classified as max_moves draw
+    try {
+        const gameInput = clonePosition(startPosition);
+        gameInput.move_history = moveHistory.slice();
+        gameInput.halfmove_clock = halfmoveClock;
+        gameInput.fullmove_number = fullmoveNumber;
+
+        const checker = new EngineNew(gameInput);
+        const legal = typeof checker.get_legal_moves_js === 'function' ? checker.get_legal_moves_js() : [];
+        const inCheck = typeof checker.is_in_check === 'function' && checker.is_in_check();
+        checker.free();
+
+        if (Array.isArray(legal) && legal.length === 0) {
+            // No legal moves - it's either checkmate or stalemate
+            if (inCheck) {
+                // Checkmate! The side that just moved wins
+                const winningColor = position.turn === 'w' ? 'b' : 'w';
+                const result = winningColor === newColor ? 'win' : 'loss';
+                const result_token = result === 'win' ? '1-0' : '0-1';
+                for (const s of texelSamples) {
+                    s.result_token = result_token;
+                }
+                moveLines.push('# Checkmate on final move');
+                return { result, log: moveLines.join('\n'), reason: 'checkmate', samples: texelSamples };
+            } else {
+                // Stalemate
+                for (const s of texelSamples) {
+                    s.result_token = '1/2-1/2';
+                }
+                moveLines.push('# Stalemate on final move');
+                return { result: 'draw', log: moveLines.join('\n'), reason: 'stalemate', samples: texelSamples };
+            }
+        }
+    } catch (e) {
+        // If check fails, fall through to max_moves draw
     }
 
     for (const s of texelSamples) {

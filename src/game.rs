@@ -107,7 +107,7 @@ pub struct UndoMove {
     pub old_en_passant: Option<EnPassantState>,
     pub old_halfmove_clock: u32,
     pub old_hash: u64, // Hash before the move was made
-    pub special_rights_removed: ArrayVec<Coordinate, 4>, // Track which special rights were removed (re-insert on undo)sert on undo)
+    pub special_rights_removed: ArrayVec<Coordinate, 4>, // Track which special rights were removed (re-insert on undo)
     /// If this move caused a piece to leave its original starting square,
     /// we remove that coordinate from starting_squares. Store it here so
     /// undo_move can restore starting_squares exactly.
@@ -117,6 +117,8 @@ pub struct UndoMove {
     pub old_black_king_pos: Option<Coordinate>,
     /// Old repetition value for restoration
     pub old_repetition: i32,
+    /// Piece captured via en passant (could be a promoted piece, not just a pawn)
+    pub ep_captured_piece: Option<Piece>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1647,6 +1649,20 @@ impl GameState {
                     out.push(m);
                     continue;
                 }
+                // Special case: en passant capture removes piece at ep.pawn_square, not m.to
+                // If the checker is at ep.pawn_square, the EP move captures it and escapes check
+                if m.piece.piece_type() == PieceType::Pawn {
+                    if let Some(ep) = &s.en_passant {
+                        if m.to.x == ep.square.x && m.to.y == ep.square.y {
+                            // This is an EP capture - check if it captures the checker
+                            if ep.pawn_square.x == checker_sq.x && ep.pawn_square.y == checker_sq.y
+                            {
+                                out.push(m);
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // Blocking moves for sliders (straight line check rays)
                 if is_slider
                     && !has_optimized_blocking
@@ -1909,6 +1925,7 @@ impl GameState {
             old_white_king_pos: None,
             old_black_king_pos: None,
             old_repetition: self.repetition,
+            ep_captured_piece: None,
         };
 
         // Track king position updates for undo
@@ -1997,6 +2014,8 @@ impl GameState {
             })
         {
             is_ep_capture = true;
+            // Store the actual captured piece for proper undo restoration
+            undo_info.ep_captured_piece = Some(captured_pawn);
             // Hash: remove EP captured pawn
             self.hash ^= piece_key(
                 captured_pawn.piece_type(),
@@ -2250,36 +2269,35 @@ impl GameState {
             self.spatial_indices.add(m.to.x, m.to.y, captured.packed());
         }
 
-        let is_pawn_move = piece.piece_type() == PieceType::Pawn;
-        if is_pawn_move
-            && undo
-                .old_en_passant
-                .as_ref()
-                .is_some_and(|ep| m.to.x == ep.square.x && m.to.y == ep.square.y)
-            && let Some(ep) = &undo.old_en_passant
-        {
-            // Restore the captured pawn
-            let captured_pawn = Piece::new(PieceType::Pawn, piece.color().opponent());
-            self.board
-                .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
-            self.spatial_indices
-                .add(ep.pawn_square.x, ep.pawn_square.y, captured_pawn.packed());
+        // Handle En Passant capture undo - use the stored captured piece
+        if let Some(captured_pawn) = undo.ep_captured_piece {
+            if let Some(ep) = &undo.old_en_passant {
+                // Restore the captured piece (could be a pawn or promoted piece)
+                self.board
+                    .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
+                self.spatial_indices.add(
+                    ep.pawn_square.x,
+                    ep.pawn_square.y,
+                    captured_pawn.packed(),
+                );
 
-            // Restore material
-            self.material_hash = self.material_hash.wrapping_add(material_key(
-                captured_pawn.piece_type(),
-                captured_pawn.color(),
-            ));
+                // Restore material hash
+                self.material_hash = self.material_hash.wrapping_add(material_key(
+                    captured_pawn.piece_type(),
+                    captured_pawn.color(),
+                ));
 
-            let value = get_piece_value(PieceType::Pawn);
-            if captured_pawn.color() == PlayerColor::White {
-                self.material_score += value;
-                self.white_piece_count = self.white_piece_count.saturating_add(1);
-                self.white_pawn_count = self.white_pawn_count.saturating_add(1);
-            } else {
-                self.material_score -= value;
-                self.black_piece_count = self.black_piece_count.saturating_add(1);
-                self.black_pawn_count = self.black_pawn_count.saturating_add(1);
+                // Restore material value and piece counts
+                let value = get_piece_value(captured_pawn.piece_type());
+                if captured_pawn.color() == PlayerColor::White {
+                    self.material_score += value;
+                    self.white_piece_count = self.white_piece_count.saturating_add(1);
+                    self.white_pawn_count = self.white_pawn_count.saturating_add(1);
+                } else {
+                    self.material_score -= value;
+                    self.black_piece_count = self.black_piece_count.saturating_add(1);
+                    self.black_pawn_count = self.black_pawn_count.saturating_add(1);
+                }
             }
         }
 

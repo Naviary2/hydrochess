@@ -945,4 +945,17 @@ impl Engine {
     pub fn is_in_check(&self) -> bool {
         self.game.is_in_check()
     }
+
+    /// Returns true if either side has sufficient material to force checkmate.
+    /// Returns false if the position is a dead draw due to insufficient material.
+    /// This can be used by the SPRT harness to detect insufficient material draws.
+    pub fn is_sufficient_material(&self) -> bool {
+        // Use the evaluate_insufficient_material function
+        // None = sufficient, Some(0) = dead draw, Some(n) = drawish
+        match evaluation::insufficient_material::evaluate_insufficient_material(&self.game) {
+            None => true,     // Sufficient material
+            Some(0) => false, // Dead draw (insufficient)
+            Some(_) => true,  // Drawish but not dead draw
+        }
+    }
 }

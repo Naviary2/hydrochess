@@ -208,9 +208,27 @@ fn has_sufficient_mating_material(
 
     // ==========================================================================
     // BOUNDED BOARD LOGIC (standard chess rules, world_size < 100)
-    // On a bounded board, king can be cornered, so standard mating patterns work
+    // On a bounded board, king can be cornered, so standard mating patterns apply.
+    // We check BOTH sufficient AND insufficient cases, then exit early.
     // ==========================================================================
     if is_bounded && has_our_king {
+        let minors = bishops + knights + guards + hawks;
+
+        // ==== OBVIOUS DRAWS (immediate draw per Article 5.2b) ====
+
+        // K alone (bare king) - insufficient
+        if total == 0 {
+            return false;
+        }
+
+        // K + single minor (B or N) vs bare K - insufficient
+        // Note: This only counts OUR material; opponent check happens separately
+        if minors == 1 && total == 1 {
+            return false;
+        }
+
+        // ==== SUFFICIENT MATERIAL (can force checkmate) ====
+
         // K+Q is sufficient (can force mate in corner)
         if queens >= 1 {
             return true;
@@ -227,30 +245,49 @@ fn has_sufficient_mating_material(
         if chancellors >= 1 {
             return true;
         }
-        // K+Archbishop + minor piece is sufficient
-        if archbishops >= 1 && (bishops >= 1 || knights >= 1) {
-            return true;
-        }
-        // K+2 Archbishops is sufficient
-        if archbishops >= 2 {
+        // K+B+N is sufficient (bishop+knight can mate on bounded board)
+        if bishops >= 1 && knights >= 1 {
             return true;
         }
         // K+BB (opposite colors) is sufficient
         if light_bishops >= 1 && dark_bishops >= 1 {
             return true;
         }
-        // K+BN is sufficient
-        if bishops >= 1 && knights >= 1 {
-            return true;
-        }
-        // K+3 Knights is sufficient (but not 2)
-        if knights >= 3 {
+        // K+Archbishop alone is sufficient (B+N combined on bounded board)
+        if archbishops >= 1 {
             return true;
         }
         // Any pawn is sufficient (can promote)
         if pawns >= 1 {
             return true;
         }
+        // K+3 Knights or more is sufficient
+        if knights >= 3 {
+            return true;
+        }
+
+        // ==== HEURISTIC DRAWS (cannot force checkmate, treat as draw) ====
+
+        // K+NN vs K - two knights cannot force mate (but can helpmate)
+        if knights == 2 && total == 2 {
+            return false;
+        }
+
+        // K+B+B same color - insufficient (can't cover all squares)
+        if bishops >= 2 && (light_bishops == 0 || dark_bishops == 0) && total == bishops {
+            return false;
+        }
+
+        // ==== DEFAULT FOR BOUNDED ====
+        // For piece combinations not explicitly handled, assume sufficient on bounded boards
+        // (most multi-piece combinations can theoretically mate on bounded boards)
+        if total >= 2 {
+            return true;
+        }
+
+        // Single unknown piece type - check if it's a major/powerful piece
+        // This handles fairy pieces that might be sufficient
+        return total >= 1 && (knightriders >= 1 || huygens >= 1);
     }
 
     // Fast path: 2+ major pieces WITH KING = always sufficient
@@ -640,10 +677,9 @@ fn has_sufficient_mating_material(
 /// 2. If both sides have pieces → Some(divisor) (drawish, divide eval by divisor)
 /// 3. Otherwise (one side has no pieces) → Some(0) (insufficient, dead draw)
 pub fn evaluate_insufficient_material(game: &crate::game::GameState) -> Option<i32> {
-    let board = &game.board;
-
     // Fast exit for complex positions
-    if board.len() >= 6 {
+    // We only check if active piece count is large.
+    if (game.white_piece_count + game.black_piece_count) >= 6 {
         return None;
     }
 

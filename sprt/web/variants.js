@@ -138,6 +138,11 @@ function getVariantData(variantName) {
         variant.game_rules.promotion_ranks = { white: ['8'], black: ['1'] };
     }
 
+    // Default move_rule: 100 halfmoves (50-move rule) for draw detection
+    if (typeof variant.game_rules.move_rule !== 'number') {
+        variant.game_rules.move_rule = 100;
+    }
+
     return variant;
 }
 
