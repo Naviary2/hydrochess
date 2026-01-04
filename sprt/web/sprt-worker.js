@@ -812,9 +812,21 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                 if (sideToMove === 'b') {
                     evalVal = -evalVal;
                 }
-                const evalCp = (evalVal / 100).toFixed(2);
-                const evalStr = evalVal >= 0 ? `+${evalCp}` : evalCp;
-                commands += `[%eval ${evalStr}]`;
+
+                // Check for mate score
+                if (Math.abs(evalVal) >= 800000) {
+                    if (evalVal > 0) {
+                        const mateIn = Math.floor((900000 - evalVal + 1) / 2);
+                        commands += `[%mate ${mateIn}]`;
+                    } else {
+                        const mateIn = Math.floor((900000 + evalVal + 1) / 2);
+                        commands += `[%mate -${mateIn}]`;
+                    }
+                } else {
+                    const evalCp = (evalVal / 100).toFixed(2);
+                    const evalStr = evalVal >= 0 ? `+${evalCp}` : evalCp;
+                    commands += `[%eval ${evalStr}]`;
+                }
             }
             // Add depth as a text comment (not a command)
             let textComment = '';
