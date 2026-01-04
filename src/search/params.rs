@@ -34,7 +34,7 @@ pub const DEFAULT_HLP_HISTORY_LEAF: i32 = 0;
 pub const DEFAULT_LMP_THRESHOLD: [usize; 5] = [0, 4, 7, 11, 16];
 
 // Aspiration Window
-pub const DEFAULT_ASPIRATION_WINDOW: i32 = 45;
+pub const DEFAULT_ASPIRATION_WINDOW: i32 = 60;
 pub const DEFAULT_ASPIRATION_FAIL_MULT: i32 = 4; // Window *= this on fail
 pub const DEFAULT_ASPIRATION_MAX_WINDOW: i32 = 1000;
 

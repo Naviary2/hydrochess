@@ -2,6 +2,7 @@ use crate::board::PieceType;
 use crate::evaluation::{evaluate, get_piece_value};
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures};
+use crate::search::params::aspiration_max_window;
 use std::cell::RefCell;
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use wasm_bindgen::prelude::*;
@@ -1102,7 +1103,7 @@ fn search_with_searcher(
                 }
 
                 // Fallback to full window if window gets too large or too many retries
-                if window_size > 1000 || retries >= 4 {
+                if window_size > aspiration_max_window() || retries >= 4 {
                     result =
                         negamax_root(searcher, game, depth, -INFINITY, INFINITY, &mut legal_moves);
                     break;
