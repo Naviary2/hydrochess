@@ -62,23 +62,44 @@ pub fn get_best_move_with_noise(
     game.recompute_piece_counts();
     // Initialize correction history hashes
     game.recompute_correction_hashes();
-    let mut searcher = Searcher::new(time_limit_ms);
-    searcher.hot.time_limit_ms = time_limit_ms;
-    searcher.silent = silent;
-    searcher.set_corrhist_mode(game);
-    searcher.move_rule_limit = game
-        .game_rules
-        .move_rule_limit
-        .map_or(i32::MAX, |v| v as i32);
 
     if noise_amp <= 0 {
         let result = super::get_best_move(game, max_depth, time_limit_ms, silent);
         return result;
     }
 
-    let result = search_with_searcher_noisy(&mut searcher, game, max_depth, noise_amp);
-    let stats = super::build_search_stats(&searcher);
-    result.map(|(m, eval)| (m, eval, stats))
+    // Use persistent global searcher (Stockfish pattern)
+    super::GLOBAL_SEARCHER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+
+        // Get or create the persistent searcher
+        let searcher = opt.get_or_insert_with(|| super::Searcher::new(time_limit_ms));
+
+        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        searcher.new_search();
+
+        // Update search parameters for this search
+        searcher.hot.time_limit_ms = time_limit_ms;
+        searcher.silent = silent;
+        searcher.hot.stopped = false;
+        searcher.hot.timer.reset();
+        searcher.hot.min_depth_required = 1;
+
+        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
+        for row in searcher.low_ply_history.iter_mut() {
+            row.fill(97);
+        }
+
+        searcher.set_corrhist_mode(game);
+        searcher.move_rule_limit = game
+            .game_rules
+            .move_rule_limit
+            .map_or(i32::MAX, |v| v as i32);
+
+        let result = search_with_searcher_noisy(searcher, game, max_depth, noise_amp);
+        let stats = super::build_search_stats(searcher);
+        result.map(|(m, eval)| (m, eval, stats))
+    })
 }
 
 fn search_with_searcher_noisy(
@@ -117,8 +138,7 @@ fn search_with_searcher_noisy(
 
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
-        searcher.decay_history();
-
+        
         // Time check at iteration start - but note that check_time won't stop
         // during depth 1 due to min_depth_required
         if searcher.hot.min_depth_required == 0
@@ -248,8 +268,6 @@ fn search_with_searcher_noisy(
             }
         }
     }
-
-    searcher.tt.increment_age();
 
     best_move.map(|m| (m, best_score))
 }

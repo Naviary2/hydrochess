@@ -411,33 +411,13 @@ pub struct MultiPVResult {
 }
 
 thread_local! {
-    static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = const { RefCell::new(None) };
-}
-
-#[allow(dead_code)]
-fn with_global_searcher<F, R>(time_limit_ms: u128, silent: bool, f: F) -> R
-where
-    F: FnOnce(&mut Searcher) -> R,
-{
-    // Disable persistent searcher: create a fresh one per call so TT does not persist across searches.
-    let mut searcher = Searcher::new(time_limit_ms);
-    searcher.hot.time_limit_ms = time_limit_ms;
-    searcher.silent = silent;
-    searcher.hot.stopped = false;
-    searcher.hot.timer.reset();
-
-    f(&mut searcher)
+    pub(crate) static GLOBAL_SEARCHER: RefCell<Option<Searcher>> = const { RefCell::new(None) };
 }
 
 fn build_search_stats(searcher: &Searcher) -> SearchStats {
     #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
     if let Some(shared) = create_shared_tt_view() {
         // Use shared TT stats
-        // Note: used_entries() scans the whole table, which might be slow for very large TTs,
-        // but it's only called at the end of a search iteration.
-        // If it's too slow, we can return 0 or an estimate.
-        // For now, let's trust the sampling in fill_permille and avoid full scan for 'used'.
-        // Or we could implement an approximate counter in shared memory.
         let fill = unsafe { shared.fill_permille() };
         let cap = shared.capacity();
         let used = ((cap as u64 * fill as u64) / 1000) as usize;
@@ -457,32 +437,14 @@ fn build_search_stats(searcher: &Searcher) -> SearchStats {
 }
 
 /// Return current TT statistics from the persistent global searcher, if any.
-/// When no global searcher exists yet, checks shared TT if available.
+/// When no global searcher exists yet, initializes one with default size to report capacity.
 pub fn get_current_tt_stats() -> SearchStats {
     GLOBAL_SEARCHER.with(|cell| {
-        let opt = cell.borrow();
-        if let Some(ref searcher) = *opt {
-            build_search_stats(searcher)
-        } else {
-            // No global searcher yet - check if shared TT is available
-            #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
-            if let Some(shared) = create_shared_tt_view() {
-                let fill = unsafe { shared.fill_permille() };
-                let cap = shared.capacity();
-                let used = ((cap as u64 * fill as u64) / 1000) as usize;
-                return SearchStats {
-                    tt_capacity: cap,
-                    tt_used: used,
-                    tt_fill_permille: fill,
-                };
-            }
+        let mut opt = cell.borrow_mut();
 
-            SearchStats {
-                tt_capacity: 0,
-                tt_used: 0,
-                tt_fill_permille: 0,
-            }
-        }
+        // Ensure searcher exists so we can report its capacity/fill even before first search
+        let searcher = opt.get_or_insert_with(|| Searcher::new(4000));
+        build_search_stats(searcher)
     })
 }
 
@@ -623,7 +585,7 @@ impl Searcher {
                 seldepth: 0,
                 min_depth_required: 1, // Must complete at least depth 1
             },
-            tt: TranspositionTable::new(16),
+            tt: TranspositionTable::new(32),
             pv_table,
             pv_length: [0; MAX_PLY],
             killers,
@@ -690,6 +652,78 @@ impl Searcher {
                 *val = *val * 9 / 10; // Decay by 10%
             }
         }
+    }
+
+    /// Increments TT generation for age-based replacement.
+    /// Does NOT clear histories - they persist across searches.
+    pub fn new_search(&mut self) {
+        // Temporarily disable persistent TT: clear it instead of incrementing age
+        self.tt.clear();
+        // self.tt.increment_age();
+    }
+
+    /// Clears TT and resets all history tables to neutral values.
+    pub fn clear(&mut self) {
+        // Clear transposition table
+        self.tt.clear();
+
+        // Reset main history
+        for row in self.history.iter_mut() {
+            for val in row.iter_mut() {
+                *val = 0;
+            }
+        }
+
+        // Reset capture history
+        for row in self.capture_history.iter_mut() {
+            for val in row.iter_mut() {
+                *val = 0;
+            }
+        }
+
+        // Reset continuation history
+        for outer in self.cont_history.iter_mut() {
+            for mid in outer.iter_mut() {
+                for inner in mid.iter_mut() {
+                    for val in inner.iter_mut() {
+                        *val = 0;
+                    }
+                }
+            }
+        }
+
+        // Reset correction histories
+        for row in self.pawn_corrhist.iter_mut() {
+            row.fill(0);
+        }
+        for row in self.nonpawn_corrhist.iter_mut() {
+            row.fill(0);
+        }
+        for row in self.material_corrhist.iter_mut() {
+            row.fill(0);
+        }
+        self.lastmove_corrhist.fill(0);
+
+        // Reset low ply history
+        for row in self.low_ply_history.iter_mut() {
+            row.fill(0);
+        }
+
+        // Reset killers
+        for k in self.killers.iter_mut() {
+            k[0] = None;
+            k[1] = None;
+        }
+
+        // Reset countermoves
+        for row in self.countermoves.iter_mut() {
+            for val in row.iter_mut() {
+                *val = (0, 0, 0);
+            }
+        }
+
+        // Reset TT move history
+        self.tt_move_history = 0;
     }
 
     /// Gravity-style history update: scales updates based on current value and clamps to [-MAX_HISTORY, MAX_HISTORY].
@@ -1001,7 +1035,7 @@ fn search_with_searcher(
     // Iterative deepening with aspiration windows
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
-        searcher.decay_history();
+
         // Time check at start of each iteration - but always complete depth 1
         if searcher.hot.min_depth_required == 0
             && searcher.hot.timer.elapsed_ms() >= searcher.hot.time_limit_ms
@@ -1147,9 +1181,6 @@ fn search_with_searcher(
         }
     }
 
-    // Increment TT age for next search
-    searcher.tt.increment_age();
-
     best_move.map(|m| (m, best_score))
 }
 
@@ -1166,7 +1197,8 @@ pub fn get_best_move(
 
 /// Time-limited search with thread_id for Lazy SMP.
 /// Helper threads (thread_id > 0) skip the first move to distribute work.
-/// Uses fresh Searcher per call (no persistent TT between searches).
+/// Uses persistent GLOBAL_SEARCHER - TT and histories persist across searches.
+/// Call reset_search_state() to clear for a new game.
 pub fn get_best_move_threaded(
     game: &mut GameState,
     max_depth: usize,
@@ -1179,16 +1211,37 @@ pub fn get_best_move_threaded(
     // Initialize correction history hashes
     game.recompute_correction_hashes();
 
-    // Use a fresh searcher per call (no persistent TT/state between searches).
-    let mut searcher = Searcher::new(time_limit_ms);
-    searcher.hot.time_limit_ms = time_limit_ms;
-    searcher.silent = silent;
-    searcher.thread_id = thread_id;
-    // Set correction mode based on variant (zero overhead during search)
-    searcher.set_corrhist_mode(game);
-    let result = search_with_searcher(&mut searcher, game, max_depth);
-    let stats = build_search_stats(&searcher);
-    result.map(|(m, eval)| (m, eval, stats))
+    // Use persistent global searcher (Stockfish pattern)
+    GLOBAL_SEARCHER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+
+        // Get or create the persistent searcher
+        let searcher = opt.get_or_insert_with(|| Searcher::new(time_limit_ms));
+
+        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        searcher.new_search();
+
+        // Update search parameters for this search
+        searcher.hot.time_limit_ms = time_limit_ms;
+        searcher.silent = silent;
+        searcher.thread_id = thread_id;
+        searcher.hot.stopped = false;
+        searcher.hot.timer.reset();
+        searcher.hot.min_depth_required = 1;
+
+        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
+        // (not 0, to give a small positive bias to moves that haven't been seen)
+        for row in searcher.low_ply_history.iter_mut() {
+            row.fill(97);
+        }
+
+        // Set correction mode based on variant (zero overhead during search)
+        searcher.set_corrhist_mode(game);
+
+        let result = search_with_searcher(searcher, game, max_depth);
+        let stats = build_search_stats(searcher);
+        result.map(|(m, eval)| (m, eval, stats))
+    })
 }
 
 /// MultiPV-enabled search that returns up to `multi_pv` best moves with their evaluations.
@@ -1209,43 +1262,54 @@ pub fn get_best_moves_multipv(
 
     let multi_pv = multi_pv.max(1);
 
-    // MultiPV = 1: Zero overhead path - just do normal search
-    if multi_pv == 1 {
-        let mut searcher = Searcher::new(time_limit_ms);
+    // Use persistent global searcher (Stockfish pattern)
+    GLOBAL_SEARCHER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+
+        // Get or create the persistent searcher
+        let searcher = opt.get_or_insert_with(|| Searcher::new(time_limit_ms));
+
+        // Increment TT generation for age-based replacement (like Stockfish's tt.new_search())
+        searcher.new_search();
+
+        // Update search parameters for this search
         searcher.hot.time_limit_ms = time_limit_ms;
         searcher.silent = silent;
+        searcher.hot.stopped = false;
+        searcher.hot.timer.reset();
+        searcher.hot.min_depth_required = 1;
+
+        // Stockfish: Fill lowPlyHistory with 97 at the start of iterative deepening
+        for row in searcher.low_ply_history.iter_mut() {
+            row.fill(97);
+        }
+
         searcher.set_corrhist_mode(game);
         searcher.move_rule_limit = game
             .game_rules
             .move_rule_limit
             .map_or(i32::MAX, |v| v as i32);
 
-        let mut lines: Vec<PVLine> = Vec::with_capacity(1);
-        if let Some((best_move, score)) = search_with_searcher(&mut searcher, game, max_depth) {
-            let pv = extract_pv(&searcher);
-            let depth = max_depth.min(searcher.hot.seldepth.max(1));
-            lines.push(PVLine {
-                mv: best_move,
-                score,
-                depth,
-                pv,
-            });
+        // MultiPV = 1: Zero overhead path - just do normal search
+        if multi_pv == 1 {
+            let mut lines: Vec<PVLine> = Vec::with_capacity(1);
+            if let Some((best_move, score)) = search_with_searcher(searcher, game, max_depth) {
+                let pv = extract_pv(searcher);
+                let depth = max_depth.min(searcher.hot.seldepth.max(1));
+                lines.push(PVLine {
+                    mv: best_move,
+                    score,
+                    depth,
+                    pv,
+                });
+            }
+            let stats = build_search_stats(searcher);
+            return MultiPVResult { lines, stats };
         }
-        let stats = build_search_stats(&searcher);
-        return MultiPVResult { lines, stats };
-    }
 
-    // MultiPV > 1: Search with special root handling to collect multiple best moves
-    let mut searcher = Searcher::new(time_limit_ms);
-    searcher.hot.time_limit_ms = time_limit_ms;
-    searcher.silent = silent;
-    searcher.set_corrhist_mode(game);
-    searcher.move_rule_limit = game
-        .game_rules
-        .move_rule_limit
-        .map_or(i32::MAX, |v| v as i32);
-
-    get_best_moves_multipv_impl(&mut searcher, game, max_depth, multi_pv, silent)
+        // MultiPV > 1: Search with special root handling to collect multiple best moves
+        get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent)
+    })
 }
 
 fn get_best_moves_multipv_impl(
@@ -1310,7 +1374,6 @@ fn get_best_moves_multipv_impl(
     // Iterative deepening
     for depth in 1..=max_depth {
         searcher.reset_for_iteration();
-        searcher.decay_history();
 
         // Time check at start of each iteration - but always complete depth 1
         if searcher.hot.min_depth_required == 0
@@ -1523,7 +1586,6 @@ fn get_best_moves_multipv_impl(
         searcher.pv_length[0] = 1;
     }
 
-    searcher.tt.increment_age();
     let stats = build_search_stats(searcher);
     MultiPVResult {
         lines: best_lines,
@@ -3297,14 +3359,6 @@ mod tests {
         let pv = extract_pv(&searcher);
         // PV should be empty for a fresh searcher
         assert!(pv.is_empty());
-    }
-
-    // ======================== With Global Searcher Tests ========================
-
-    #[test]
-    fn test_with_global_searcher() {
-        let result = with_global_searcher(1000, true, |searcher| searcher.tt.capacity());
-        assert!(result > 0);
     }
 
     // ======================== Reset Search State Tests ========================

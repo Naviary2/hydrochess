@@ -506,42 +506,58 @@ impl TranspositionTable {
         let ply = params.ply;
 
         // Adjust mate scores for storage
-        // Adjust mate scores for storage
         let adjusted_score = value_to_tt(score, ply);
 
         let idx = self.bucket_index(hash);
         let generation = self.generation;
         let bucket = &mut self.buckets[idx];
 
-        // Prepare the new entry
-        let new_entry = TTEntry {
-            key: hash, // Store full 64-bit key
-            depth: depth as u8,
-            gen_bound: TTEntry::pack_gen_bound(generation, flag),
-            score: adjusted_score,
-            _padding: [0; 10],
-            tt_move: best_move.as_ref().map_or(TTMove::none(), TTMove::from_move),
-        };
-
-        // Find the best slot to use
+        // Find the best slot to use (search for existing entry or worst victim)
         let mut replace_idx = 0;
         let mut worst_score = i32::MAX;
 
-        for (i, entry) in bucket.entries.iter().enumerate() {
-            // If we find our own position, always replace it
+        for (i, entry) in bucket.entries.iter_mut().enumerate() {
+            // If we find our own position
             if entry.key == hash {
-                // Only replace if new info is "better" (deeper or same depth with better bound)
-                if depth >= entry.depth as usize || flag == TTFlag::Exact {
+                // Stockfish: Preserve the old ttmove if we don't have a new one
+                let move_to_store = if best_move.is_some() {
+                    best_move.as_ref().map_or(TTMove::none(), TTMove::from_move)
+                } else {
+                    // Keep the old move
+                    entry.tt_move
+                };
+
+                // Stockfish replacement condition (line 101):
+                // b == BOUND_EXACT || d - OFFSET + 2*pv > depth8 - 4 || relative_age != 0
+                // PV bonus = +2 for exact bounds, threshold = old_depth - 4
+                let pv_bonus = if flag == TTFlag::Exact { 2 } else { 0 };
+                let new_adjusted_depth = depth as i32 + pv_bonus;
+                let old_threshold = entry.depth as i32 - 4;
+
+                // Replace if: exact bound, or new depth high enough, or entry is aged
+                let relative_age = (generation.wrapping_sub(entry.generation())) & 0x3F;
+                if flag == TTFlag::Exact || new_adjusted_depth > old_threshold || relative_age != 0
+                {
                     if entry.is_empty() {
                         self.used += 1;
                     }
-                    bucket.entries[i] = new_entry;
+                    *entry = TTEntry {
+                        key: hash,
+                        depth: depth as u8,
+                        gen_bound: TTEntry::pack_gen_bound(generation, flag),
+                        score: adjusted_score,
+                        _padding: [0; 10],
+                        tt_move: move_to_store,
+                    };
+                } else if entry.depth >= 5 && entry.flag() != TTFlag::Exact {
+                    // Stockfish (line 113-114): Soft aging - decrement depth
+                    // for deep non-exact entries to make them easier to replace later
+                    entry.depth = entry.depth.saturating_sub(1);
                 }
                 return;
             }
 
             // Calculate replacement priority score (lower = more replaceable)
-            // Inlined to avoid borrow issues
             let entry_score = Self::calculate_replacement_score(entry, generation);
 
             if entry_score < worst_score {
@@ -550,12 +566,20 @@ impl TranspositionTable {
             }
         }
 
-        // Calculate value of the new entry to see if it's worth storing
-        // New entry has age_diff = 0
+        // Prepare the new entry
+        let new_entry = TTEntry {
+            key: hash,
+            depth: depth as u8,
+            gen_bound: TTEntry::pack_gen_bound(generation, flag),
+            score: adjusted_score,
+            _padding: [0; 10],
+            tt_move: best_move.as_ref().map_or(TTMove::none(), TTMove::from_move),
+        };
+
+        // Calculate value of the new entry
         let new_score = Self::calculate_replacement_score(&new_entry, generation);
 
-        // Replace the least valuable entry ONLY if the new entry is more valuable
-        // or if the victim is empty (worst_score for empty is i32::MIN)
+        // Replace if new entry is more valuable OR victim is empty/aged
         if new_score >= worst_score {
             if bucket.entries[replace_idx].is_empty() {
                 self.used += 1;
