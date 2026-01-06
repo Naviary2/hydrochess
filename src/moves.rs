@@ -40,6 +40,7 @@ struct CrossRayContext<'a> {
     piece_type: PieceType,
     enemy_wiggle: i64,
     friend_wiggle: i64,
+    enemy_king_pos: Option<Coordinate>,
 }
 
 pub struct SlidingMoveContext<'a> {
@@ -1972,6 +1973,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
     let piece_type = ctx.piece_type;
     let enemy_wiggle = ctx.enemy_wiggle;
     let friend_wiggle = ctx.friend_wiggle;
+    let enemy_king_pos = ctx.enemy_king_pos;
 
     // Check OUR piece's attack capabilities
     let our_attacks_ortho = matches!(
@@ -2029,6 +2031,16 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
             }
         }
 
+        let is_king = is_enemy && enemy_king_pos.is_some_and(|k| k.x == px && k.y == py)
+            || (is_enemy && p.piece_type() == PieceType::King); // Fallback check if pos not passed
+
+        // For enemy KING, we ignore max_dist to ensure we find check moves
+        let current_max_dist = if is_king {
+            2_000_000_000
+        } else {
+            max_dist
+        };
+
         let wiggle = if is_enemy {
             enemy_wiggle
         } else {
@@ -2043,7 +2055,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                 let num = px - from.x;
                 if num.signum() == dir_x.signum() && num % dir_x == 0 {
                     let d = num / dir_x;
-                    if d > 0 && d <= max_dist {
+                    if d > 0 && d <= current_max_dist {
                         let sy = from.y + d * dir_y;
                         if py != sy
                             && let Some((_nearest_y, _)) = indices
@@ -2057,7 +2069,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                             // Wiggle allowed for orthogonal
                             for w in -wiggle..=wiggle {
                                 let wd = d + w;
-                                if wd > 0 && wd <= max_dist {
+                                if wd > 0 && wd <= current_max_dist {
                                     out.push(wd);
                                 }
                             }
@@ -2071,7 +2083,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                 let num = py - from.y;
                 if num.signum() == dir_y.signum() && num % dir_y == 0 {
                     let d = num / dir_y;
-                    if d > 0 && d <= max_dist {
+                    if d > 0 && d <= current_max_dist {
                         let sx = from.x + d * dir_x;
                         if px != sx
                             && let Some((_nearest_x, _)) = indices
@@ -2085,7 +2097,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                             // Wiggle allowed for orthogonal
                             for w in -wiggle..=wiggle {
                                 let wd = d + w;
-                                if wd > 0 && wd <= max_dist {
+                                if wd > 0 && wd <= current_max_dist {
                                     out.push(wd);
                                 }
                             }
@@ -2103,7 +2115,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                 let num = (px - py) - (from.x - from.y);
                 if num.signum() == ray_diff.signum() && num % ray_diff == 0 {
                     let d = num / ray_diff;
-                    if d > 0 && d <= max_dist {
+                    if d > 0 && d <= current_max_dist {
                         let sx = from.x + d * dir_x;
                         if px != sx
                             && let Some((_nearest_x, _)) = indices
@@ -2126,7 +2138,7 @@ fn find_cross_ray_targets_into(ctx: &CrossRayContext, dir_x: i64, dir_y: i64, ou
                 let num = (px + py) - (from.x + from.y);
                 if num.signum() == ray_sum.signum() && num % ray_sum == 0 {
                     let d = num / ray_sum;
-                    if d > 0 && d <= max_dist {
+                    if d > 0 && d <= current_max_dist {
                         let sx = from.x + d * dir_x;
                         if px != sx
                             && let Some((_nearest_x, _)) = indices
@@ -2169,12 +2181,10 @@ fn generate_sliding_moves_impl(
 
     let our_color = piece.color();
 
-    // Distance-aware wiggle calculation:
-    // Close range (1-10): full wiggle
-    // Far range (11+): no wiggle (only direct targets)
+    // Royal pieces: ALWAYS full wiggle (for safety/mate)
     #[inline(always)]
-    fn distance_wiggle(dist: i64, is_enemy: bool, base_wiggle: i64) -> i64 {
-        if dist <= 10 {
+    fn distance_wiggle(dist: i64, is_enemy: bool, base_wiggle: i64, is_royal: bool) -> i64 {
+        if is_royal || dist <= 10 {
             base_wiggle
         } else if is_enemy {
             1
@@ -2313,7 +2323,9 @@ fn generate_sliding_moves_impl(
                             } else {
                                 FRIEND_WIGGLE
                             };
-                            let wiggle = distance_wiggle(piece_dist, is_enemy, base_wiggle);
+                            let is_royal = piece.piece_type().is_royal();
+                            let wiggle =
+                                distance_wiggle(piece_dist, is_enemy, base_wiggle, is_royal);
 
                             for w in -wiggle..=wiggle {
                                 let d = piece_dist + w;
@@ -2343,7 +2355,9 @@ fn generate_sliding_moves_impl(
                             } else {
                                 FRIEND_WIGGLE
                             };
-                            let wiggle = distance_wiggle(piece_dist, is_enemy, base_wiggle);
+                            let is_royal = piece.piece_type().is_royal();
+                            let wiggle =
+                                distance_wiggle(piece_dist, is_enemy, base_wiggle, is_royal);
 
                             for w in -wiggle..=wiggle {
                                 let d = piece_dist + w;
@@ -2385,7 +2399,9 @@ fn generate_sliding_moves_impl(
                             } else {
                                 FRIEND_WIGGLE
                             };
-                            let wiggle = distance_wiggle(piece_dist, is_enemy, base_wiggle);
+                            let is_royal = piece.piece_type().is_royal();
+                            let wiggle =
+                                distance_wiggle(piece_dist, is_enemy, base_wiggle, is_royal);
 
                             for w in -wiggle..=wiggle {
                                 let d = piece_dist + w;
@@ -2409,6 +2425,7 @@ fn generate_sliding_moves_impl(
                     piece_type: piece.piece_type(),
                     enemy_wiggle: ENEMY_WIGGLE,
                     friend_wiggle: FRIEND_WIGGLE,
+                    enemy_king_pos: enemy_king_pos.cloned(),
                 };
                 find_cross_ray_targets_into(&cr_ctx, dir_x, dir_y, &mut cross_targets);
                 target_dists.extend(cross_targets);
