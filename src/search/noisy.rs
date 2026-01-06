@@ -679,8 +679,14 @@ fn negamax_noisy(ctx: &mut NegamaxNoisyContext) -> i32 {
                 continue;
             }
 
+            // Fast legality check (skips is_move_illegal for non-pinned pieces)
+            let fast_legal = game.is_legal_fast(m, in_check);
+            if let Ok(false) = fast_legal {
+                continue;
+            }
+
             let undo = game.make_move(m);
-            if game.is_move_illegal() {
+            if fast_legal.is_err() && game.is_move_illegal() {
                 game.undo_move(m, undo);
                 continue;
             }
@@ -1170,9 +1176,15 @@ fn quiescence_noisy(
             }
         }
 
+        // Fast legality check (skips is_move_illegal for non-pinned pieces)
+        let fast_legal = game.is_legal_fast(m, in_check);
+        if let Ok(false) = fast_legal {
+            continue;
+        }
+
         let undo = game.make_move(m);
 
-        if game.is_move_illegal() {
+        if fast_legal.is_err() && game.is_move_illegal() {
             game.undo_move(m, undo);
             continue;
         }

@@ -2106,8 +2106,14 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 continue;
             }
 
+            // Fast legality check (skips is_move_illegal for non-pinned pieces)
+            let fast_legal = game.is_legal_fast(m, in_check);
+            if let Ok(false) = fast_legal {
+                continue;
+            }
+
             let undo = game.make_move(m);
-            if game.is_move_illegal() {
+            if fast_legal.is_err() && game.is_move_illegal() {
                 game.undo_move(m, undo);
                 continue;
             }
@@ -2364,8 +2370,14 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     break;
                 }
 
+                // Fast legality check (skips is_move_illegal for non-pinned pieces)
+                let fast_legal = game.is_legal_fast(&se_m, in_check);
+                if let Ok(false) = fast_legal {
+                    continue;
+                }
+
                 let se_undo = game.make_move(&se_m);
-                if game.is_move_illegal() {
+                if fast_legal.is_err() && game.is_move_illegal() {
                     game.undo_move(&se_m, se_undo);
                     continue;
                 }
@@ -2903,10 +2915,9 @@ fn quiescence(
     const DELTA_MARGIN: i32 = 200;
 
     for m in &tactical_moves {
-        // SEE-based pruning and delta pruning for captures when not in check.
-        // static_exchange_eval returns 0 for non-captures or special cases
-        // (e.g. en passant target squares), so it is safe to call unconditionally.
+        // Filter: If not in check, apply SEE and delta pruning
         if !in_check {
+            // See gain for the capture/promotion
             let see_gain = static_exchange_eval(game, m);
 
             // Prune clearly losing captures that don't even break even materially.
@@ -2921,9 +2932,15 @@ fn quiescence(
             }
         }
 
+        // Fast legality check (skips is_move_illegal for non-pinned pieces)
+        let fast_legal = game.is_legal_fast(m, in_check);
+        if let Ok(false) = fast_legal {
+            continue;
+        }
+
         let undo = game.make_move(m);
 
-        if game.is_move_illegal() {
+        if fast_legal.is_err() && game.is_move_illegal() {
             game.undo_move(m, undo);
             continue;
         }
