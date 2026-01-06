@@ -148,7 +148,6 @@ const SLIDER_NET_BONUS: i32 = 20;
 // Open rays are extremely dangerous on infinite boards - sliders can attack from anywhere.
 const KING_RING_MISSING_PENALTY: i32 = 45;
 const KING_OPEN_RAY_PENALTY: i32 = 30; // Open rays are very dangerous on infinite boards
-const KING_ENEMY_SLIDER_PENALTY: i32 = 65; // Per Texel tuning suggestions
 
 // King pawn shield heuristics
 // Reward having pawns in front of the king and penalize the king walking
@@ -1604,8 +1603,10 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
         safety -= excess * KING_EXPOSURE_PENALTY_PER_DIR;
     }
 
-    // 3. Enemy sliders attacking king zone
-    let mut enemy_slider_threats = 0;
+    // 3. Enemy sliders attacking king zone (with weighted penalties)
+    // Only counts sliders with actual line-of-sight to king - essential for infinite chess
+    let mut slider_threat_weight = 0i32;
+    let mut slider_threat_count = 0i32;
     for (cx, cy, tile) in game.board.tiles.iter() {
         let occ = if color == PlayerColor::White {
             tile.occ_black
@@ -1646,12 +1647,35 @@ fn evaluate_king_shelter(game: &GameState, king: &Coordinate, color: PlayerColor
             // Now use the O(log n) line-of-sight check via spatial indices
             let from = Coordinate { x, y };
             if is_clear_line_between_fast(&game.spatial_indices, &from, king) {
-                enemy_slider_threats += 1;
+                // Weight by piece type: Queen/Amazon > Rook/Chancellor > Bishop/Archbishop
+                let packed = tile.piece[idx];
+                let weight = if packed != 0 {
+                    let piece = crate::board::Piece::from_packed(packed);
+                    match piece.piece_type() {
+                        PieceType::Queen | PieceType::RoyalQueen | PieceType::Amazon => 4,
+                        PieceType::Rook | PieceType::Chancellor => 3,
+                        PieceType::Bishop | PieceType::Archbishop => 2,
+                        PieceType::Knightrider => 2,
+                        _ => 2,
+                    }
+                } else {
+                    2
+                };
+                slider_threat_weight += weight;
+                slider_threat_count += 1;
             }
         }
     }
-    safety -= enemy_slider_threats * KING_ENEMY_SLIDER_PENALTY;
-    bump_feat!(king_enemy_slider_penalty, -enemy_slider_threats);
+
+    // Non-linear penalty: multiple sliders attacking is exponentially worse
+    let base_penalty = slider_threat_weight * 15;
+    let coordination_bonus = if slider_threat_count >= 2 {
+        slider_threat_weight * 8
+    } else {
+        0
+    };
+    safety -= base_penalty + coordination_bonus;
+    bump_feat!(king_enemy_slider_penalty, -slider_threat_count);
 
     /*
     // 4. King virtual mobility: safe squares the king can move to
