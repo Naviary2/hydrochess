@@ -78,12 +78,12 @@ pub struct GameRules {
     pub promotion_types: Option<Vec<PieceType>>, // Pre-converted promotion piece types (fast)
     pub promotions_allowed: Option<Vec<String>>, // Piece type codes (only for serialization)
     pub move_rule_limit: Option<u32>,            // 50-move rule limit in halfmoves (default 100)
-    /// Win condition for White: what Black must do to defeat White.
-    /// E.g., "checkmate" means Black must checkmate White to win.
+    /// Win condition for White: what White must do to beat Black.
+    /// E.g., "checkmate" means White must checkmate Black to win.
     #[serde(skip)]
     pub white_win_condition: WinCondition,
-    /// Win condition for Black: what White must do to defeat Black.
-    /// E.g., "allpiecescaptured" means White must capture all of Black's pieces to win.
+    /// Win condition for Black: what Black must do to beat White.
+    /// E.g., "allpiecescaptured" means Black must capture all of White's pieces to win.
     #[serde(skip)]
     pub black_win_condition: WinCondition,
 }
@@ -1125,52 +1125,59 @@ impl GameState {
     /// the opponent wins by capturing pieces, not by giving checkmate, so checks
     /// don't need to be escaped (the king can be captured).
     ///
-    /// The logic: YOUR OWN win condition determines if YOU must escape check.
-    /// - Your win condition specifies what the opponent must do to beat you.
-    /// - If your win condition is Checkmate → opponent beats you via checkmate → you must escape
-    /// - If your win condition is capture-based → opponent beats you via capture → you don't need to escape
+    /// The logic: The OPPONENT's win condition determines if WE must escape check.
+    /// - white_win_condition = how White beats Black (what White must do to win)
+    /// - black_win_condition = how Black beats White (what Black must do to win)
+    /// - If White is to move: Black beats White via black_win_condition → if Checkmate, White must escape
+    /// - If Black is to move: White beats Black via white_win_condition → if Checkmate, Black must escape
     #[inline]
     pub fn must_escape_check(&self) -> bool {
-        // Our own win condition tells us how the opponent beats us
-        let our_win_condition = match self.turn {
-            PlayerColor::White => self.game_rules.white_win_condition,
-            PlayerColor::Black => self.game_rules.black_win_condition,
-            PlayerColor::Neutral => return true, // Safe default
+        // The OPPONENT's win condition tells us how they beat us
+        // If they beat us via checkmate, we must escape check
+        let opponent_win_condition = match self.turn {
+            PlayerColor::White => self.game_rules.black_win_condition, // How Black beats White
+            PlayerColor::Black => self.game_rules.white_win_condition, // How White beats Black
+            PlayerColor::Neutral => return true,                       // Safe default
         };
-        our_win_condition.requires_check_evasion()
+        opponent_win_condition.requires_check_evasion()
     }
 
     /// Returns true if the given color's king can be captured (no check evasion needed).
     /// This is the opposite of must_escape_check but for a specific color.
+    ///
+    /// The OPPONENT's win condition against this color determines if the king can be captured:
+    /// - If White's king can be captured: check black_win_condition (how Black beats White)
+    /// - If Black's king can be captured: check white_win_condition (how White beats Black)
     #[inline]
     pub fn king_capturable(&self, color: PlayerColor) -> bool {
-        // The color's own win condition tells us if their king can be captured
-        // (i.e., if their opponent wins via capture rather than checkmate)
-        let win_condition = match color {
-            PlayerColor::White => self.game_rules.white_win_condition,
-            PlayerColor::Black => self.game_rules.black_win_condition,
+        // The OPPONENT's win condition tells us how they beat this color
+        // If they beat via capture (not checkmate), the king can be captured
+        let opponent_win_condition = match color {
+            PlayerColor::White => self.game_rules.black_win_condition, // How Black beats White
+            PlayerColor::Black => self.game_rules.white_win_condition, // How White beats Black
             PlayerColor::Neutral => return false,
         };
-        !win_condition.requires_check_evasion()
+        !opponent_win_condition.requires_check_evasion()
     }
 
     /// Check if the side-to-move has lost by royal capture.
     /// This is only relevant for RoyalCapture and AllRoyalsCaptured win conditions.
     /// Returns true if the opponent (who just moved) has captured all required royals.
     ///
-    /// Zero overhead: This method checks the win condition first and returns false
-    /// immediately for Checkmate and AllPiecesCaptured variants.
+    /// The OPPONENT's win condition against us determines if we can lose by royal capture:
+    /// - If White is to move: check black_win_condition (how Black beats White)
+    /// - If Black is to move: check white_win_condition (how White beats Black)
     #[inline]
     pub fn has_lost_by_royal_capture(&self) -> bool {
-        // Get the side-to-move's win condition (what the opponent must do to beat them)
-        let our_win_condition = match self.turn {
-            PlayerColor::White => self.game_rules.white_win_condition,
-            PlayerColor::Black => self.game_rules.black_win_condition,
+        // The OPPONENT's win condition tells us how they beat us
+        let opponent_win_condition = match self.turn {
+            PlayerColor::White => self.game_rules.black_win_condition, // How Black beats White
+            PlayerColor::Black => self.game_rules.white_win_condition, // How White beats Black
             PlayerColor::Neutral => return false,
         };
 
-        // Zero overhead: only check for royal loss if win condition is royal-capture based
-        if !our_win_condition.is_royal_capture_based() {
+        // Only check for royal loss if opponent's win condition is royal-capture based
+        if !opponent_win_condition.is_royal_capture_based() {
             return false;
         }
 

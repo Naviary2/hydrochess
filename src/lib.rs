@@ -413,8 +413,8 @@ impl Engine {
             });
 
             // Parse win conditions - use the first condition from each side's array.
-            // white_win_condition = what Black must do to beat White
-            // black_win_condition = what White must do to beat Black
+            // white_win_condition = what White must do to beat Black (how White wins)
+            // black_win_condition = what Black must do to beat White (how Black wins)
             let (white_win_condition, black_win_condition) =
                 if let Some(wc) = js_rules.win_conditions {
                     let white_wc = wc
@@ -446,12 +446,15 @@ impl Engine {
             game::GameRules::default()
         };
 
-        // If a side has no royal pieces, their win condition against them MUST be AllPiecesCaptured.
+        // If a side has no royal pieces, the OPPONENT can't checkmate them, so the
+        // opponent's win condition must be AllPiecesCaptured instead of Checkmate.
+        // - If White has no royal: Black beats White via AllPiecesCaptured → set black_win_condition
+        // - If Black has no royal: White beats Black via AllPiecesCaptured → set white_win_condition
         if !white_has_royal {
-            game_rules.white_win_condition = game::WinCondition::AllPiecesCaptured;
+            game_rules.black_win_condition = game::WinCondition::AllPiecesCaptured;
         }
         if !black_has_royal {
-            game_rules.black_win_condition = game::WinCondition::AllPiecesCaptured;
+            game_rules.white_win_condition = game::WinCondition::AllPiecesCaptured;
         }
 
         // Precompute effective promotion ranks and dynamic back ranks once per
