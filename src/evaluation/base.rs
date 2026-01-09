@@ -77,6 +77,15 @@ macro_rules! bump_feat {
 }
 
 // ==================== Piece Values ====================
+const KNIGHT: i32 = 250;
+const BISHOP: i32 = KNIGHT + 200;
+const ROOK: i32 = KNIGHT + BISHOP - 50;
+const GUARD: i32 = 220;
+const CENTAUR: i32 = 550;
+const QUEEN: i32 = ROOK * 2 + COMPOUND_BONUS;
+
+const COMPOUND_BONUS: i32 = 50;
+const ROYAL_BONUS: i32 = 50;
 
 pub fn get_piece_value(piece_type: PieceType) -> i32 {
     match piece_type {
@@ -84,13 +93,13 @@ pub fn get_piece_value(piece_type: PieceType) -> i32 {
         PieceType::Void => 0,
         PieceType::Obstacle => 0,
 
-        // orthodox - adjusted for infinite chess where sliders dominate (baseline scale)
+        // orthodox - adjusted for infinite chess where sliders dominate
         PieceType::Pawn => 100,
-        PieceType::Knight => 250, // Weak in infinite chess - limited range
-        PieceType::Bishop => 450, // Strong slider - worth knight + 1.5 pawns
-        PieceType::Rook => 650,   // Very strong in infinite chess
-        PieceType::Queen | PieceType::RoyalQueen => 1350, // > 2 rooks
-        PieceType::King | PieceType::Guard => 220,
+        PieceType::Knight => KNIGHT, // Weak in infinite chess
+        PieceType::Bishop => BISHOP, // Strong slider
+        PieceType::Rook => ROOK,     // Very strong in infinite chess
+        PieceType::Queen => QUEEN,   // > 2 rooks
+        PieceType::Guard => GUARD,
 
         // short / medium range
         PieceType::Camel => 270,   // (1,3) leaper
@@ -99,14 +108,16 @@ pub fn get_piece_value(piece_type: PieceType) -> i32 {
 
         // riders / compounds
         PieceType::Knightrider => 700,
-        PieceType::Amazon => 1550,
+        PieceType::Amazon => QUEEN + KNIGHT,
         PieceType::Hawk => 600,
-        PieceType::Chancellor => 1000,
+        PieceType::Chancellor => ROOK + KNIGHT + 100,
         PieceType::Archbishop => 900,
-        PieceType::Centaur => 550,
+        PieceType::Centaur => CENTAUR,
 
-        // royal compound
-        PieceType::RoyalCentaur => 620,
+        // royals
+        PieceType::King => GUARD + ROYAL_BONUS,
+        PieceType::RoyalQueen => QUEEN + ROYAL_BONUS,
+        PieceType::RoyalCentaur => CENTAUR + ROYAL_BONUS,
 
         // special infinite-board pieces
         PieceType::Rose => 450,
