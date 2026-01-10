@@ -141,8 +141,15 @@ fn search_with_searcher_noisy(
                 break;
             }
 
-            // Proactive stop: don't start next depth if > 50% budget spent
-            if searcher.hot.total_time_ms > 0.0 && elapsed > searcher.hot.total_time_ms * 0.50 {
+            // Proactive stop: don't start next depth if most budget spent
+            let proactive_threshold = if searcher.hot.is_soft_limit {
+                0.90
+            } else {
+                0.50
+            };
+            if searcher.hot.total_time_ms > 0.0
+                && elapsed > searcher.hot.total_time_ms * proactive_threshold
+            {
                 break;
             }
         }
@@ -216,8 +223,15 @@ fn search_with_searcher_noisy(
             let instability = (1.02 + 2.14 * searcher.hot.tot_best_move_changes).min(2.5);
 
             // Calculate totalTime with all factors
-            let total_factors =
+            let mut total_factors =
                 (falling_eval * reduction * instability * high_best_move_effort).clamp(0.5, 2.5);
+
+            // If it's a soft limit (like fixed time per move), we want to use
+            // nearly all of the time, not stop early to save time.
+            if searcher.hot.is_soft_limit {
+                total_factors = total_factors.max(0.98);
+            }
+
             let mut total_time = searcher.hot.optimum_time_ms as f64 * total_factors;
 
             // Cap for single legal move - assuming multi-move context for noisy

@@ -416,10 +416,10 @@ impl SearcherHot {
     ///
     /// Time management works differently based on `is_soft_limit`:
     /// - **Soft limit** (untimed game with suggested time): The engine can freely
-    ///   use up to `maximum_time_ms` if beneficial. Optimum is set higher (~60%)
+    ///   use up to `maximum_time_ms` if beneficial. Optimum is set higher
     ///   because there's no risk of flagging, and max is close to the full budget.
     /// - **Hard limit** (timed game): The engine must be conservative. Optimum is
-    ///   set lower (~40%) and max is capped to leave headroom for dynamic extensions
+    ///   set lower and max is capped to leave headroom for dynamic extensions
     ///   in critical positions.
     ///
     /// The dynamic factors (fallingEval up to 1.7x, instability up to ~2.5x, etc.)
@@ -888,11 +888,11 @@ impl Searcher {
                 }
             }
 
-            // 3. Marginal Depth Creep Safety:
-            // If the current depth ALONE has consumed > 30% of the move budget, return.
-            // This prevents "marginal depth creep" where one depth takes significantly longer than others.
-            if self.hot.total_time_ms > 0.0
-                && elapsed - self.hot.iter_start_ms > self.hot.total_time_ms * 0.30
+            // If the current depth ALONE has consumed > 50% of the move budget, return.
+            // ONLY for hard limits. For soft limits (fixed time), we want to use all time.
+            if !self.hot.is_soft_limit
+                && self.hot.total_time_ms > 0.0
+                && elapsed - self.hot.iter_start_ms > self.hot.total_time_ms * 0.50
             {
                 self.hot.stopped = true;
                 return true;
@@ -1182,9 +1182,17 @@ fn search_with_searcher(
                 break;
             }
 
-            // Proactive stop: if we've already spent > 50% of our
-            // total budgeted time, don't start the next depth, as it's unlikely to finish.
-            if searcher.hot.total_time_ms > 0.0 && elapsed > searcher.hot.total_time_ms * 0.50 {
+            // Proactive stop: don't start next depth if most budget spent
+            // For hard limits (timed games), we are more conservative (50%).
+            // For soft limits (fixed time), we push much closer (90%) to use all time.
+            let proactive_threshold = if searcher.hot.is_soft_limit {
+                0.90
+            } else {
+                0.50
+            };
+            if searcher.hot.total_time_ms > 0.0
+                && elapsed > searcher.hot.total_time_ms * proactive_threshold
+            {
                 break;
             }
         }
@@ -1310,8 +1318,15 @@ fn search_with_searcher(
             let instability = (1.02 + 2.14 * searcher.hot.tot_best_move_changes).min(2.5);
 
             // Calculate totalTime with all factors
-            let total_factors =
+            let mut total_factors =
                 (falling_eval * reduction * instability * high_best_move_effort).clamp(0.5, 2.5);
+
+            // If it's a soft limit (like fixed time per move), we want to use
+            // nearly all of the time, not stop early to save time.
+            if searcher.hot.is_soft_limit {
+                total_factors = total_factors.max(0.98);
+            }
+
             let mut total_time = searcher.hot.optimum_time_ms as f64 * total_factors;
 
             // Cap for single legal move
