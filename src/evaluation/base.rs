@@ -142,12 +142,6 @@ pub fn get_centrality_weight(piece_type: PieceType) -> i64 {
     }
 }
 
-// Rook heuristics
-// Slightly increased based on Texel tuning (optimum around ~37), but kept
-// moderate so rooks are encouraged to activate without over-penalizing
-// reasonable defensive placements.
-const ROOK_IDLE_PENALTY: i32 = 20;
-
 // King attack heuristics - back near original scale
 // These should be impactful but not dominate material.
 const BEHIND_KING_BONUS: i32 = 40;
@@ -1032,13 +1026,6 @@ pub fn evaluate_rook(
             let excess = (cheb - FAR_SLIDER_CHEB_RADIUS).min(FAR_SLIDER_CHEB_MAX_EXCESS) as i32;
             bonus -= excess * FAR_ROOK_PENALTY;
         }
-    }
-
-    // Penalize completely idle rooks stuck behind both own and enemy pawns on their file.
-    let (own_pawns_on_file, enemy_pawns_on_file) = count_pawns_on_file(game, x, color);
-    if own_pawns_on_file > 0 && enemy_pawns_on_file > 0 {
-        bonus -= ROOK_IDLE_PENALTY;
-        bump_feat!(rook_idle_penalty, -1);
     }
 
     bonus
