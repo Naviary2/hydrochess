@@ -105,6 +105,28 @@ cargo llvm-cov --lib
 
 ---
 
+## 5. Multi-threaded Build (Lazy SMP)
+
+The engine supports parallel search (Lazy SMP) in WebAssembly. This requires a nightly Rust toolchain and specific compilation flags to enable shared memory and atomics.
+
+### Setup for Multithreading
+
+1.  **Install Nightly Rust**:
+    ```bash
+    rustup toolchain install nightly
+    rustup component add rust-src --toolchain nightly
+    ```
+
+2.  **Build with Helper Script**:
+    Use the provided `build_mt.js` script to build the engine with the correct flags and feature set:
+    ```bash
+    node build_mt.js
+    ```
+
+This script handles the complex configuration required for WASM threads and uses `wasm-pack` to generate the correct JS/WASM bindings in the `pkg/` directory.
+
+---
+
 ## IDE Setup
 
 ### VS Code

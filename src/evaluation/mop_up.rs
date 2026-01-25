@@ -1,15 +1,14 @@
-// Mop-Up Evaluation - Ultra-optimized version
+// Mop-Up Evaluation
 //
-// Specialized endgame evaluation for positions where opponent has few pieces.
-// Only runs when:
-// - Opponent has < 20% of starting non-pawn pieces (pawns NOT counted)
-// - Winning side has at least one non-pawn piece
+// Specialized endgame logic for positions where one side has a significant
+// material advantage. It aims to drive the enemy king into a corner or
+// "cage" it to facilitate checkmate.
 
 use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
 use crate::moves::{SpatialIndices, is_square_attacked};
 
-/// Don't run mop-up eval if opponent has >= 20% of starting non-pawn pieces
+/// Threshold for disabling mop-up evaluation if the opponent still has significant material.
 const MOP_UP_THRESHOLD_PERCENT: u32 = 20;
 
 #[derive(Clone, Copy)]
@@ -18,9 +17,8 @@ struct SliderInfo {
     y: i64,
 }
 
-/// Detects if the enemy king is trapped in a "local" cage of attacked squares.
-/// Uses a 32x32 local bitboard centered on the enemy king.
-/// Returns (is_caged, reached_area)
+/// Detects if the enemy king is trapped within a localized "cage" of attacked squares.
+/// Returns whether a cage exists and the total reachable area for the king.
 #[inline]
 fn find_bitboard_cage(
     board: &Board,
@@ -34,7 +32,7 @@ fn find_bitboard_cage(
     let origin_x = enemy_king.x - 16;
     let origin_y = enemy_king.y - 16;
 
-    // 1. Mark forbidden squares (attacked, occupied by our piece, or out of bounds)
+    // 1. Identify forbidden squares (attacked, occupied, or out of bounds)
     let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
 
     for (local_y, forbidden_row) in forbidden.iter_mut().enumerate() {
@@ -112,7 +110,7 @@ fn find_bitboard_cage(
         }
     }
 
-    // 3. If we finished without hitting perimeter, it's a cage!
+    // 3. Successful fill without hitting the perimeter indicates a contained cage
     let mut area = 0u32;
     for row in reachable.iter() {
         area += row.count_ones();
@@ -121,7 +119,7 @@ fn find_bitboard_cage(
     (area > 0 && area < 1000, area)
 }
 
-// ==================== Entry Points ====================
+// --- Utility Functions ---
 
 /// Check if a side only has a king (no other pieces)
 #[inline(always)]
@@ -133,12 +131,8 @@ pub fn is_lone_king(game: &GameState, color: PlayerColor) -> bool {
     }
 }
 
-/// Calculate mop-up scaling factor (0-100). Returns None if:
-/// - Opponent has >= 20% of starting non-pawn pieces
-///
-///   - Winning side has no non-pawn pieces (only king/pawns)
-///
-/// Returns 10 (10% scale) if winning side has promotable pawns
+/// Calculates the mop-up scaling factor (0-100) based on remaining material.
+/// Mop-up is only active when the opponent's material is below the threshold.
 #[inline(always)]
 pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Option<u32> {
     // Count NON-PAWN pieces only (excluding king)
@@ -174,19 +168,17 @@ pub fn calculate_mop_up_scale(game: &GameState, losing_color: PlayerColor) -> Op
         return None;
     }
 
-    // Calculate percentage of NON-PAWN material remaining
-    let percent_remaining = (losing_pieces as u32 * 100) / (losing_starting as u32);
+    let percent_remaining = (losing_pieces as u32 * 100) / losing_starting as u32;
 
     if percent_remaining >= MOP_UP_THRESHOLD_PERCENT {
         return None;
     }
 
-    // Scale: 0% = 100, 20% = 0
+    // Scale linear regression from 100% (at 0% material) to 0% (at threshold)
     Some(100 - (percent_remaining * 100 / MOP_UP_THRESHOLD_PERCENT).min(100))
 }
 
-/// Legacy entry point - unscaled evaluation
-/// our_king can be None for checkmate practice positions
+/// Unscaled mop-up evaluation.
 #[inline(always)]
 pub fn evaluate_lone_king_endgame(
     game: &GameState,
@@ -197,8 +189,7 @@ pub fn evaluate_lone_king_endgame(
     evaluate_mop_up_core(game, our_king, enemy_king, winning_color)
 }
 
-/// Scaled mop-up evaluation - main entry point
-/// our_king can be None for checkmate practice positions
+/// Scaled mop-up evaluation.
 #[inline(always)]
 pub fn evaluate_mop_up_scaled(
     game: &GameState,
@@ -216,10 +207,9 @@ pub fn evaluate_mop_up_scaled(
     (raw * scale as i32) / 100
 }
 
-// ==================== Core Evaluation ====================
+// --- Core Evaluation ---
 
-/// Core mop-up evaluation - no allocations, minimal branching
-/// our_king can be None for checkmate practice positions
+/// Main logic for driving the enemy king to mate.
 #[inline(always)]
 fn evaluate_mop_up_core(
     game: &GameState,
@@ -229,7 +219,7 @@ fn evaluate_mop_up_core(
 ) -> i32 {
     let mut bonus: i32 = 0;
 
-    // When our_king is None, king approach bonuses will be 0
+    // Calculate distance between kings if applicable
     let (our_dx, our_dy, king_dist) = if let Some(ok) = our_king {
         let dx = ok.x - enemy_king.x;
         let dy = ok.y - enemy_king.y;
@@ -367,16 +357,14 @@ fn evaluate_mop_up_core(
 
         total_non_pawn_pieces += 1;
 
-        // Short-range pieces proximity bonus (knights, guards, etc.)
-        // CRITICAL: Make this strong enough to force leapers to approach enemy king
-        // ========== UNIVERSAL MOP-UP HEURISTICS (Placement & Checking) ==========
+        // Placement heuristics
         let pdx = x - enemy_x;
         let pdy = y - enemy_y;
 
         let on_back_x = (our_dx > 0 && pdx < 0) || (our_dx < 0 && pdx > 0);
         let on_back_y = (our_dy > 0 && pdy < 0) || (our_dy < 0 && pdy > 0);
 
-        // Reward Back Side Placement (Cutting Off Escape relative to our king)
+        // Reward cutting off escape relative to our king
         if on_back_x {
             bonus += 70;
         }
@@ -398,7 +386,7 @@ fn evaluate_mop_up_core(
             }
         }
 
-        // Check Detection & Directional Penalty
+        // Penalize checks that drive the enemy king to safer areas
         let is_checking = match pt {
             PieceType::Rook | PieceType::Chancellor => pdx == 0 || pdy == 0,
             PieceType::Bishop | PieceType::Archbishop => pdx.abs() == pdy.abs(),
@@ -428,7 +416,7 @@ fn evaluate_mop_up_core(
             leaper_count += 1;
             let dist = pdx.abs().max(pdy.abs()); // Chebyshev distance
 
-            // Strong bonus for being close - MUST outweigh other mop-up bonuses
+            // Heavy proximity bonus to ensure short-range pieces engage
             if dist <= 3 {
                 short_range_bonus += 160; // Very close - huge bonus
             } else if dist <= 6 {
@@ -449,15 +437,11 @@ fn evaluate_mop_up_core(
     let total_sliders = ortho_count.max(diag_count);
     let few_pieces = total_non_pawn_pieces <= 2;
 
-    // Short-range bonus multiplied when few sliders (leapers are critical)
-    // Scale this even further if we've detected a cage to bring leapers in for the kill
     bonus += short_range_bonus * if few_pieces { 5 } else { 3 };
 
-    // Determine if we have "overwhelming material" (Cage-Capable)
-    // Absolute power pieces or absolute swarm
     let is_overwhelming = queen_count >= 1 || amazon_count >= 1 || total_non_pawn_pieces >= 5;
 
-    // ========== STRATEGY BRANCHING ==========
+    // --- Strategy Selection ---
     let losing_color = winning_color.opponent();
     let is_opponent_lone_king = is_lone_king(game, losing_color);
     let mut cage_score = 0;
@@ -498,7 +482,7 @@ fn evaluate_mop_up_core(
         };
 
         if is_overwhelming {
-            // CASE A: OVERWHELMING - Use precise Cage/Box logic to bring the king for the kill
+            // Precise cage logic for high-material endgames
             if bitboard_caged {
                 cage_score = if reached_area <= 5 {
                     500
@@ -519,9 +503,7 @@ fn evaluate_mop_up_core(
             }
             bonus += cage_score;
 
-            // Continuous King Approach Gradient
-            // CRITICAL: We want the king to approach EVEN IF not caged yet
-            // B+Q+K vs K and similar: King MUST approach aggressively
+            // King approach gradient
             let king_approach_bonus = (100 - king_dist.min(100) as i32) * 16; // Scaled down for material respect
             bonus += king_approach_bonus;
 
@@ -531,7 +513,7 @@ fn evaluate_mop_up_core(
                 bonus += 80; // Good bonus for being close
             }
 
-            // ALL PIECES should approach once caged - add unified approach bonuses
+            // General piece approach
             for s in our_pieces.iter().take(our_pieces_count) {
                 let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs()); // Chebyshev distance
 
@@ -561,13 +543,7 @@ fn evaluate_mop_up_core(
             && leaper_count == 0
             && total_non_pawn_pieces == 2
         {
-            // ========== HARDCODED 2R+K vs K ENDGAME ==========
-            // The "Lock and Key" technique:
-            // 1. LOCK: Rooks must protect each other on the SAME rank or file. (+2000)
-            // 2. TOGETHER: Rooks must be close to each other, not spread out. (-50 per square)
-            // 3. OPPOSITE: Rooks must be on the opposite side of enemy from our king. (+1000)
-            // 4. CUT: Rooks must be 1-2 ranks/files away from enemy. (+500)
-            // 5. KEY: King approaches to finish the job. (100x multiplier)
+            // Specialized logic for 2R+K vs K endgames
 
             let (r1_x, r1_y, r2_x, r2_y) = if our_pieces_count == 2 {
                 (
@@ -580,13 +556,13 @@ fn evaluate_mop_up_core(
                 (0, 0, 0, 0)
             };
 
-            // ========== 1. ROOK MUTUAL PROTECTION & STABILITY ==========
+            // 1. Mutual protection and stability
             let rooks_on_same_rank = r1_y == r2_y;
             let rooks_on_same_file = r1_x == r2_x;
             let rooks_protecting = rooks_on_same_rank || rooks_on_same_file;
 
             if rooks_protecting {
-                bonus += 2000; // Absolute priority: Stay protected!
+                bonus += 2000;
 
                 // PREVENT SHUFFLING: Reward being close to each other
                 let rook_dist_between = (r1_x - r2_x).abs() + (r1_y - r2_y).abs();
@@ -595,7 +571,7 @@ fn evaluate_mop_up_core(
                 bonus -= 2000; // Pathological state: Fix immediately
             }
 
-            // ========== 2. SANDWICH DETECTION (CUTTING) ==========
+            // 2. Proximity and sandwiching
             let has_rook_above = r1_y > enemy_y || r2_y > enemy_y;
             let has_rook_below = r1_y < enemy_y || r2_y < enemy_y;
             let has_rook_right = r1_x > enemy_x || r2_x > enemy_x;
@@ -635,7 +611,7 @@ fn evaluate_mop_up_core(
                 bonus += (8 - gap.min(8) as i32) * 150;
             }
 
-            // ========== 3. FENCE QUALITY ==========
+            // 3. Fence quality
             for r in &[(r1_x, r1_y), (r2_x, r2_y)] {
                 let rd = (r.1 - enemy_y).abs();
                 let fd = (r.0 - enemy_x).abs();
@@ -659,7 +635,7 @@ fn evaluate_mop_up_core(
                 }
             }
 
-            // ========== 4. KING APPROACH (DOMINANT) ==========
+            // 4. King approach (Dominant factor)
             if let Some(ok) = our_king {
                 // MASSIVE approach bonus
                 bonus += (100 - king_dist.min(100) as i32) * 100;
@@ -706,7 +682,7 @@ fn evaluate_mop_up_core(
                 bonus += 2000;
             }
         } else {
-            // CASE B: TECHNICAL/SPARSE - Use technical Ladders/Sandwiches.
+            // General technical endgame logic
             let mut protected_count = 0;
             for s in &our_pieces[..our_pieces_count] {
                 let coord = Coordinate::new(s.x, s.y);
@@ -854,11 +830,11 @@ fn evaluate_mop_up_core(
                 || (sand_dp && sand_dn)
                 || (bitboard_caged && reached_area <= 12);
 
-            // Continuous King Approach Gradient for Case B too (Dominant)
+            // King approach gradient
             let king_approach_bonus = (100 - king_dist.min(100) as i32) * 8; // Scaled down
             bonus += king_approach_bonus;
 
-            // Technical piece approach (Long range)
+            // Piece approach
             for s in &our_pieces[..our_pieces_count] {
                 let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
 
@@ -897,7 +873,7 @@ fn evaluate_mop_up_core(
     bonus
 }
 
-// ==================== Helper Functions ====================
+// --- Helper Functions ---
 
 /// Determine if king is needed for mate based on material
 #[inline(always)]

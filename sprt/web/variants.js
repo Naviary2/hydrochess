@@ -97,6 +97,7 @@ const VARIANTS = {
         game_rules: {
             promotion_ranks: { white: ['2'], black: ['-7'] },
             promotions_allowed: ['q', 'r', 'b', 'n'],
+            win_conditions: { white: ['checkmate'], black: ['allpiecescaptured'] },
         },
         hasCustomEval: true,
     },
@@ -140,6 +141,11 @@ function getVariantData(variantName) {
     // Default promotion ranks if not set: White 8, Black 1
     if (!variant.game_rules.promotion_ranks) {
         variant.game_rules.promotion_ranks = { white: ['8'], black: ['1'] };
+    }
+
+    // Default win conditions if not set: both sides win by checkmate
+    if (!variant.game_rules.win_conditions) {
+        variant.game_rules.win_conditions = { white: ["checkmate"], black: ["checkmate"] };
     }
 
     // Default move_rule: 100 halfmoves (50-move rule) for draw detection

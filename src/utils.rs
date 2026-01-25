@@ -1,6 +1,4 @@
-// ============================================================================
 // Precomputed Prime Lookup Tables for O(1) Huygens distance checks
-// ============================================================================
 
 /// All primes under 128 - used for Huygens move generation iteration
 pub static PRIMES_UNDER_128: [i64; 31] = [
@@ -112,7 +110,7 @@ fn is_prime_miller_rabin(n: i64) -> bool {
     // Write n-1 as 2^s * d
     let mut d = (n - 1) as u128;
     let mut s = 0;
-    while d % 2 == 0 {
+    while d.is_multiple_of(2) {
         d /= 2;
         s += 1;
     }

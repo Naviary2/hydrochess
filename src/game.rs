@@ -1,5 +1,10 @@
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use crate::Variant;
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use crate::evaluation::calculate_initial_material;
+
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
-use crate::evaluation::{calculate_initial_material, get_piece_value};
+use crate::evaluation::{get_piece_phase, get_piece_value};
 use crate::moves::{
     Move, MoveList, SpatialIndices, get_legal_moves, get_legal_moves_into,
     get_pseudo_legal_moves_for_piece_into, is_square_attacked,
@@ -11,9 +16,9 @@ use serde::{Deserialize, Serialize};
 
 /// Win conditions for a player. Determines how they win the game.
 /// - Checkmate: Standard - win by checkmating the opponent
-/// - RoyalCapture: Win by capturing the opponent's only royal piece
-/// - AllRoyalsCaptured: Win when all opponent's royal pieces are captured
-/// - AllPiecesCaptured: Win when all opponent's pieces are captured
+/// - RoyalCapture: Win by capturing one of the opponent's royal pieces
+/// - AllRoyalsCaptured: Win when all of the opponent's royal pieces are captured
+/// - AllPiecesCaptured: Win when all of the opponent's pieces are captured
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WinCondition {
     #[default]
@@ -26,7 +31,7 @@ pub enum WinCondition {
 impl std::str::FromStr for WinCondition {
     type Err = ();
 
-    /// Parse a win condition from a string (as received from JS).
+    /// Parse a win condition from a string.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "checkmate" => Ok(WinCondition::Checkmate),
@@ -34,6 +39,27 @@ impl std::str::FromStr for WinCondition {
             "allroyalscaptured" => Ok(WinCondition::AllRoyalsCaptured),
             "allpiecescaptured" => Ok(WinCondition::AllPiecesCaptured),
             _ => Err(()),
+        }
+    }
+}
+
+impl WinCondition {
+    /// Select the most appropriate win condition from a list based on priority.
+    /// Priority: Checkmate > RoyalCapture > AllRoyalsCaptured > AllPiecesCaptured.
+    pub fn select(conditions: &[WinCondition], opponent_has_royal: bool) -> Self {
+        if !opponent_has_royal {
+            return WinCondition::AllPiecesCaptured;
+        }
+        if conditions.contains(&WinCondition::Checkmate) {
+            WinCondition::Checkmate
+        } else if conditions.contains(&WinCondition::RoyalCapture) {
+            WinCondition::RoyalCapture
+        } else if conditions.contains(&WinCondition::AllRoyalsCaptured) {
+            WinCondition::AllRoyalsCaptured
+        } else if conditions.contains(&WinCondition::AllPiecesCaptured) {
+            WinCondition::AllPiecesCaptured
+        } else {
+            WinCondition::Checkmate // Default
         }
     }
 }
@@ -102,6 +128,17 @@ impl GameRules {
     }
 }
 
+/// Entry in move history for repetition detection.
+/// Stores move details to check if a reversal would repeat a position.
+#[derive(Clone, Copy, Debug)]
+pub struct MoveHistoryEntry {
+    pub from_x: i64,
+    pub from_y: i64,
+    pub to_x: i64,
+    pub to_y: i64,
+    pub piece_type: PieceType,
+}
+
 #[derive(Clone)]
 pub struct UndoMove {
     pub captured_piece: Option<Piece>,
@@ -123,6 +160,7 @@ pub struct UndoMove {
     /// Incremental castling state for O(1) restoration
     pub old_effective_castling_rights: u8,
     pub old_castling_partner_counts: [u16; 4],
+    pub old_total_phase: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +261,12 @@ pub struct GameState {
     /// Material configuration hash for correction history.
     #[serde(skip)]
     pub material_hash: u64,
+    /// Incremental game phase tracking.
+    #[serde(skip)]
+    pub total_phase: i32,
+    /// Minor piece position hash for correction history (Knights and Bishops).
+    #[serde(skip)]
+    pub minor_hash: u64,
     /// Repetition information: distance to previous occurrence of same position.
     /// 0 = no repetition, positive = distance to first occurrence, negative = threefold.
     /// Computed during make_move for O(1) is_repetition check.
@@ -257,6 +301,13 @@ pub struct GameState {
     /// Number of pieces currently checking the black king.
     #[serde(skip)]
     pub checkers_count_black: u8,
+    /// Move history for repetition detection.
+    /// Stores (from, to, piece_type) for each move.
+    #[serde(skip)]
+    pub move_history: Vec<MoveHistoryEntry>,
+    /// Search ply distance from last null move.
+    #[serde(skip)]
+    pub plies_from_null: u32,
 }
 
 // For backwards compatibility, keep castling_rights as an alias
@@ -330,6 +381,7 @@ impl GameState {
             pawn_hash: 0,
             nonpawn_hash: 0,
             material_hash: 0,
+            minor_hash: 0,
             repetition: 0,
             white_non_pawn_material: false,
             black_non_pawn_material: false,
@@ -339,6 +391,9 @@ impl GameState {
             pinned_black: rustc_hash::FxHashMap::default(),
             checkers_count_white: 0,
             checkers_count_black: 0,
+            move_history: Vec::with_capacity(128),
+            plies_from_null: 0,
+            total_phase: 0,
         }
     }
 
@@ -383,6 +438,7 @@ impl GameState {
             pawn_hash: 0,
             nonpawn_hash: 0,
             material_hash: 0,
+            minor_hash: 0,
             repetition: 0,
             white_non_pawn_material: false,
             black_non_pawn_material: false,
@@ -392,16 +448,19 @@ impl GameState {
             pinned_black: rustc_hash::FxHashMap::default(),
             checkers_count_white: 0,
             checkers_count_black: 0,
+            move_history: Vec::with_capacity(128),
+            plies_from_null: 0,
+            total_phase: 0,
         }
     }
 
-    /// Recompute piece counts, rebuild piece lists, and find king positions from the board
     /// Recompute piece counts, rebuild piece lists, and find king positions from the board
     pub fn recompute_piece_counts(&mut self) {
         let mut white: u16 = 0;
         let mut black: u16 = 0;
         let mut white_pawns: u16 = 0;
         let mut black_pawns: u16 = 0;
+        self.total_phase = 0;
         let mut white_npm = false;
         let mut black_npm = false;
         self.white_pieces.clear();
@@ -423,6 +482,7 @@ impl GameState {
                         self.black_king_pos = Some(Coordinate::new(*x, *y));
                     }
                 }
+                self.total_phase += get_piece_phase(piece.piece_type());
                 match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
@@ -457,6 +517,7 @@ impl GameState {
                         self.black_king_pos = Some(Coordinate::new(*x, *y));
                     }
                 }
+                self.total_phase += get_piece_phase(piece.piece_type());
                 match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
@@ -500,16 +561,15 @@ impl GameState {
                 if coord.y != wk_pos.y || coord.x == wk_pos.x {
                     continue;
                 }
-                if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                    if piece.color() == PlayerColor::White
-                        && piece.piece_type() != PieceType::Pawn
-                        && !piece.piece_type().is_royal()
-                    {
-                        if coord.x > wk_pos.x {
-                            self.castling_partner_counts[0] += 1;
-                        } else {
-                            self.castling_partner_counts[1] += 1;
-                        }
+                if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                    && piece.color() == PlayerColor::White
+                    && piece.piece_type() != PieceType::Pawn
+                    && !piece.piece_type().is_royal()
+                {
+                    if coord.x > wk_pos.x {
+                        self.castling_partner_counts[0] += 1;
+                    } else {
+                        self.castling_partner_counts[1] += 1;
                     }
                 }
             }
@@ -530,16 +590,15 @@ impl GameState {
                 if coord.y != bk_pos.y || coord.x == bk_pos.x {
                     continue;
                 }
-                if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                    if piece.color() == PlayerColor::Black
-                        && piece.piece_type() != PieceType::Pawn
-                        && !piece.piece_type().is_royal()
-                    {
-                        if coord.x > bk_pos.x {
-                            self.castling_partner_counts[2] += 1;
-                        } else {
-                            self.castling_partner_counts[3] += 1;
-                        }
+                if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                    && piece.color() == PlayerColor::Black
+                    && piece.piece_type() != PieceType::Pawn
+                    && !piece.piece_type().is_royal()
+                {
+                    if coord.x > bk_pos.x {
+                        self.castling_partner_counts[2] += 1;
+                    } else {
+                        self.castling_partner_counts[3] += 1;
                     }
                 }
             }
@@ -556,6 +615,8 @@ impl GameState {
         self.spatial_indices = SpatialIndices::new(&self.board);
         // Recompute check squares for O(1) check detection
         self.recompute_check_squares();
+        // Recompute correction hashes for eval adjustment
+        self.recompute_correction_hashes();
     }
 
     /// Precompute check squares for both kings.
@@ -606,10 +667,11 @@ impl GameState {
             for (dx, dy) in KNIGHT_OFFSETS {
                 let tx = wk.x + dx;
                 let ty = wk.y + dy;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::Black && p.piece_type() == PieceType::Knight {
-                        self.checkers_count_white += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::Black
+                    && p.piece_type() == PieceType::Knight
+                {
+                    self.checkers_count_white += 1;
                 }
                 self.check_squares_white
                     .insert((tx, ty, PieceType::Knight as u8));
@@ -618,10 +680,11 @@ impl GameState {
             for dx in [-1, 1] {
                 let tx = wk.x + dx;
                 let ty = wk.y + 1;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::Black && p.piece_type() == PieceType::Pawn {
-                        self.checkers_count_white += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::Black
+                    && p.piece_type() == PieceType::Pawn
+                {
+                    self.checkers_count_white += 1;
                 }
                 self.check_squares_white
                     .insert((tx, ty, PieceType::Pawn as u8));
@@ -643,30 +706,28 @@ impl GameState {
                         }
 
                         // Potential Discovered check for Black (if bx,by moves)
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::Black {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.discovered_check_squares_black.insert((bx, by));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::Black
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.discovered_check_squares_black.insert((bx, by));
                             }
                         }
                     } else {
                         // Friendly piece - could be pinned?
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::Black {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.pinned_white.insert((bx, by), (*dx, *dy));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::Black
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.pinned_white.insert((bx, by), (*dx, *dy));
                             }
                         }
                     }
@@ -680,10 +741,11 @@ impl GameState {
             for (dx, dy) in KNIGHT_OFFSETS {
                 let tx = bk.x + dx;
                 let ty = bk.y + dy;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::White && p.piece_type() == PieceType::Knight {
-                        self.checkers_count_black += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::White
+                    && p.piece_type() == PieceType::Knight
+                {
+                    self.checkers_count_black += 1;
                 }
                 self.check_squares_black
                     .insert((tx, ty, PieceType::Knight as u8));
@@ -692,10 +754,11 @@ impl GameState {
             for dx in [-1, 1] {
                 let tx = bk.x + dx;
                 let ty = bk.y - 1;
-                if let Some(p) = self.board.get_piece(tx, ty) {
-                    if p.color() == PlayerColor::White && p.piece_type() == PieceType::Pawn {
-                        self.checkers_count_black += 1;
-                    }
+                if let Some(p) = self.board.get_piece(tx, ty)
+                    && p.color() == PlayerColor::White
+                    && p.piece_type() == PieceType::Pawn
+                {
+                    self.checkers_count_black += 1;
                 }
                 self.check_squares_black
                     .insert((tx, ty, PieceType::Pawn as u8));
@@ -717,30 +780,28 @@ impl GameState {
                         }
 
                         // Potential Discovered check for White (if bx,by moves)
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::White {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.discovered_check_squares_white.insert((bx, by));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::White
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.discovered_check_squares_white.insert((bx, by));
                             }
                         }
                     } else {
                         // Friendly piece - could be pinned?
-                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy) {
-                            if let Some(p2) = self.board.get_piece(bx2, by2) {
-                                if p2.color() == PlayerColor::White {
-                                    let pt2 = p2.piece_type();
-                                    if (is_ortho && is_ortho_slider(pt2))
-                                        || (!is_ortho && is_diag_slider(pt2))
-                                    {
-                                        self.pinned_black.insert((bx, by), (*dx, *dy));
-                                    }
-                                }
+                        if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                            && let Some(p2) = self.board.get_piece(bx2, by2)
+                            && p2.color() == PlayerColor::White
+                        {
+                            let pt2 = p2.piece_type();
+                            if (is_ortho && is_ortho_slider(pt2))
+                                || (!is_ortho && is_diag_slider(pt2))
+                            {
+                                self.pinned_black.insert((bx, by), (*dx, *dy));
                             }
                         }
                     }
@@ -767,12 +828,10 @@ impl GameState {
 
         if dx == 0 {
             // Vertical ray (N or S) - use cols[start_x] to get all y coords
-            if let Some(col_vec) = self.spatial_indices.cols.get(&start_x) {
-                // Use find_nearest with direction (+1 or -1)
-                if let Some((found_y, _packed)) = SpatialIndices::find_nearest(col_vec, start_y, dy)
-                {
-                    return Some((start_x, found_y));
-                }
+            if let Some(col_vec) = self.spatial_indices.cols.get(&start_x)
+                && let Some((found_y, _packed)) = SpatialIndices::find_nearest(col_vec, start_y, dy)
+            {
+                return Some((start_x, found_y));
             }
         } else if dy == 0 {
             // Horizontal ray (E or W) - use rows[start_y] to get all x coords
@@ -1195,8 +1254,6 @@ impl GameState {
     /// Repetition detection for search.
     /// Returns true if the current position should be treated as a draw due to repetition.
     ///
-    /// Logic for draw detection: `repetition != 0 && repetition < ply`
-    ///
     /// For twofold (repetition > 0): Only a draw if the repetition distance is less than ply,
     /// meaning the first occurrence is within the search tree.
     ///
@@ -1208,10 +1265,94 @@ impl GameState {
         if self.null_moves > 0 {
             return false;
         }
+
         // Result is true if a repetition occurred within the current search tree.
-        // This works for both positive (twofold) and negative (threefold) values.
-        // Negative values are always < positive ply, so threefold always returns true for ply > 0.
         self.repetition != 0 && self.repetition < (ply as i32)
+    }
+
+    /// Check if we have an upcoming move that draws by repetition.
+    #[inline]
+    pub fn upcoming_repetition(&self, ply: usize) -> bool {
+        use crate::search::zobrist::{SIDE_KEY, piece_key};
+
+        // Don't check during null move search
+        if self.null_moves > 0 {
+            return false;
+        }
+
+        // Use minimum of halfmove_clock and plies_from_null like Stockfish
+        let end = (self.halfmove_clock as usize).min(self.plies_from_null as usize);
+        if end < 3 {
+            return false;
+        }
+
+        // Check if positions differ by exactly two moves that allow reversal.
+        // We look for recent moves that can be reversed to create a repetition.
+        let current_hash = self.hash;
+        let stack_len = self.hash_stack.len();
+        let history_len = self.move_history.len();
+
+        if history_len < 2 || stack_len < 3 {
+            return false;
+        }
+
+        // For each odd distance (opposite side to move), check if we can make a move
+        // that transforms current position to match an earlier position.
+        for i in (3..=end.min(stack_len)).step_by(2) {
+            let hist_idx = if history_len >= i {
+                history_len - i
+            } else {
+                continue;
+            };
+            let hash_idx = if stack_len >= i {
+                stack_len - i
+            } else {
+                continue;
+            };
+            let target_hash = self.hash_stack[hash_idx];
+
+            // Compute what single move would transform current position to target position
+            let move_key = current_hash ^ target_hash ^ SIDE_KEY;
+
+            // Check if any of our pieces can make a move that produces this hash difference.
+            // The most common case: the piece that moved i plies ago can move back.
+            // Check our move from (i-1)/2 moves ago (rounded).
+            if hist_idx < history_len {
+                let entry = &self.move_history[hist_idx];
+                let pt = entry.piece_type;
+
+                // Check if the piece is still at entry.to and can move back to entry.from
+                if let Some(piece) = self.board.get_piece(entry.to_x, entry.to_y)
+                    && piece.piece_type() == pt
+                    && piece.color() == self.turn
+                {
+                    // Check if entry.from is empty (piece can move back)
+                    if self.board.get_piece(entry.from_x, entry.from_y).is_none() {
+                        // Compute hash difference for this reverse move
+                        let from_key = piece_key(pt, self.turn, entry.to_x, entry.to_y);
+                        let to_key = piece_key(pt, self.turn, entry.from_x, entry.from_y);
+                        let expected_key = from_key ^ to_key;
+
+                        if expected_key == move_key {
+                            // This move would create the repetition!
+                            // Check if repetition is within search tree
+                            if ply > i {
+                                return true;
+                            }
+
+                            // For root nodes, check if target position was already repeated
+                            for j in (0..hash_idx).rev().step_by(2).take(4) {
+                                if self.hash_stack[j] == target_hash {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Check if this is a lone king endgame (one side only has a king)
@@ -1251,6 +1392,49 @@ impl GameState {
         !white_has_non_king || !black_has_non_king
     }
 
+    /// Returns true if the position is a draw by 50-move rule (or variant limit) or repetition.
+    #[inline]
+    pub fn is_draw(&mut self, ply: usize, in_check: bool) -> bool {
+        // Don't check during null move search
+        if self.null_moves > 0 {
+            return false;
+        }
+
+        // Draw by fifty-move rule: only if we aren't in checkmate
+        if let Some(limit) = self.game_rules.move_rule_limit {
+            // If not in check, rule50 draw is immediate.
+            // If in check, it's only a draw if we have at least one legal move.
+            if self.halfmove_clock >= limit && (!in_check || self.has_legal_evasions()) {
+                return true;
+            }
+        }
+
+        self.is_repetition(ply)
+    }
+
+    /// Check if the side-to-move has at least one legal move while in check.
+    /// Only called when 'in_check' is already known to be true.
+    pub fn has_legal_evasions(&mut self) -> bool {
+        // Use evasion generator if must escape
+        if self.must_escape_check() {
+            let mut moves = MoveList::new();
+            self.get_evasion_moves_into(&mut moves);
+
+            for m in &moves {
+                let undo = self.make_move(m);
+                let illegal = self.is_move_illegal();
+                self.undo_move(m, undo);
+                if !illegal {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Capture-based variants: assume that if we have pieces, we have moves
+        self.has_pieces(self.turn)
+    }
+
     /// Check if position is a draw by 50-move rule (or variant specific limit)
     pub fn is_fifty(&self) -> bool {
         // Don't check during null move search
@@ -1286,6 +1470,9 @@ impl GameState {
         self.turn = self.turn.opponent();
 
         self.null_moves += 1;
+
+        // Reset plies from last null move.
+        self.plies_from_null = 0;
     }
 
     /// Unmake a null move
@@ -1339,10 +1526,10 @@ impl GameState {
 
         // Hash individual PAWN special rights (double-push rights)
         for coord in &self.special_rights {
-            if let Some(piece) = self.board.get_piece(coord.x, coord.y) {
-                if piece.piece_type() == PieceType::Pawn {
-                    h ^= pawn_special_right_key(coord.x, coord.y);
-                }
+            if let Some(piece) = self.board.get_piece(coord.x, coord.y)
+                && piece.piece_type() == PieceType::Pawn
+            {
+                h ^= pawn_special_right_key(coord.x, coord.y);
             }
         }
 
@@ -1368,6 +1555,7 @@ impl GameState {
         let mut ph: u64 = 0; // Pawn structure hash
         let mut nph: u64 = 0; // Non-pawn piece hash
         let mut mh: u64 = 0; // Material hash
+        let mut mih: u64 = 0; // Minor piece hash
 
         for ((x, y), piece) in self.board.iter() {
             if piece.color() == PlayerColor::Neutral {
@@ -1383,12 +1571,20 @@ impl GameState {
             } else {
                 // Non-pawn hash: all pieces except pawns
                 nph ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+
+                // Minor hash: Knights and Bishops
+                if piece.piece_type() == PieceType::Knight
+                    || piece.piece_type() == PieceType::Bishop
+                {
+                    mih ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+                }
             }
         }
 
         self.pawn_hash = ph;
         self.nonpawn_hash = nph;
         self.material_hash = mh;
+        self.minor_hash = mih;
     }
 
     #[inline(always)]
@@ -1677,10 +1873,10 @@ impl GameState {
                         } else {
                             block_coord
                         };
-                        if let Some(p) = self.board.get_piece(bx, by) {
-                            if p.color() == our_color {
-                                continue;
-                            }
+                        if let Some(p) = self.board.get_piece(bx, by)
+                            && p.color() == our_color
+                        {
+                            continue;
                         }
 
                         let dist_from_huygen = (block_coord - our_huygen_coord).abs();
@@ -1828,10 +2024,10 @@ impl GameState {
 
                         if between {
                             let dist_from_checker = (checker_sq.y - ty).abs();
-                            if is_prime_fast(dist_from_checker) {
-                                if s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty)) {
-                                    out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
-                                }
+                            if is_prime_fast(dist_from_checker)
+                                && s.is_path_clear_for_rook(&from, &Coordinate::new(tx, ty))
+                            {
+                                out.push(Move::new(from, Coordinate::new(tx, ty), *piece));
                             }
                         }
                     }
@@ -1864,10 +2060,11 @@ impl GameState {
                         // Check same diagonal
                         let dx = block_sq.x - from.x;
                         let dy = block_sq.y - from.y;
-                        if dx != 0 && dx.abs() == dy.abs() {
-                            if s.is_path_clear_for_bishop(&from, block_sq) {
-                                out.push(Move::new(from, *block_sq, *piece));
-                            }
+                        if dx != 0
+                            && dx.abs() == dy.abs()
+                            && s.is_path_clear_for_bishop(&from, block_sq)
+                        {
+                            out.push(Move::new(from, *block_sq, *piece));
                         }
                     }
                 }
@@ -2299,16 +2496,15 @@ impl GameState {
                 }
                 // Special case: en passant capture removes piece at ep.pawn_square, not m.to
                 // If the checker is at ep.pawn_square, the EP move captures it and escapes check
-                if m.piece.piece_type() == PieceType::Pawn {
-                    if let Some(ep) = &s.en_passant {
-                        if m.to.x == ep.square.x && m.to.y == ep.square.y {
-                            // This is an EP capture - check if it captures the checker
-                            if ep.pawn_square.x == checker_sq.x && ep.pawn_square.y == checker_sq.y
-                            {
-                                out.push(m);
-                                continue;
-                            }
-                        }
+                if m.piece.piece_type() == PieceType::Pawn
+                    && let Some(ep) = &s.en_passant
+                    && m.to.x == ep.square.x
+                    && m.to.y == ep.square.y
+                {
+                    // This is an EP capture - check if it captures the checker
+                    if ep.pawn_square.x == checker_sq.x && ep.pawn_square.y == checker_sq.y {
+                        out.push(m);
+                        continue;
                     }
                 }
                 // Blocking moves for sliders (straight line check rays) and knightrider checkers
@@ -2357,6 +2553,7 @@ impl GameState {
     /// - Ok(true): Move is DEFINITELY LEGAL (piece not on any slider ray from king AND side not in check)
     /// - Err(()): Cannot determine fast, must use full is_move_illegal check
     #[inline(always)]
+    #[allow(clippy::result_unit_err)]
     pub fn is_legal_fast(&self, m: &Move, in_check: bool) -> Result<bool, ()> {
         // 1. If currently in check, any move could be illegal or fail to escape check.
         if in_check {
@@ -2635,6 +2832,11 @@ impl GameState {
         // Hash: remove piece from source
         self.hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
 
+        // Update minor_hash if needed
+        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+        }
+
         let mut undo_info = UndoMove {
             captured_piece: self.board.get_piece(m.to.x, m.to.y).copied(),
             old_en_passant: self.en_passant,
@@ -2648,6 +2850,7 @@ impl GameState {
             ep_captured_piece: None,
             old_effective_castling_rights: self.effective_castling_rights,
             old_castling_partner_counts: self.castling_partner_counts,
+            old_total_phase: self.total_phase,
         };
 
         // Track king position updates for undo
@@ -2681,6 +2884,14 @@ impl GameState {
             // - Neutral: wasn't in hash, XOR adds "removed obstacle" marker
             self.hash ^= piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
 
+            // Update minor_hash for captured Knights/Bishops
+            if captured.piece_type() == PieceType::Knight
+                || captured.piece_type() == PieceType::Bishop
+            {
+                self.minor_hash ^=
+                    piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+            }
+
             // Update spatial indices for captured piece on destination square
             self.spatial_indices.remove(m.to.x, m.to.y);
 
@@ -2698,6 +2909,7 @@ impl GameState {
 
             // Only update material/piece counts for non-neutral pieces
             if captured.color() != PlayerColor::Neutral {
+                self.total_phase -= get_piece_phase(captured.piece_type());
                 // Update material hash (subtractive)
                 self.material_hash = self
                     .material_hash
@@ -2746,9 +2958,10 @@ impl GameState {
                 ep.pawn_square.x,
                 ep.pawn_square.y,
             );
-            // Update spatial indices for EP captured pawn
             self.spatial_indices
                 .remove(ep.pawn_square.x, ep.pawn_square.y);
+
+            self.total_phase -= get_piece_phase(captured_pawn.piece_type());
 
             // Update material hash (subtractive) for EP capture
             self.material_hash = self.material_hash.wrapping_sub(material_key(
@@ -2791,6 +3004,8 @@ impl GameState {
                 self.black_pawn_count = self.black_pawn_count.saturating_sub(1);
                 self.black_non_pawn_material = true;
             }
+
+            self.total_phase += get_piece_phase(promo_type);
         }
 
         // Hash: remove old en passant
@@ -2823,18 +3038,19 @@ impl GameState {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if m.from.y == k_pos.y {
-                        let idx = if piece.color() == PlayerColor::White {
-                            if m.from.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if m.from.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && m.from.y == k_pos.y
+                {
+                    let idx = if piece.color() == PlayerColor::White {
+                        if m.from.x > k_pos.x { 0 } else { 1 }
+                    } else if m.from.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -2856,22 +3072,29 @@ impl GameState {
                 }
             } else {
                 // Non-pawn partner captured
+                if captured.piece_type() == PieceType::Knight
+                    || captured.piece_type() == PieceType::Bishop
+                {
+                    self.minor_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                }
                 if let Some(k_pos) = if captured.color() == PlayerColor::White {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if m.to.y == k_pos.y {
-                        let idx = if captured.color() == PlayerColor::White {
-                            if m.to.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if m.to.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && m.to.y == k_pos.y
+                {
+                    let idx = if captured.color() == PlayerColor::White {
+                        if m.to.x > k_pos.x { 0 } else { 1 }
+                    } else if m.to.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -2901,18 +3124,19 @@ impl GameState {
                     self.white_king_pos
                 } else {
                     self.black_king_pos
-                } {
-                    if rook_coord.y == k_pos.y {
-                        let idx = if rook.color() == PlayerColor::White {
-                            if rook_coord.x > k_pos.x { 0 } else { 1 }
-                        } else {
-                            if rook_coord.x > k_pos.x { 2 } else { 3 }
-                        };
-                        self.castling_partner_counts[idx] =
-                            self.castling_partner_counts[idx].saturating_sub(1);
-                        if self.castling_partner_counts[idx] == 0 {
-                            self.effective_castling_rights &= !(1 << idx);
-                        }
+                } && rook_coord.y == k_pos.y
+                {
+                    let idx = if rook.color() == PlayerColor::White {
+                        if rook_coord.x > k_pos.x { 0 } else { 1 }
+                    } else if rook_coord.x > k_pos.x {
+                        2
+                    } else {
+                        3
+                    };
+                    self.castling_partner_counts[idx] =
+                        self.castling_partner_counts[idx].saturating_sub(1);
+                    if self.castling_partner_counts[idx] == 0 {
+                        self.effective_castling_rights &= !(1 << idx);
                     }
                 }
             }
@@ -2937,6 +3161,16 @@ impl GameState {
             m.to.x,
             m.to.y,
         );
+        if final_piece.piece_type() == PieceType::Knight
+            || final_piece.piece_type() == PieceType::Bishop
+        {
+            self.minor_hash ^= piece_key(
+                final_piece.piece_type(),
+                final_piece.color(),
+                m.to.x,
+                m.to.y,
+            );
+        }
         self.board.set_piece(m.to.x, m.to.y, final_piece);
         // Update spatial indices for moved piece on destination square
         self.spatial_indices
@@ -2971,6 +3205,16 @@ impl GameState {
         // Hash: flip side to move
         self.hash ^= SIDE_KEY;
         self.turn = self.turn.opponent();
+
+        // Track move for repetition detection.
+        self.move_history.push(MoveHistoryEntry {
+            from_x: m.from.x,
+            from_y: m.from.y,
+            to_x: m.to.x,
+            to_y: m.to.y,
+            piece_type: piece.piece_type(),
+        });
+        self.plies_from_null += 1;
 
         // Compute distance to previous occurrence for repetition detection:
         // of same position. 0 = no repetition, positive = distance to twofold, negative = threefold.
@@ -3008,7 +3252,7 @@ impl GameState {
     }
 
     pub fn undo_move(&mut self, m: &Move, undo: UndoMove) {
-        use crate::search::zobrist::material_key;
+        use crate::search::zobrist::{material_key, piece_key};
 
         // Pop the hash that was pushed in make_move and restore the saved hash
         self.hash_stack.pop();
@@ -3027,6 +3271,10 @@ impl GameState {
         // Update spatial indices: remove piece from destination square
         self.spatial_indices.remove(m.to.x, m.to.y);
 
+        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.to.x, m.to.y);
+        }
+
         // Handle Promotion Revert
         if m.promotion.is_some() {
             // Convert back to pawn: Remove promo type, Add pawn type
@@ -3044,10 +3292,13 @@ impl GameState {
             if piece.color() == PlayerColor::White {
                 self.material_score -= promo_val;
                 self.material_score += pawn_val;
+                self.white_pawn_count = self.white_pawn_count.saturating_add(1);
             } else {
                 self.material_score += promo_val;
                 self.material_score -= pawn_val;
+                self.black_pawn_count = self.black_pawn_count.saturating_add(1);
             }
+            self.total_phase = undo.old_total_phase;
             piece = Piece::new(PieceType::Pawn, piece.color());
         }
 
@@ -3055,6 +3306,10 @@ impl GameState {
         self.board.set_piece(m.from.x, m.from.y, piece);
         // Update spatial indices for moved piece back on source square
         self.spatial_indices.add(m.from.x, m.from.y, piece.packed());
+
+        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+        }
 
         // Restore captured piece
         if let Some(captured) = undo.captured_piece {
@@ -3085,37 +3340,41 @@ impl GameState {
             self.board.set_piece(m.to.x, m.to.y, captured);
             // Update spatial indices for restored captured piece
             self.spatial_indices.add(m.to.x, m.to.y, captured.packed());
+
+            if captured.piece_type() == PieceType::Knight
+                || captured.piece_type() == PieceType::Bishop
+            {
+                self.minor_hash ^=
+                    piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+            }
         }
 
         // Handle En Passant capture undo - use the stored captured piece
-        if let Some(captured_pawn) = undo.ep_captured_piece {
-            if let Some(ep) = &undo.old_en_passant {
-                // Restore the captured piece (could be a pawn or promoted piece)
-                self.board
-                    .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
-                self.spatial_indices.add(
-                    ep.pawn_square.x,
-                    ep.pawn_square.y,
-                    captured_pawn.packed(),
-                );
+        if let Some(captured_pawn) = undo.ep_captured_piece
+            && let Some(ep) = &undo.old_en_passant
+        {
+            // Restore the captured piece (could be a pawn or promoted piece)
+            self.board
+                .set_piece(ep.pawn_square.x, ep.pawn_square.y, captured_pawn);
+            self.spatial_indices
+                .add(ep.pawn_square.x, ep.pawn_square.y, captured_pawn.packed());
 
-                // Restore material hash
-                self.material_hash = self.material_hash.wrapping_add(material_key(
-                    captured_pawn.piece_type(),
-                    captured_pawn.color(),
-                ));
+            // Restore material hash
+            self.material_hash = self.material_hash.wrapping_add(material_key(
+                captured_pawn.piece_type(),
+                captured_pawn.color(),
+            ));
 
-                // Restore material value and piece counts
-                let value = get_piece_value(captured_pawn.piece_type());
-                if captured_pawn.color() == PlayerColor::White {
-                    self.material_score += value;
-                    self.white_piece_count = self.white_piece_count.saturating_add(1);
-                    self.white_pawn_count = self.white_pawn_count.saturating_add(1);
-                } else {
-                    self.material_score -= value;
-                    self.black_piece_count = self.black_piece_count.saturating_add(1);
-                    self.black_pawn_count = self.black_pawn_count.saturating_add(1);
-                }
+            // Restore material value and piece counts
+            let value = get_piece_value(captured_pawn.piece_type());
+            if captured_pawn.color() == PlayerColor::White {
+                self.material_score += value;
+                self.white_piece_count = self.white_piece_count.saturating_add(1);
+                self.white_pawn_count = self.white_pawn_count.saturating_add(1);
+            } else {
+                self.material_score -= value;
+                self.black_piece_count = self.black_piece_count.saturating_add(1);
+                self.black_pawn_count = self.black_pawn_count.saturating_add(1);
             }
         }
 
@@ -3157,10 +3416,15 @@ impl GameState {
         }
         self.halfmove_clock = undo.old_halfmove_clock;
         self.repetition = undo.old_repetition;
+        self.total_phase = undo.old_total_phase;
 
         // Restore castling state
         self.effective_castling_rights = undo.old_effective_castling_rights;
         self.castling_partner_counts = undo.old_castling_partner_counts;
+
+        // Pop move history (reverse of make_move push)
+        self.move_history.pop();
+        self.plies_from_null = self.plies_from_null.saturating_sub(1);
     }
 
     pub fn perft(&mut self, depth: usize) -> u64 {
@@ -3191,6 +3455,7 @@ impl GameState {
         nodes
     }
 
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn setup_position_from_icn(&mut self, position_icn: &str) {
         self.board = Board::new();
         self.special_rights.clear();
@@ -3200,180 +3465,234 @@ impl GameState {
         self.fullmove_number = 1;
         self.material_score = 0;
 
-        // Parse ICN format: "PieceType,x,y|PieceType,x,y|..."
-        // Example: "P1,2|r2,3|K4,5" where:
-        // - P = white pawn at (1,2)
-        // - r = black rook at (2,3)
-        // - K = white king at (4,5)
-        // Optional + after piece indicates special rights: "P1,2+|r2,3+"
-        for piece_str in position_icn.split('|') {
-            if piece_str.is_empty() {
+        // Step 1: Strip [...] metadata tags
+        let content = if let Some(idx) = position_icn.rfind(']') {
+            &position_icn[idx + 1..]
+        } else {
+            position_icn
+        };
+
+        let content = content.trim();
+        if content.is_empty() {
+            return;
+        }
+
+        // Tokenize by whitespace
+        let tokens: Vec<&str> = content.split_whitespace().collect();
+
+        // Handle the case where it's JUST pieces
+        if tokens.len() == 1 {
+            self.parse_icn_pieces(tokens[0]);
+            self.finalize_setup();
+            return;
+        }
+
+        let mut wc_list = Vec::new();
+        let mut pieces_token = None;
+
+        for token in tokens {
+            if token == "-" {
                 continue;
             }
 
-            // Split into piece_info and coordinates: "P1,2" -> ["P1", "2"]
-            let parts: Vec<&str> = piece_str.split(',').collect();
+            // identify token by structure
+            if token == "w" {
+                self.turn = PlayerColor::White;
+            } else if token == "b" {
+                self.turn = PlayerColor::Black;
+            } else if token.contains('/') {
+                // Clocks: halfmove/limit
+                let parts: Vec<&str> = token.split('/').collect();
+                if let Some(hm_str) = parts.first() {
+                    self.halfmove_clock = hm_str.parse().unwrap_or(0);
+                }
+                if parts.len() > 1 {
+                    self.game_rules.move_rule_limit = parts[1].parse::<u32>().ok();
+                }
+            } else if token.starts_with('(') && token.ends_with(')') {
+                // Promotion Rules: (w_rank;w_pieces|b_rank;b_pieces)
+                let inner = &token[1..token.len() - 1];
+                let sides: Vec<&str> = inner.split('|').collect();
+                let mut promo_types = Vec::new();
+
+                for (idx, side_str) in sides.iter().enumerate() {
+                    let parts: Vec<&str> = side_str.split(';').collect();
+                    if parts.is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(rank) = parts[0].parse::<i64>() {
+                        if idx == 0 {
+                            self.white_promo_rank = rank;
+                        } else {
+                            self.black_promo_rank = rank;
+                        }
+
+                        if self.game_rules.promotion_ranks.is_none() {
+                            self.game_rules.promotion_ranks = Some(PromotionRanks::default());
+                        }
+                        if let Some(ref mut pr) = self.game_rules.promotion_ranks {
+                            if idx == 0 {
+                                pr.white = vec![rank];
+                            } else {
+                                pr.black = vec![rank];
+                            }
+                        }
+                    }
+
+                    if parts.len() > 1 {
+                        let types: Vec<&str> = parts[1].split(',').collect();
+                        for t in &types {
+                            let pt = PieceType::from_site_code(&t.to_uppercase());
+                            if pt != PieceType::Void {
+                                promo_types.push(pt);
+                            }
+                        }
+                        self.game_rules.promotions_allowed =
+                            Some(types.iter().map(|s| s.to_string()).collect());
+                        self.game_rules.promotion_types = Some(promo_types.clone());
+                    }
+                }
+            } else if token.split(',').count() == 4
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == ',' || c == '-')
+            {
+                // World Border: left,right,bottom,top
+                let bounds: Vec<&str> = token.split(',').collect();
+                if let (Ok(l), Ok(r), Ok(b), Ok(t)) = (
+                    bounds[0].parse::<i64>(),
+                    bounds[1].parse::<i64>(),
+                    bounds[2].parse::<i64>(),
+                    bounds[3].parse::<i64>(),
+                ) {
+                    crate::moves::set_world_bounds(l, r, b, t);
+                }
+            } else if token.contains('|')
+                || (token.contains(',') && token.chars().any(|c| c.is_ascii_uppercase()))
+            {
+                // Pieces segment typically contains '|' or pieces like 'P1,2' (uppercase P)
+                pieces_token = Some(token);
+            } else if token.contains(',')
+                && token.split(',').count() == 2
+                && !token.chars().any(|c| c.is_ascii_alphabetic())
+            {
+                // En Passant: x,y
+                let parts: Vec<&str> = token.split(',').collect();
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
+                    let pawn_y = if self.turn == PlayerColor::White {
+                        y - 1
+                    } else {
+                        y + 1
+                    };
+                    self.en_passant = Some(EnPassantState {
+                        square: Coordinate::new(x, y),
+                        pawn_square: Coordinate::new(x, pawn_y),
+                    });
+                }
+            } else if let Ok(val) = token.parse::<u32>() {
+                // Fullmove number
+                self.fullmove_number = val;
+            } else {
+                // Check if it's a win condition list
+                for wc_str in token.split(',') {
+                    if let Ok(wc) = wc_str.parse::<WinCondition>() {
+                        wc_list.push(wc);
+                    }
+                }
+            }
+        }
+
+        // Now parse pieces if found
+        if let Some(p) = pieces_token {
+            self.parse_icn_pieces(p);
+        }
+
+        // Recompute piece counts/lists BEFORE selecting win conditions
+        self.recompute_piece_counts();
+
+        // Finalize win conditions based on piece presence
+        let white_has_royal = self.white_pieces.iter().any(|&(px, py)| {
+            self.board
+                .get_piece(px, py)
+                .map(|p| p.piece_type().is_royal())
+                .unwrap_or(false)
+        });
+        let black_has_royal = self.black_pieces.iter().any(|&(px, py)| {
+            self.board
+                .get_piece(px, py)
+                .map(|p| p.piece_type().is_royal())
+                .unwrap_or(false)
+        });
+
+        self.game_rules.white_win_condition = WinCondition::select(&wc_list, black_has_royal);
+        self.game_rules.black_win_condition = WinCondition::select(&wc_list, white_has_royal);
+
+        self.finalize_setup();
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    fn parse_icn_pieces(&mut self, piece_segment: &str) {
+        for piece_def in piece_segment.split('|') {
+            if piece_def.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = piece_def.split(',').collect();
             if parts.len() != 2 {
-                continue; // Skip invalid pieces
-            }
-
-            let (piece_info, y_str) = (parts[0], parts[1]);
-
-            // Extract piece type and x coordinate from piece_info: "P1" -> ('P', '1')
-            let mut chars = piece_info.chars();
-            let piece_char = chars.next();
-            let x_str: String = chars.collect();
-
-            if piece_char.is_none() {
                 continue;
             }
+
+            let piece_info_raw = parts[0];
+            let y_raw = parts[1];
+
+            let split_idx = piece_info_raw
+                .find(|c: char| c.is_ascii_digit() || c == '-')
+                .unwrap_or(piece_info_raw.len());
+            let (code_str, x_str_raw) = piece_info_raw.split_at(split_idx);
+
+            if code_str.is_empty() {
+                continue;
+            }
+
+            let mut has_special_rights = false;
+            let x_str = if let Some(stripped) = x_str_raw.strip_suffix('+') {
+                has_special_rights = true;
+                stripped
+            } else {
+                x_str_raw
+            };
+
+            let y_str = if let Some(stripped) = y_raw.strip_suffix('+') {
+                has_special_rights = true;
+                stripped
+            } else {
+                y_raw
+            };
 
             let x: i64 = x_str.parse().unwrap_or(0);
             let y: i64 = y_str.parse().unwrap_or(0);
 
-            // Extract piece type and check for special rights
-            let piece_char = piece_char.unwrap();
-            let (actual_piece_char, has_special_rights) = if x_str.ends_with('+') {
-                // Format like "P1+,2" - special rights indicated
-                let _clean_x = &x_str[..x_str.len() - 1]; // Prefix with underscore to indicate unused
-                (piece_char, true)
-            } else {
-                (piece_char, false)
-            };
-
-            let is_white = actual_piece_char.is_uppercase();
-            let piece_type = match actual_piece_char.to_ascii_lowercase() {
-                'k' => PieceType::King,
-                'q' => PieceType::Queen,
-                'r' => PieceType::Rook,
-                'b' => PieceType::Bishop,
-                'n' => PieceType::Knight,
-                'p' => PieceType::Pawn,
-                // Extended pieces for variants
-                'a' => PieceType::Amazon,
-                'c' => PieceType::Chancellor,
-                'h' => PieceType::Archbishop,
-                'v' => PieceType::Void,
-                'x' => PieceType::Obstacle,
-                'g' => PieceType::Giraffe,
-                'l' => PieceType::Camel, // 'l' for camel ( avoid 'c' conflict with chancellor
-                'z' => PieceType::Zebra,
-                'm' => PieceType::Knightrider, // 'm' for knightrider
-                _ => continue,                 // Skip unknown piece types
-            };
-
+            let first_char = code_str.chars().next().unwrap();
+            let is_white = first_char.is_uppercase();
             let color = if is_white {
                 PlayerColor::White
             } else {
                 PlayerColor::Black
             };
-            let piece = Piece::new(piece_type, color);
 
-            // Use the cleaned x coordinate if we had special rights
-            let final_x = if has_special_rights && x_str.ends_with('+') {
-                let clean_x = &x_str[..x_str.len() - 1];
-                clean_x.parse().unwrap_or(x)
-            } else {
-                x
-            };
+            let piece_type = PieceType::from_site_code(&code_str.to_uppercase());
 
-            self.board.set_piece(final_x, y, piece);
+            self.board.set_piece(x, y, Piece::new(piece_type, color));
 
-            // Add special rights if indicated by +
             if has_special_rights {
-                // coord_key was unused, removing the format string since we only need the coordinate
-                self.special_rights.insert(Coordinate::new(final_x, y));
+                self.special_rights.insert(Coordinate::new(x, y));
             }
         }
-
-        // Calculate initial material
-        self.material_score = calculate_initial_material(&self.board);
-
-        // Rebuild piece lists and counts
-        self.recompute_piece_counts();
-
-        // Compute initial hash
-        self.recompute_hash();
     }
 
-    pub fn setup_standard_chess(&mut self) {
-        self.board = Board::new();
-        self.special_rights.clear();
-        self.en_passant = None;
-        self.turn = PlayerColor::White;
-        self.halfmove_clock = 0;
-        self.fullmove_number = 1;
-        self.material_score = 0;
-
-        // White Pieces
-        self.board
-            .set_piece(1, 1, Piece::new(PieceType::Rook, PlayerColor::White));
-        self.board
-            .set_piece(2, 1, Piece::new(PieceType::Knight, PlayerColor::White));
-        self.board
-            .set_piece(3, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
-        self.board
-            .set_piece(4, 1, Piece::new(PieceType::Queen, PlayerColor::White));
-        self.board
-            .set_piece(5, 1, Piece::new(PieceType::King, PlayerColor::White));
-        self.board
-            .set_piece(6, 1, Piece::new(PieceType::Bishop, PlayerColor::White));
-        self.board
-            .set_piece(7, 1, Piece::new(PieceType::Knight, PlayerColor::White));
-        self.board
-            .set_piece(8, 1, Piece::new(PieceType::Rook, PlayerColor::White));
-
-        for x in 1..=8 {
-            self.board
-                .set_piece(x, 2, Piece::new(PieceType::Pawn, PlayerColor::White));
-        }
-
-        // Black Pieces
-        self.board
-            .set_piece(1, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
-        self.board
-            .set_piece(2, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
-        self.board
-            .set_piece(3, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
-        self.board
-            .set_piece(4, 8, Piece::new(PieceType::Queen, PlayerColor::Black));
-        self.board
-            .set_piece(5, 8, Piece::new(PieceType::King, PlayerColor::Black));
-        self.board
-            .set_piece(6, 8, Piece::new(PieceType::Bishop, PlayerColor::Black));
-        self.board
-            .set_piece(7, 8, Piece::new(PieceType::Knight, PlayerColor::Black));
-        self.board
-            .set_piece(8, 8, Piece::new(PieceType::Rook, PlayerColor::Black));
-
-        for x in 1..=8 {
-            self.board
-                .set_piece(x, 7, Piece::new(PieceType::Pawn, PlayerColor::Black));
-        }
-
-        // Special Rights - Kings, Rooks (castling) and Pawns (double move)
-        self.special_rights.insert(Coordinate::new(1, 1)); // Rook
-        self.special_rights.insert(Coordinate::new(5, 1)); // King
-        self.special_rights.insert(Coordinate::new(8, 1)); // Rook
-
-        self.special_rights.insert(Coordinate::new(1, 8)); // Rook
-        self.special_rights.insert(Coordinate::new(5, 8)); // King
-        self.special_rights.insert(Coordinate::new(8, 8)); // Rook
-
-        // Pawn double-move rights
-        for x in 1..=8 {
-            self.special_rights.insert(Coordinate::new(x, 2)); // White pawns
-            self.special_rights.insert(Coordinate::new(x, 7)); // Black pawns
-        }
-
-        // Explicitly set standard promotion ranks (8 for white, 1 for black)
-        self.game_rules.promotion_ranks = Some(PromotionRanks {
-            white: vec![8],
-            black: vec![1],
-        });
-        self.white_promo_rank = 8;
-        self.black_promo_rank = 1;
-
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    fn finalize_setup(&mut self) {
         // Calculate initial material
         self.material_score = calculate_initial_material(&self.board);
 
@@ -3382,6 +3701,19 @@ impl GameState {
 
         // Compute initial hash
         self.recompute_hash();
+
+        // Rebuild spatial indices
+        self.spatial_indices = SpatialIndices::new(&self.board);
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub fn setup_variant(&mut self, variant: Variant) {
+        self.setup_position_from_icn(variant.starting_icn());
+    }
+
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub fn setup_standard_chess(&mut self) {
+        self.setup_variant(Variant::Classical);
     }
 }
 
@@ -3400,6 +3732,49 @@ mod tests {
         game.recompute_piece_counts();
         game.recompute_hash();
         game
+    }
+
+    #[test]
+    fn test_parse_icn_full() {
+        let icn = "[Event \"Complex Game\"] w 10,3 5/100 1 (8;am,q|1;am,q) -100,500,-35,100 checkmate,royalcapture,allroyalscaptured,allpiecescaptured K5,1+|k5,8+";
+
+        let mut game = GameState::new();
+        game.setup_position_from_icn(icn);
+
+        // Check header info
+        assert_eq!(game.turn, PlayerColor::White);
+        assert_eq!(game.halfmove_clock, 5);
+        assert_eq!(game.game_rules.move_rule_limit, Some(100));
+        assert_eq!(game.fullmove_number, 1);
+        assert_eq!(game.white_promo_rank, 8);
+        assert_eq!(game.black_promo_rank, 1);
+
+        // En passant square (10,3). White turn, so Black pawn just moved 10,4->10,2.
+        // Pawn being captured is at 10,2.
+        let ep = game.en_passant.unwrap();
+        assert_eq!(ep.square, Coordinate::new(10, 3));
+        assert_eq!(ep.pawn_square, Coordinate::new(10, 2));
+
+        // Check world bounds
+        let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+        assert_eq!(min_x, -100);
+        assert_eq!(max_x, 500);
+        assert_eq!(min_y, -35);
+        assert_eq!(max_y, 100);
+
+        // Check win conditions
+        // Priority: Checkmate
+        assert_eq!(game.game_rules.white_win_condition, WinCondition::Checkmate);
+        assert_eq!(game.game_rules.black_win_condition, WinCondition::Checkmate);
+
+        // Check allowed promotions
+        let allowed = game.game_rules.promotions_allowed.as_ref().unwrap();
+        assert!(allowed.contains(&"am".to_string()));
+        assert!(allowed.contains(&"q".to_string()));
+
+        // Check pieces
+        let k = game.board.get_piece(5, 1).unwrap();
+        assert_eq!(k.piece_type(), PieceType::King);
     }
 
     // ======================== 50-Move Rule Tests ========================
@@ -4004,6 +4379,45 @@ mod tests {
         // Check promotion ranks set
         assert_eq!(game.white_promo_rank, 8);
         assert_eq!(game.black_promo_rank, 1);
+    }
+
+    #[test]
+    fn test_all_variants_setup() {
+        let variants = [
+            Variant::Classical,
+            Variant::ConfinedClassical,
+            Variant::ClassicalPlus,
+            Variant::CoaIP,
+            Variant::CoaIPHO,
+            Variant::CoaIPRO,
+            Variant::CoaIPNO,
+            Variant::Palace,
+            Variant::Pawndard,
+            Variant::Core,
+            Variant::Standarch,
+            Variant::SpaceClassic,
+            Variant::Space,
+            Variant::Abundance,
+            Variant::PawnHorde,
+            Variant::Knightline,
+            Variant::Obstocean,
+            Variant::Chess,
+        ];
+
+        for &v in &variants {
+            let mut game = GameState::new();
+            game.setup_variant(v);
+            assert!(
+                game.white_piece_count > 0,
+                "Variant {:?} should have white pieces",
+                v
+            );
+            assert!(
+                game.black_piece_count > 0,
+                "Variant {:?} should have black pieces",
+                v
+            );
+        }
     }
 
     #[test]

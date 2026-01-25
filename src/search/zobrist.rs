@@ -1,8 +1,3 @@
-//! Zobrist hashing for infinite chess.
-//!
-//! Uses computed hashes based on coordinates since we can't pre-compute a table
-//! for an infinite board. The hash is maintained incrementally in GameState.
-
 use crate::board::{PieceType, PlayerColor};
 
 /// Number of piece types (used for indexing into piece keys)
@@ -193,9 +188,9 @@ mod tests {
     fn test_piece_keys_unique() {
         // Verify piece keys are reasonably unique
         let mut keys = Vec::new();
-        for i in 0..NUM_PIECE_TYPES {
-            for j in 0..NUM_COLORS {
-                keys.push(PIECE_KEYS[i][j]);
+        for row in PIECE_KEYS {
+            for key in row {
+                keys.push(key);
             }
         }
         keys.sort();

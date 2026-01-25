@@ -9,11 +9,29 @@ function engineLetterToSiteCode(letter) {
     return map[letter] || letter.toUpperCase();
 }
 
-import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
-import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
+import initOld, * as wasmOld from './pkg-old/hydrochess_wasm.js';
+const EngineOld = wasmOld.Engine;
+import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
+const EngineNew = wasmNew.Engine;
+const initThreadPool = wasmNew.initThreadPool;
 import { getVariantData, getAllVariants } from './variants.js';
 
 let wasmReady = false;
+let threadPoolInitialized = false;
+
+async function tryInitThreadPool(count) {
+    if (threadPoolInitialized) return;
+    if (typeof initThreadPool !== 'function') return;
+
+    try {
+        console.log(`[sprt-worker] Initializing thread pool with ${count} threads...`);
+        await initThreadPool(count);
+        threadPoolInitialized = true;
+        console.log(`[sprt-worker] Thread pool initialized.`);
+    } catch (e) {
+        console.warn(`[sprt-worker] Failed to initialize thread pool:`, e);
+    }
+}
 
 function getVariantPosition(variantName, clock = null) {
     const variantData = getVariantData(variantName);
@@ -342,19 +360,6 @@ function applyMove(position, move) {
     return position;
 }
 
-// Extremely conservative game-end detection for SPRT harness.
-//
-// The Rust engine already handles true terminal states (no legal moves) and
-// our harness adds:
-//   - material/eval adjudication
-//   - repetition (threefold) and 50-move rule
-//   - time forfeits
-//   - illegal moves / engine failure
-//   - insufficient material (via engine's is_sufficient_material() function)
-//
-// Several variants (e.g. Pawn_Horde) are *designed* to have only one king
-// on the board, so treating "kings < 2" as checkmate is incorrect and was
-
 function clonePosition(position) {
     // Simple deep clone for our small position objects
     return JSON.parse(JSON.stringify(position));
@@ -476,11 +481,18 @@ async function ensureInit() {
     if (!wasmReady) {
         await initOld();
         await initNew();
+
+        // Detect thread support and initialize pool if available
+        await tryInitThreadPool(2);
+
         wasmReady = true;
     }
 }
 
-async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth, searchNoise) {
+async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth, searchNoise, seed) {
+    if (typeof wasmNew.reset_engine_state === 'function') {
+        wasmNew.reset_engine_state();
+    }
     const startPosition = getVariantPosition(variantName);
     let position = clonePosition(startPosition);
     const newColor = newPlaysWhite ? 'w' : 'b';
@@ -624,7 +636,17 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
             const noiseAmp = currentPly < 4 ? (typeof searchNoise === 'number' ? searchNoise : 5) : null;
 
             let flaggedOnTime = false;
-            const move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true, maxDepth, noiseAmp);
+            let move;
+            try {
+                move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true, maxDepth, noiseAmp, seed ? BigInt(seed) : undefined);
+            } catch (err) {
+                // Fallback for older engines that don't support BigInt seed
+                if (err instanceof TypeError || (err.message && err.message.includes('BigInt'))) {
+                    move = engine.get_best_move_with_time(haveClocks ? 0 : searchTimeMs, true, maxDepth, noiseAmp, undefined);
+                } else {
+                    throw err;
+                }
+            }
             engine.free();
 
             const elapsed = Math.max(0, Math.round(nowMs() - startMs));
@@ -994,7 +1016,8 @@ self.onmessage = async (e) => {
                 msg.timeControl,
                 msg.variantName || 'Classical',
                 msg.maxDepth,
-                msg.searchNoise
+                msg.searchNoise,
+                msg.seed
             );
 
             // Timeout wrapper - treat timeout as draw

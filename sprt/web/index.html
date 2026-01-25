@@ -176,9 +176,39 @@
       background: var(--accent-dim);
     }
 
+    input:disabled,
+    select:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      background: var(--bg);
+      border-color: var(--surface-2);
+      filter: grayscale(1);
+    }
+
     .btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
+    }
+
+    .disabled-label {
+      opacity: 0.5;
+      transition: opacity 0.3s;
+    }
+
+    .mt-badge {
+      font-size: 0.75rem;
+      font-weight: 800;
+      background: #ff4757;
+      /* Bright coral/red for visibility */
+      color: white !important;
+      padding: 2px 6px;
+      border-radius: 4px;
+      vertical-align: middle;
+      margin-left: 8px;
+      -webkit-text-fill-color: white !important;
+      /* Override H1 gradient */
+      box-shadow: 0 0 10px rgba(255, 71, 87, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.2);
     }
 
     .btn-secondary {
@@ -382,10 +412,10 @@
           <div class="form-group">
             <label>TC Mode</label>
             <select id="sprtTcMode">
+              <option value="smart_mix">Smart Mix (Randomized)</option>
               <option value="standard">Standard (Base+Inc)</option>
               <option value="fixed_time">Fixed Time/Move</option>
               <option value="fixed_depth">Fixed Depth</option>
-              <option value="smart_mix">Smart Mix (Randomized)</option>
             </select>
           </div>
 
@@ -411,16 +441,16 @@
 
           <div class="form-group">
             <label>Max Moves per Game</label>
-            <input type="number" id="sprtMaxMoves" value="200" min="10" max="1000" />
+            <input type="number" id="sprtMaxMoves" value="300" min="10" max="1000" />
           </div>
 
           <div class="form-group">
             <label for="sprtMaterialAdjudication">Material Adjudication (cp):</label>
-            <input type="number" id="sprtMaterialAdjudication" value="1500" min="0" step="100" />
+            <input type="number" id="sprtMaterialAdjudication" value="2000" min="0" step="100" />
           </div>
           <div class="form-group">
             <label for="sprtSearchNoise">Search Noise (cp):</label>
-            <input type="number" id="sprtSearchNoise" value="25" min="0" step="1"
+            <input type="number" id="sprtSearchNoise" value="50" min="0" step="1"
               title="Randomness amplitude for first 4 ply" />
           </div>
           <div class="form-group" style="grid-column: 1 / -1">
@@ -471,7 +501,7 @@
             <div class="stat-label">Draws</div>
           </div>
           <div class="stat-item">
-            <div class="stat-value" id="sprtElo">0</div>
+            <div class="stat-value" id="sprtElo">-</div>
             <div class="stat-label">Elo Diff</div>
           </div>
         </div>

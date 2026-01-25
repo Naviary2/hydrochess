@@ -9,9 +9,8 @@ use super::params::{
 };
 
 /// Low-ply history table size for moves at shallow depths
-pub const LOW_PLY_HISTORY_SIZE: usize = 4;
-pub const LOW_PLY_HISTORY_ENTRIES: usize = 1024;
-pub const LOW_PLY_HISTORY_MASK: usize = LOW_PLY_HISTORY_ENTRIES - 1;
+pub const LOW_PLY_HISTORY_SIZE: usize = crate::search::LOW_PLY_HISTORY_SIZE;
+pub const LOW_PLY_HISTORY_MASK: usize = crate::search::LOW_PLY_HISTORY_MASK;
 
 /// Score a single move for ordering purposes.
 /// Returns higher score for better moves.
@@ -53,7 +52,7 @@ pub fn score_move(
         // Capture history
         let cap_hist =
             searcher.capture_history[m.piece.piece_type() as usize][target.piece_type() as usize];
-        score += cap_hist / 10;
+        score += cap_hist / 16;
     } else {
         // Quiet move scoring
 
@@ -89,21 +88,29 @@ pub fn score_move(
 
             // Main history heuristic
             let idx = hash_move_dest(m);
-            score += searcher.history[m.piece.piece_type() as usize][idx];
+            let pt_idx = m.piece.piece_type() as usize;
+            score += 2 * searcher.history[pt_idx][idx];
+
+            // Pawn history heuristic
+            let ph_idx = (game.pawn_hash & crate::search::PAWN_HISTORY_MASK) as usize;
+            score += 2 * searcher.pawn_history[ph_idx][pt_idx][idx];
 
             // Continuation history
             let cur_from_hash = hash_coord_32(m.from.x, m.from.y);
             let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
-            for &plies_ago in &[0usize, 1, 2, 3, 5] {
+            for &plies_ago in &[0usize, 1, 2, 3, 4, 5] {
                 if ply > plies_ago
                     && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
                 {
                     let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
-                    if prev_piece < 16 {
+                    if prev_piece < 32 {
                         let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
-                        score += searcher.cont_history[prev_piece][prev_to_hash][cur_from_hash]
-                            [cur_to_hash];
+                        let prev_ic = searcher.in_check_history[ply - plies_ago - 1] as usize;
+                        let prev_cap = searcher.capture_history_stack[ply - plies_ago - 1] as usize;
+
+                        score += searcher.cont_history[prev_cap][prev_ic][prev_piece][prev_to_hash]
+                            [cur_from_hash][cur_to_hash];
                     }
                 }
             }
@@ -111,7 +118,7 @@ pub fn score_move(
             // Low-ply history bonus:
             if ply < LOW_PLY_HISTORY_SIZE {
                 let move_hash = hash_move_for_lowply(m);
-                score += searcher.low_ply_history[ply][move_hash] / 4;
+                score += 8 * searcher.low_ply_history[ply][move_hash] / (1 + ply as i32);
             }
         }
     }
@@ -122,6 +129,7 @@ pub fn score_move(
 /// Sort all moves using selection sort approach.
 /// This is equivalent to calling pick_best_move repeatedly but more efficient
 /// when we need all moves sorted (e.g., at root).
+#[allow(clippy::needless_range_loop)]
 pub fn sort_moves(
     searcher: &Searcher,
     game: &GameState,
@@ -161,16 +169,36 @@ pub fn sort_moves(
 }
 
 /// Sort moves at root - always full sort since we examine all moves
+/// For Lazy SMP, helper threads (thread_id > 0) get slight scoring variation
+/// to explore different move orderings and maximize search diversity.
 pub fn sort_moves_root(
     searcher: &Searcher,
     game: &GameState,
     moves: &mut MoveList,
     tt_move: &Option<Move>,
 ) {
-    sort_moves(searcher, game, moves, 0, tt_move);
+    let thread_id = searcher.thread_id;
+
+    if thread_id == 0 {
+        // Main thread: standard sorting
+        sort_moves(searcher, game, moves, 0, tt_move);
+    } else {
+        // Helper threads: add variation to move scores based on thread_id
+        // This makes different threads explore different move orderings
+        // while still respecting TT move priority
+        moves.sort_by_cached_key(|m| {
+            let base_score = score_move(searcher, game, m, 0, tt_move);
+            // Add pseudo-random variation based on thread_id and move hash
+            // The variation is small so TT moves and winning captures still stay on top
+            let move_hash = hash_move_dest(m) ^ hash_move_from(m);
+            let variation = ((move_hash.wrapping_mul(thread_id)) % 50) as i32;
+            -(base_score + variation)
+        });
+    }
 }
 
 /// Fast capture sorting using MVV-LVA only (no SEE for qsearch captures)
+#[allow(clippy::needless_range_loop)]
 pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
     // For captures, use selection sort since qsearch usually has few captures
     if moves.len() <= 16 {
@@ -212,13 +240,19 @@ pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
 /// Hash move destination to 256-size index (for main history)
 #[inline]
 pub fn hash_move_dest(m: &Move) -> usize {
-    ((m.to.x.wrapping_abs() ^ m.to.y.wrapping_abs()) & 0xFF) as usize
+    let x = m.to.x as u64;
+    let y = m.to.y as u64;
+    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9136a9a9f9065e33);
+    ((h ^ (h >> 32)) & 0xFF) as usize
 }
 
 /// Hash move source to 256-size index
 #[inline]
 pub fn hash_move_from(m: &Move) -> usize {
-    ((m.from.x.wrapping_abs() ^ m.from.y.wrapping_abs()) & 0xFF) as usize
+    let x = m.from.x as u64;
+    let y = m.from.y as u64;
+    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9136a9a9f9065e33);
+    ((h ^ (h >> 32)) & 0xFF) as usize
 }
 
 /// Hash coordinate to 32-size index (for continuation history)
@@ -281,17 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_move_for_lowply() {
-        let m = Move::new(
-            Coordinate::new(4, 2),
-            Coordinate::new(4, 4),
-            Piece::new(PieceType::Pawn, PlayerColor::White),
-        );
-        let hash = hash_move_for_lowply(&m);
-        assert!(hash < LOW_PLY_HISTORY_ENTRIES);
-    }
-
-    #[test]
     fn test_sort_captures_mvv_lva() {
         let mut game = create_test_game();
         game.board
@@ -304,7 +327,7 @@ mod tests {
             .set_piece(1, 1, Piece::new(PieceType::Pawn, PlayerColor::White));
         game.board.rebuild_tiles();
 
-        let mut moves = vec![
+        let mut moves: MoveList = vec![
             Move::new(
                 Coordinate::new(1, 1),
                 Coordinate::new(5, 5),
@@ -315,7 +338,9 @@ mod tests {
                 Coordinate::new(4, 4),
                 Piece::new(PieceType::Knight, PlayerColor::White),
             ),
-        ];
+        ]
+        .into_iter()
+        .collect();
 
         sort_captures(&game, &mut moves);
 

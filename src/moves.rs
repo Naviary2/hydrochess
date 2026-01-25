@@ -11,9 +11,7 @@ pub enum MoveGenType {
     Captures,
 }
 
-/// Stack-allocated move list with inline capacity of 128 moves.
-/// Spills to heap if this limit is exceeded, preventing panics.
-pub type MoveList = Vec<Move>;
+pub type MoveList = smallvec::SmallVec<[Move; 128]>;
 
 #[derive(Debug, Clone)]
 pub struct MoveGenContext<'a> {
@@ -24,8 +22,7 @@ pub struct MoveGenContext<'a> {
     pub enemy_king_pos: Option<&'a Coordinate>,
 }
 
-// World border for infinite chess. These are initialized to a very large box,
-// but can be overridden from JS via the playableRegion values.
+// World border for infinite chess.
 static mut COORD_MIN_X: i64 = -1_000_000_000_000_000; // default -1e15
 static mut COORD_MAX_X: i64 = 1_000_000_000_000_000; // default  1e15
 static mut COORD_MIN_Y: i64 = -1_000_000_000_000_000; // default -1e15
@@ -49,6 +46,7 @@ pub struct SlidingMoveContext<'a> {
     pub directions: &'a [(i64, i64)],
     pub indices: &'a SpatialIndices,
     pub enemy_king_pos: Option<&'a Coordinate>,
+    pub visited_targets: Option<&'a std::cell::RefCell<Vec<(Coordinate, u8)>>>,
 }
 
 /// Update world borders from JS playableRegion (left, right, bottom, top).
@@ -830,6 +828,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -843,11 +842,13 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Queen | PieceType::RoyalQueen => {
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_moves_into(
                 &SlidingMoveContext {
                     board,
@@ -856,6 +857,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -867,6 +869,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -881,6 +884,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -895,12 +899,14 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Amazon => {
             generate_leaper_moves_into(board, from, piece, 1, 2, MoveGenType::All, out);
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_moves_into(
                 &SlidingMoveContext {
                     board,
@@ -909,6 +915,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -920,6 +927,7 @@ pub fn get_pseudo_legal_moves_for_piece_into(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1362,11 +1370,15 @@ fn generate_pawn_capture_moves(
             .as_ref()
             .is_some_and(|ep| ep.square.x == capture_x && ep.square.y == capture_y)
         {
-            out.push(Move::new(
+            add_pawn_cap_move(
+                out,
                 *from,
-                Coordinate::new(capture_x, capture_y),
+                capture_x,
+                capture_y,
                 *piece,
-            ));
+                &promotion_ranks,
+                promotion_pieces,
+            );
         }
     }
 }
@@ -1604,6 +1616,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -1617,11 +1630,13 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Queen | PieceType::RoyalQueen => {
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_quiets_into(
                 &SlidingMoveContext {
                     board,
@@ -1630,6 +1645,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1641,6 +1657,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1655,6 +1672,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
@@ -1669,12 +1687,14 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: None,
                 },
                 out,
             );
         }
         PieceType::Amazon => {
             generate_leaper_moves_into(board, from, piece, 1, 2, MoveGenType::Quiets, out);
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_quiets_into(
                 &SlidingMoveContext {
                     board,
@@ -1683,6 +1703,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 0), (0, 1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1694,6 +1715,7 @@ fn generate_quiets_for_piece(
                     directions: &[(1, 1), (1, -1)],
                     indices,
                     enemy_king_pos,
+                    visited_targets: Some(&visited),
                 },
                 out,
             );
@@ -1763,14 +1785,16 @@ fn generate_pawn_quiet_moves(
         promotion_ranks: &[i64],
         promotion_pieces: &[PieceType],
     ) {
-        if promotion_ranks.contains(&to_y) {
-            for &promo in promotion_pieces {
-                let mut m = Move::new(from, Coordinate::new(to_x, to_y), piece);
-                m.promotion = Some(promo);
-                out.push(m);
+        if in_bounds(to_x, to_y) {
+            if promotion_ranks.contains(&to_y) {
+                for &promo in promotion_pieces {
+                    let mut m = Move::new(from, Coordinate::new(to_x, to_y), piece);
+                    m.promotion = Some(promo);
+                    out.push(m);
+                }
+            } else {
+                out.push(Move::new(from, Coordinate::new(to_x, to_y), piece));
             }
-        } else {
-            out.push(Move::new(from, Coordinate::new(to_x, to_y), piece));
         }
     }
 
@@ -1972,6 +1996,7 @@ fn find_cross_ray_targets_into(
     dir_y: i64,
     dist_counts: &mut FxHashMap<i64, u8>,
     royal_dists: &mut FxHashSet<i64>,
+    mut visited_targets: Option<&mut Vec<(Coordinate, u8)>>,
 ) {
     let board = ctx.board;
     let from = ctx.from;
@@ -2052,6 +2077,30 @@ fn find_cross_ray_targets_into(
                                 })
                                 .filter(|&(ny, _)| ny == py)
                         {
+                            // Check visited targets (Vertical alignment = 1)
+                            if !is_enemy && let Some(visited) = visited_targets.as_deref_mut() {
+                                let target_coord = Coordinate::new(px, py);
+                                let mut found = false;
+                                let mut pruned = false;
+                                for (c, m) in visited.iter_mut() {
+                                    if *c == target_coord {
+                                        if *m & 1 != 0 {
+                                            pruned = true;
+                                        } else {
+                                            *m |= 1;
+                                        }
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if pruned {
+                                    continue;
+                                }
+                                if !found {
+                                    visited.push((target_coord, 1));
+                                }
+                            }
+
                             // Count this piece at distance d and wiggle distances
                             add_dist(dist_counts, d, max_dist);
                             if is_royal {
@@ -2087,6 +2136,30 @@ fn find_cross_ray_targets_into(
                                 })
                                 .filter(|&(nx, _)| nx == px)
                         {
+                            // Check visited targets (Horizontal alignment = 2)
+                            if !is_enemy && let Some(visited) = visited_targets.as_deref_mut() {
+                                let target_coord = Coordinate::new(px, py);
+                                let mut found = false;
+                                let mut pruned = false;
+                                for (c, m) in visited.iter_mut() {
+                                    if *c == target_coord {
+                                        if *m & 2 != 0 {
+                                            pruned = true;
+                                        } else {
+                                            *m |= 2;
+                                        }
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if pruned {
+                                    continue;
+                                }
+                                if !found {
+                                    visited.push((target_coord, 2));
+                                }
+                            }
+
                             add_dist(dist_counts, d, max_dist);
                             if is_royal {
                                 royal_dists.insert(d);
@@ -2133,15 +2206,6 @@ fn find_cross_ray_targets_into(
                             if is_royal {
                                 royal_dists.insert(d);
                             }
-
-                            for w in 1..=wiggle {
-                                add_dist(dist_counts, d + w, max_dist);
-                                add_dist(dist_counts, d - w, max_dist);
-                                if is_royal {
-                                    royal_dists.insert(d + w);
-                                    royal_dists.insert(d - w);
-                                }
-                            }
                         }
                     }
                 }
@@ -2171,15 +2235,6 @@ fn find_cross_ray_targets_into(
                             add_dist(dist_counts, d, max_dist);
                             if is_royal {
                                 royal_dists.insert(d);
-                            }
-
-                            for w in 1..=wiggle {
-                                add_dist(dist_counts, d + w, max_dist);
-                                add_dist(dist_counts, d - w, max_dist);
-                                if is_royal {
-                                    royal_dists.insert(d + w);
-                                    royal_dists.insert(d - w);
-                                }
                             }
                         }
                     }
@@ -2442,6 +2497,9 @@ fn generate_sliding_moves_impl(
                 }
 
                 // 2. Cross-Ray pieces
+                // Borrow the visited map if available
+                let mut visited_borrow = ctx.visited_targets.as_ref().map(|rc| rc.borrow_mut());
+
                 let cr_ctx = CrossRayContext {
                     board,
                     from,
@@ -2458,6 +2516,7 @@ fn generate_sliding_moves_impl(
                     dir_y,
                     &mut dist_counts,
                     &mut royal_dists,
+                    visited_borrow.as_deref_mut(),
                 );
 
                 // 3. Check targets (O(1))
@@ -2525,7 +2584,6 @@ fn generate_sliding_moves_impl(
                         shared_targets.push(d);
                     }
                 }
-                // Also always add direct capture distance if it's an enemy
                 if closest_dist < i64::MAX && closest_is_enemy {
                     shared_targets.push(closest_dist);
                 }
@@ -2628,7 +2686,7 @@ fn find_blocker_via_indices(
 /// 2. O(log n) binary search in spatial indices for blocker detection
 /// 3. When no blocker, only generates moves to "interesting" squares aligned with cross-ray pieces
 /// 4. is_prime_fast() for O(1) primality checks instead of O(√n)
-/// gen_type controls which move types to generate: All, Quiets only, or Captures only
+///    gen_type controls which move types to generate: All, Quiets only, or Captures only
 fn generate_huygen_moves_into(
     board: &Board,
     from: &Coordinate,
@@ -2663,10 +2721,11 @@ fn generate_huygen_moves_into(
 
                 if prime_dist == blocker_dist {
                     // At blocker - can only move here if enemy (capture)
-                    if let Some(color) = blocker_color {
-                        if color != my_color && gen_type != MoveGenType::Quiets {
-                            out.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
-                        }
+                    if let Some(color) = blocker_color
+                        && color != my_color
+                        && gen_type != MoveGenType::Quiets
+                    {
+                        out.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
                     }
                 } else {
                     // Before blocker - empty square, valid move
@@ -2678,15 +2737,15 @@ fn generate_huygen_moves_into(
 
             // IMPORTANT: Handle captures at prime distances > 127
             // The loop above only covers primes up to 127, but blocker could be further
-            if blocker_dist > 127 && gen_type != MoveGenType::Quiets {
-                if let Some(color) = blocker_color {
-                    if color != my_color {
-                        // Blocker is enemy at prime distance > 127 - generate capture
-                        let to_x = from.x + dir_x * blocker_dist;
-                        let to_y = from.y + dir_y * blocker_dist;
-                        out.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
-                    }
-                }
+            if blocker_dist > 127
+                && gen_type != MoveGenType::Quiets
+                && let Some(color) = blocker_color
+                && color != my_color
+            {
+                // Blocker is enemy at prime distance > 127 - generate capture
+                let to_x = from.x + dir_x * blocker_dist;
+                let to_y = from.y + dir_y * blocker_dist;
+                out.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
             }
         } else {
             // CASE 2: No blocker found at any prime distance
@@ -2709,7 +2768,7 @@ fn generate_huygen_moves_into(
                         indices.rows.get(&to_y).is_some_and(|v| !v.is_empty())
                     };
 
-                    if aligned || prime_dist <= 3 {
+                    if in_bounds(to_x, to_y) && (aligned || prime_dist <= 3) {
                         out.push(Move::new(*from, Coordinate::new(to_x, to_y), *piece));
                     }
                 }
@@ -2886,6 +2945,11 @@ fn generate_rose_moves_into(
                 let tx = fx + cum_dx;
                 let ty = fy + cum_dy;
 
+                // Skip if outside world border
+                if !in_bounds(tx, ty) {
+                    break;
+                }
+
                 // Check if this square is occupied
                 let occupant = board.get_piece(tx, ty);
                 let is_blocked = occupant.is_some();
@@ -2895,12 +2959,12 @@ fn generate_rose_moves_into(
 
                 if is_blocked {
                     // Generate capture if enemy and not already seen
-                    if !already_seen {
-                        if let Some(target) = occupant {
-                            if is_enemy_piece(target, my_color) && gen_type != MoveGenType::Quiets {
-                                out.push(Move::new(*from, Coordinate::new(tx, ty), *piece));
-                            }
-                        }
+                    if !already_seen
+                        && let Some(target) = occupant
+                        && is_enemy_piece(target, my_color)
+                        && gen_type != MoveGenType::Quiets
+                    {
+                        out.push(Move::new(*from, Coordinate::new(tx, ty), *piece));
                     }
                     break; // Blocked - can't continue spiral (regardless of seen status)
                 }
@@ -2979,14 +3043,16 @@ fn generate_pawn_moves_into(
         promotion_ranks: &[i64],
         promotion_pieces: &[PieceType],
     ) {
-        if promotion_ranks.contains(&to_y) {
-            for &promo in promotion_pieces {
-                let mut m = Move::new(from, Coordinate::new(to_x, to_y), piece);
-                m.promotion = Some(promo);
-                out.push(m);
+        if in_bounds(to_x, to_y) {
+            if promotion_ranks.contains(&to_y) {
+                for &promo in promotion_pieces {
+                    let mut m = Move::new(from, Coordinate::new(to_x, to_y), piece);
+                    m.promotion = Some(promo);
+                    out.push(m);
+                }
+            } else {
+                out.push(Move::new(from, Coordinate::new(to_x, to_y), piece));
             }
-        } else {
-            out.push(Move::new(from, Coordinate::new(to_x, to_y), piece));
         }
     }
 
@@ -3044,11 +3110,15 @@ fn generate_pawn_moves_into(
             .as_ref()
             .is_some_and(|ep| ep.square.x == capture_x && ep.square.y == capture_y)
         {
-            out.push(Move::new(
+            add_pawn_move(
+                out,
                 *from,
-                Coordinate::new(capture_x, capture_y),
+                capture_x,
+                capture_y,
                 *piece,
-            ));
+                &promotion_ranks,
+                promotion_pieces,
+            );
         }
     }
 }
@@ -3526,6 +3596,7 @@ mod tests {
                 directions: ortho,
                 indices: &indices,
                 enemy_king_pos: None,
+                visited_targets: None,
             },
             &mut moves,
         );
@@ -3554,6 +3625,7 @@ mod tests {
                 directions: diag,
                 indices: &indices,
                 enemy_king_pos: None,
+                visited_targets: None,
             },
             &mut moves,
         );
@@ -3878,5 +3950,104 @@ mod tests {
             found,
             "Move (10,-30) -> (77,-30) should be generated to target King at (77,-41)"
         );
+    }
+
+    mod border_handling_tests {
+        use super::*;
+
+        #[test]
+        fn test_huygen_border_respect() {
+            let mut board = Board::new();
+            let from = Coordinate::new(0, 0);
+            let piece = Piece::new(PieceType::Huygen, PlayerColor::White);
+            board.set_piece(from.x, from.y, piece);
+            board.rebuild_tiles();
+            let indices = SpatialIndices::new(&board);
+
+            // Set small border
+            set_world_bounds(-5, 5, -5, 5);
+
+            let mut moves = MoveList::new();
+            generate_huygen_moves_into(
+                &board,
+                &from,
+                &piece,
+                &indices,
+                MoveGenType::All,
+                &mut moves,
+            );
+
+            for m in &moves {
+                assert!(in_bounds(m.to.x, m.to.y), "Move {:?} is out of bounds", m);
+            }
+
+            // Verify some moves were generated within bounds
+            assert!(!moves.is_empty());
+
+            // Reset bounds
+            set_world_bounds(
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+            );
+        }
+
+        #[test]
+        fn test_rose_border_respect() {
+            let mut board = Board::new();
+            let from = Coordinate::new(0, 0);
+            let piece = Piece::new(PieceType::Rose, PlayerColor::White);
+            board.set_piece(from.x, from.y, piece);
+            board.rebuild_tiles();
+
+            // Set small border
+            set_world_bounds(-2, 2, -2, 2);
+
+            let mut moves = MoveList::new();
+            generate_rose_moves_into(&board, &from, &piece, MoveGenType::All, &mut moves);
+
+            for m in &moves {
+                assert!(in_bounds(m.to.x, m.to.y), "Move {:?} is out of bounds", m);
+            }
+
+            // Reset bounds
+            set_world_bounds(
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+            );
+        }
+
+        #[test]
+        fn test_pawn_border_respect() {
+            let mut board = Board::new();
+            // Pawn at white terminal rank in a tiny world
+            let from = Coordinate::new(0, 5);
+            let piece = Piece::new(PieceType::Pawn, PlayerColor::White);
+            board.set_piece(from.x, from.y, piece);
+            board.rebuild_tiles();
+
+            let rules = GameRules::default();
+            let special = FxHashSet::default();
+
+            // Border ends just above the pawn
+            set_world_bounds(-10, 10, -10, 5);
+
+            let mut moves = MoveList::new();
+            generate_pawn_moves_into(&board, &from, &piece, &special, &None, &rules, &mut moves);
+
+            // Should have NO moves because they all go to y=6 which is out of bounds
+            assert!(moves.is_empty(), "Pawn should have no moves out of bounds");
+
+            // Reset bounds
+            set_world_bounds(
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+                -1_000_000_000_000_000,
+                1_000_000_000_000_000,
+            );
+        }
     }
 }

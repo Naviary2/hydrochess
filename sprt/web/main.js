@@ -1,6 +1,11 @@
-import initOld, { Engine as EngineOld } from './pkg-old/hydrochess_wasm.js';
-import initNew, { Engine as EngineNew } from './pkg-new/hydrochess_wasm.js';
-import { VARIANTS, getVariantData, getVariantsWithCustomEval } from './variants.js';
+import initOld, * as wasmOld from './pkg-old/hydrochess_wasm.js';
+const EngineOld = wasmOld.Engine;
+import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
+const EngineNew = wasmNew.Engine;
+const initThreadPoolNew = wasmNew.initThreadPool;
+import { VARIANTS, getVariantData, getAllVariants, getVariantsWithCustomEval } from './variants.js';
+
+let isNewEngineMT = false;
 
 // Map internal engine piece letters to infinitechess.org ICN codes (lowercase for ICN)
 function engineLetterToICNCode(letter) {
@@ -11,6 +16,38 @@ function engineLetterToICNCode(letter) {
         'd': 'rc', 's': 'nr', 'u': 'hu', 'o': 'ro', 'x': 'ob', 'v': 'vo'
     };
     return map[letter] || letter;
+}
+
+function updateMTUI() {
+    if (isNewEngineMT) {
+        sprtConcurrencyEl.value = "1";
+        sprtConcurrencyEl.disabled = true;
+        sprtConcurrencyEl.title = "Concurrency locked to 1 game while Multithreading is active.";
+
+        // Dim the label
+        const label = sprtConcurrencyEl.previousElementSibling;
+        if (label && label.tagName === 'LABEL') {
+            label.classList.add('disabled-label');
+            label.textContent = 'Concurrency (locked for MT)';
+        }
+
+        // Add MT indicator to header if not already there
+        if (!document.getElementById('mtBadge')) {
+            const h1 = document.querySelector('header h1');
+            const badge = document.createElement('span');
+            badge.id = 'mtBadge';
+            badge.className = 'mt-badge';
+            badge.textContent = 'MT';
+            h1.appendChild(badge);
+        }
+
+        log('Multithreaded engine detected. Concurrency locked to 1 game for stability.', 'info');
+
+        // Set MT defaults: 3+0.03 STC
+        sprtTcMode.value = 'standard';
+        sprtTimeControlEl.value = '3+0.03';
+        updateTcUi(); // Sync the UI labels and disabled states
+    }
 }
 
 // UI Elements
@@ -69,7 +106,7 @@ let selectedVariants = [];
 let variantQueue = [];
 let currentVariantIndex = 0;
 
-// SPRT configuration (mirrors sprt.js)
+// SPRT configuration
 const CONFIG = {
     elo0: -5,
     elo1: 5,
@@ -78,13 +115,14 @@ const CONFIG = {
     boundsPreset: 'all',
     boundsMode: 'gainer',
     timeControl: '10+0.1',
+    tcMode: 'smart_mix',
     maxGames: 1000,
     minGames: 500,
-    maxMoves: 200,
+    maxMoves: 300,
     concurrency: navigator.hardwareConcurrency || 1,
-    materialThreshold: 0,
+    materialThreshold: 2000,
 
-    searchNoise: 7,
+    searchNoise: 50,
 };
 
 const MAX_CONCURRENCY_STORAGE_KEY = 'sprtMaxSafeConcurrency';
@@ -131,35 +169,31 @@ function getRandomOpening() {
 
 // Variant management functions
 function loadVariants() {
-    // Create a temporary worker to get variants
-    const worker = new Worker('./sprt-worker.js', { type: 'module' });
-
-    worker.onmessage = (e) => {
-        if (e.data.type === 'variants') {
-            availableVariants = e.data.variants;
-            populateVariantDropdown();
-            loadVariantSelection();
-            worker.terminate();
-        }
-    };
-
-    worker.postMessage({ type: 'getVariants' });
+    availableVariants = getAllVariants();
+    populateVariantDropdown();
+    loadVariantSelection();
 }
 
 function populateVariantDropdown() {
     // Get variants with custom eval (these will be disabled by default for SPRT stability)
     const customEvalVariants = new Set(getVariantsWithCustomEval());
 
+    // Variants to disable by default: custom evals AND Abundance
+    const defaultsDisabled = new Set(customEvalVariants);
+    defaultsDisabled.add('Abundance');
+
     sprtVariantsEl.innerHTML = '';
     availableVariants.forEach(variant => {
         const option = document.createElement('option');
         option.value = variant;
+
         // Mark variants with custom eval in the dropdown
         option.textContent = customEvalVariants.has(variant)
             ? `${variant} (custom eval)`
             : variant;
-        // Default: deselect variants with custom eval to reduce SPRT volatility
-        option.selected = !customEvalVariants.has(variant);
+
+        // Default: deselect variants that are disabled by default
+        option.selected = !defaultsDisabled.has(variant);
         sprtVariantsEl.appendChild(option);
     });
 }
@@ -565,18 +599,14 @@ function getTcParams(mode, valStr, pairIndex) {
     if (mode === 'smart_mix') {
         // Deterministic pseudo-random based on pairIndex so pairs match
         const r = (pairIndex * 137 + 13) % 100;
-        if (r < 40) { // 40% Standard
-            const opts = ['10+0.1', '5+0.05', '1+0.02', '3+0.03', '60+0.5'];
+        if (r < 75) { // 75% Standard
+            const opts = ['10+0.1', '5+0.05', '3+0.03'];
             const pick = opts[pairIndex % opts.length];
             return getTcParams('standard', pick, pairIndex);
-        } else if (r < 70) { // 30% Fixed Time
-            const opts = ['0.1', '0.25', '0.5', '1.0', '2.0'];
+        } else { // 25% Fixed Time
+            const opts = ['0.1', '0.25', '0.5'];
             const pick = opts[pairIndex % opts.length];
             return getTcParams('fixed_time', pick, pairIndex);
-        } else { // 30% Fixed Depth
-            const opts = ['4', '5', '6', '7', '8'];
-            const pick = opts[pairIndex % opts.length];
-            return getTcParams('fixed_depth', pick, pairIndex);
         }
     }
 
@@ -667,10 +697,19 @@ async function initWasm() {
         // Initialize both old and new WASM modules
         await initOld();
         await initNew();
+
+        isNewEngineMT = (typeof initThreadPoolNew === 'function');
+
         wasmReady = true;
         setStatus('ready', 'WASM loaded and ready');
         runSprtBtn.disabled = false;
-        sprtConcurrencyEl.value = CONFIG.concurrency;
+
+        if (isNewEngineMT) {
+            updateMTUI();
+        } else {
+            sprtConcurrencyEl.value = CONFIG.concurrency;
+        }
+
         log('WASM module initialized successfully', 'success');
 
 
@@ -794,12 +833,26 @@ async function detectMaxConcurrency(maxCap = 64) {
 async function runSprt() {
     if (!wasmReady || sprtRunning) return;
 
+    // Immediate UI Reset
+    sprtWinsEl.textContent = '0';
+    sprtLossesEl.textContent = '0';
+    sprtDrawsEl.textContent = '0';
+    sprtEloEl.textContent = '-';
+    // Reset last stats snapshot
+    lastWins = 0;
+    lastLosses = 0;
+    lastDraws = 0;
+    lastElo = 0;
+    lastEloError = 0;
+    lastLLR = 0;
+    lastBounds = null;
+
     sprtRunning = true;
     stopRequested = false;
     runSprtBtn.disabled = true;
     stopSprtBtn.disabled = false;
 
-    // Read configuration from UI
+    // Read configuration from UI into global CONFIG first (to persist defaults)
     CONFIG.boundsPreset = sprtBoundsPreset.value || 'all';
     CONFIG.boundsMode = sprtBoundsMode.value || 'gainer';
     CONFIG.alpha = parseFloat(sprtAlphaEl.value) || 0.05;
@@ -817,7 +870,8 @@ async function runSprt() {
     }
     CONFIG.minGames = parseInt(sprtMinGames.value, 10) || 500;
     CONFIG.maxGames = parseInt(sprtMaxGames.value, 10) || 1000;
-    CONFIG.maxMoves = parseInt(sprtMaxMoves.value, 10) || 200;
+    const valMoves = parseInt(sprtMaxMoves.value, 10);
+    CONFIG.maxMoves = (Number.isFinite(valMoves) && valMoves > 0) ? valMoves : Infinity;
     {
         const mtVal = (sprtMaterialThresholdEl.value || '').trim();
         const mt = parseInt(mtVal, 10);
@@ -832,16 +886,44 @@ async function runSprt() {
     if (CONFIG.minGames % 2 !== 0) CONFIG.minGames++;
     if (CONFIG.maxGames % 2 !== 0) CONFIG.maxGames++;
 
-    applyBoundsPreset();
+    applyBoundsPreset(); // This updates CONFIG.elo0/elo1 based on preset
+
+    // --- SNAPSHOT CONFIGURATION ---
+    // Create a local runConfig to isolate this run from future UI/global changes
+    const runConfig = { ...CONFIG };
+
+    // Calculate bounds based on the SNAPSHOTTED config
+    const bounds = calculateBounds(runConfig.alpha, runConfig.beta);
+    // Update global lastBounds so stopSprt can display them correctly if aborted
+    lastBounds = bounds;
+
+    // --- SNAPSHOT VARIANTS ---
+    // Create a local variant queue sequence to isolate from UI changes.
+    // If variants were just selected, variantQueue is up-to-date.
+    // We make a copy to lock it in.
+    let runVariantQueue = [...variantQueue];
+    if (runVariantQueue.length === 0) {
+        runVariantQueue.push({ variant: 'Classical', newPlaysWhite: true });
+    }
+    const uniqueVariants = new Set(runVariantQueue.map(v => v.variant));
+    const isMultiVariantRun = uniqueVariants.size > 1;
+    let nextVariantIndex = 0;
+
+    function getNextVariantForRun() {
+        const result = runVariantQueue[nextVariantIndex];
+        nextVariantIndex = (nextVariantIndex + 1) % runVariantQueue.length;
+        return result;
+    }
+
     // Validate for Standard mode only, or basic check.
     // If smart_mix, we ignore inputs essentially.
-    let displayTcString = CONFIG.timeControl;
+    let displayTcString = runConfig.timeControl;
     let displayPerMoveMs = 0;
 
-    if (CONFIG.tcMode === 'standard') {
-        const tc = parseTimeControl(CONFIG.timeControl);
+    if (runConfig.tcMode === 'standard') {
+        const tc = parseTimeControl(runConfig.timeControl);
         if (!tc) {
-            log('Invalid time control: ' + CONFIG.timeControl + ' (expected base+inc in seconds)', 'error');
+            log('Invalid time control: ' + runConfig.timeControl + ' (expected base+inc in seconds)', 'error');
             sprtRunning = false;
             runSprtBtn.disabled = false;
             stopSprtBtn.disabled = true;
@@ -849,28 +931,19 @@ async function runSprt() {
         }
         displayTcString = tc.tcString;
         displayPerMoveMs = Math.max(10, Math.round(((tc.baseSec / 20) + (tc.incSec / 2)) * 1000));
-    } else if (CONFIG.tcMode === 'smart_mix') {
+    } else if (runConfig.tcMode === 'smart_mix') {
         displayTcString = 'Smart Mix';
         displayPerMoveMs = 'Var';
     } else {
         // fixed time/depth
-        const p = getTcParams(CONFIG.tcMode, CONFIG.timeControl, 0);
+        const p = getTcParams(runConfig.tcMode, runConfig.timeControl, 0);
         displayTcString = p.tcString;
         displayPerMoveMs = p.timePerMove || 0;
     }
     const timePerMove = displayPerMoveMs; // For info log only
-    const bounds = calculateBounds(CONFIG.alpha, CONFIG.beta);
-    // reset last stats snapshot for this run
-    lastBounds = bounds;
-    lastWins = 0;
-    lastLosses = 0;
-    lastDraws = 0;
-    lastElo = 0;
-    lastEloError = 0;
-    lastLLR = 0;
 
-    const maxGames = CONFIG.maxGames;
-    const maxMovesPerGame = CONFIG.maxMoves;
+    const maxGames = runConfig.maxGames;
+    const maxMovesPerGame = runConfig.maxMoves;
 
     let wins = 0;
     let losses = 0;
@@ -887,10 +960,11 @@ async function runSprt() {
     clearLog();
     sprtStatusEl.textContent = 'Status: running...';
     sprtStatusEl.className = 'sprt-status';
-    log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + CONFIG.tcMode + ', TC=' + displayTcString, 'info');
+    const sprtBaseSeed = Date.now() ^ ((Math.random() * 0xFFFFFFFF) | 0);
+    log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + runConfig.tcMode + ', TC=' + displayTcString + ', Seed=' + sprtBaseSeed, 'info');
     sprtLog('SPRT Test Started (noisy opening moves for first 4 ply, paired games)');
 
-    const maxConcurrent = Math.max(1, CONFIG.concurrency | 0);
+    const maxConcurrent = Math.max(1, runConfig.concurrency | 0);
     const workers = [];
     let activeWorkers = 0;
     let nextGameIndex = 0;
@@ -900,22 +974,24 @@ async function runSprt() {
         if (gameIndex >= maxGames) return false;
         activeWorkers++;
 
-        // Get next variant from the cycling queue
-        const { variant: variantName, newPlaysWhite } = getNextVariant();
+        // Get next variant from the LOCAL SNAPSHOT queue
+        const { variant: variantName, newPlaysWhite } = getNextVariantForRun();
 
         // Games run in pairs: each variant appears twice (both colors)
         const pairIndex = Math.floor(gameIndex / 2);
 
-        const tcParams = getTcParams(CONFIG.tcMode, CONFIG.timeControl, pairIndex);
+        // Use runConfig for TC params
+        const tcParams = getTcParams(runConfig.tcMode, runConfig.timeControl, pairIndex);
 
         worker.postMessage({
             type: 'runGame',
             gameIndex,
             timePerMove: tcParams.timePerMove,
-            maxMoves: maxMovesPerGame,
+            maxMoves: (variantName === 'Abundance' && Number.isFinite(maxMovesPerGame) && isMultiVariantRun) ? Math.min(maxMovesPerGame * 1.5, 1000) : maxMovesPerGame,
             newPlaysWhite,
-            materialThreshold: CONFIG.materialThreshold,
-            searchNoise: CONFIG.searchNoise,
+            materialThreshold: runConfig.materialThreshold,
+            searchNoise: runConfig.searchNoise,
+            seed: sprtBaseSeed + pairIndex,
             baseTimeMs: tcParams.baseTimeMs,
             incrementMs: tcParams.incrementMs,
             maxDepth: tcParams.maxDepth,
@@ -975,7 +1051,8 @@ async function runSprt() {
                         else perVariantStats[vName].draws++;
 
                         const total = wins + losses + draws;
-                        llr = calculateLLR(wins, losses, draws, CONFIG.elo0, CONFIG.elo1);
+                        // Use runConfig for ELO
+                        llr = calculateLLR(wins, losses, draws, runConfig.elo0, runConfig.elo1);
                         const { elo, error } = estimateElo(wins, losses, draws);
 
                         // update last stats snapshot so Stop can show partial results
@@ -1008,8 +1085,8 @@ async function runSprt() {
                         // Only check SPRT termination after even number of games (completed pairs)
                         const canTerminate = (total % 2 === 0);
                         const reachedBounds = canTerminate &&
-                            total >= CONFIG.minGames && (llr >= bounds.upper || llr <= bounds.lower);
-                        const reachedMax = canTerminate && total >= CONFIG.maxGames;
+                            total >= runConfig.minGames && (llr >= bounds.upper || llr <= bounds.lower);
+                        const reachedMax = canTerminate && total >= runConfig.maxGames;
 
                         activeWorkers--;
 
@@ -1054,7 +1131,7 @@ async function runSprt() {
                             errStr.includes('Cannot allocate Wasm memory');
                         if (oomLike) {
                             const stored = loadStoredMaxConcurrency();
-                            const current = CONFIG.concurrency | 0;
+                            const current = runConfig.concurrency | 0;
                             const proposed = Math.max(1, Math.min(current - 1, stored || current));
                             if (proposed < (stored || Infinity)) {
                                 saveStoredMaxConcurrency(proposed);
@@ -1248,6 +1325,50 @@ downloadLogsBtn.addEventListener('click', downloadLogs);
 downloadGamesTxtBtn.addEventListener('click', downloadGames);
 downloadGamesJsonBtn.addEventListener('click', downloadGamesJson);
 sprtVariantsEl.addEventListener('change', updateSelectedVariants);
+sprtTcMode.addEventListener('change', updateTcUi);
+
+function updateTcUi() {
+    const mode = sprtTcMode.value;
+    const tcLabel = document.getElementById('sprtTcLabel');
+
+    // Reset label opacity
+    if (tcLabel) tcLabel.classList.remove('disabled-label');
+
+    if (mode === 'smart_mix') {
+        sprtTimeControlEl.value = 'Smart Mix';
+        sprtTimeControlEl.disabled = true;
+        if (tcLabel) {
+            tcLabel.classList.add('disabled-label');
+            tcLabel.textContent = 'Time Control (Config Ignored)';
+        }
+    } else {
+        sprtTimeControlEl.disabled = false;
+
+        // Update label text based on mode
+        if (tcLabel) {
+            if (mode === 'standard') tcLabel.textContent = 'Time Control (base+inc)';
+            else if (mode === 'fixed_time') tcLabel.textContent = 'Fixed Time per Move (s)';
+            else if (mode === 'fixed_depth') tcLabel.textContent = 'Fixed Depth (ply)';
+        }
+
+        // If switching away from Smart Mix, restore a logical default
+        if (sprtTimeControlEl.value === 'Smart Mix') {
+            if (mode === 'fixed_time') sprtTimeControlEl.value = '0.15';
+            else if (mode === 'fixed_depth') sprtTimeControlEl.value = '6';
+            else sprtTimeControlEl.value = '10+0.1';
+        }
+    }
+}
+
+// Initialize UI state
+updateTcUi();
+
+window.addEventListener('beforeunload', (e) => {
+    if (sprtRunning) {
+        e.preventDefault();
+        e.returnValue = ''; // Required for some browsers
+    }
+});
 
 // Initialize variant loading
 loadVariants();
@@ -1322,29 +1443,3 @@ window.__sprt_compute_features = async (rawSamples) => {
 };
 
 initWasm();
-
-/* UI Logic for TC Mode */
-if (typeof sprtTcMode !== 'undefined' && sprtTcMode) {
-    const sprtTcLabel = document.getElementById('sprtTcLabel');
-    // sprtTimeControlEl is already defined globally at top
-
-    sprtTcMode.addEventListener('change', () => {
-        const mode = sprtTcMode.value;
-        if (mode === 'standard') {
-            sprtTcLabel.textContent = 'Time Control (base+inc)';
-            if (!sprtTimeControlEl.value.includes('+')) sprtTimeControlEl.value = '10+0.1';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'fixed_time') {
-            sprtTcLabel.textContent = 'Fixed Time per Move (s)';
-            if (sprtTimeControlEl.value.includes('+') || !sprtTimeControlEl.value) sprtTimeControlEl.value = '0.15';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'fixed_depth') {
-            sprtTcLabel.textContent = 'Fixed Depth (ply)';
-            if (sprtTimeControlEl.value.includes('.') || sprtTimeControlEl.value.includes('+')) sprtTimeControlEl.value = '4';
-            sprtTimeControlEl.disabled = false;
-        } else if (mode === 'smart_mix') {
-            sprtTcLabel.textContent = 'Smart Mix (Config ignored)';
-            sprtTimeControlEl.disabled = true;
-        }
-    });
-}
