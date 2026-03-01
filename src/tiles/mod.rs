@@ -1,10 +1,7 @@
 //! Sparse Tiled Bitboards for Infinite Chess
 //!
-//! This module implements an 8×8 tile-based representation that dramatically
-//! reduces HashMap lookups for leaper attack detection and move generation.
+//! This module implements an 8×8 tile-based representation.
 //! Each tile contains u64 occupancy bitboards and packed piece arrays.
-//!
-//! The design is SIMD-ready: piece array scans can be vectorized with u8x16.
 
 pub mod magic;
 pub mod masks;
@@ -76,9 +73,6 @@ pub fn neighbor_index(dx: i64, dy: i64) -> usize {
 
 /// An 8×8 tile containing occupancy bitboards and packed piece data.
 /// Aligned to 64 bytes for cache efficiency.
-///
-/// BITBOARD ARCHITECTURE: Per-piece-type occupancy for optimized move generation.
-/// This allows O(popcount) iteration over specific piece types without scanning.
 #[repr(C, align(64))]
 #[derive(Clone, Debug)]
 pub struct Tile {
@@ -255,11 +249,11 @@ impl Tile {
     /// Get piece at local index, if any.
     #[inline]
     pub fn get_piece(&self, idx: usize) -> Option<Piece> {
-        let packed = self.piece[idx];
-        if packed == 0 {
-            None
+        let bit = 1u64 << idx;
+        if (self.occ_all & bit) != 0 {
+            Some(Piece::from_packed(self.piece[idx]))
         } else {
-            Some(Piece::from_packed(packed))
+            None
         }
     }
 
@@ -413,13 +407,19 @@ impl TileTable {
     }
 
     /// Hash tile coordinates to bucket index.
-    #[inline]
+    #[inline(always)]
     fn hash(cx: i64, cy: i64) -> usize {
-        // FxHash-style mixing for (cx, cy)
-        let mut h = cx as u64;
-        h = h.wrapping_mul(0x517cc1b727220a95);
-        h ^= cy as u64;
-        h = h.wrapping_mul(0x517cc1b727220a95);
+        const P1: u64 = 0x517cc1b727220a95; // FxHash prime
+        const P2: u64 = 0x9e3779b185ebca87; // Golden ratio prime
+
+        let h1 = (cx as u64).wrapping_mul(P1);
+        let h2 = (cy as u64).wrapping_mul(P2).rotate_left(32);
+
+        let mut h = h1 ^ h2;
+        h ^= h >> 33;
+        h = h.wrapping_mul(0x319642b7d2d84941);
+        h ^= h >> 33;
+
         (h as usize) & TILE_TABLE_MASK
     }
 
@@ -428,7 +428,8 @@ impl TileTable {
     pub fn get_tile(&self, cx: i64, cy: i64) -> Option<&Tile> {
         let mut idx = Self::hash(cx, cy);
         for _ in 0..TILE_TABLE_CAPACITY {
-            let bucket = &self.buckets[idx];
+            // Unsafe: idx is masked by TILE_TABLE_MASK
+            let bucket = unsafe { self.buckets.get_unchecked(idx) };
             match bucket.state {
                 BucketState::Empty => return None,
                 BucketState::Occupied => {
@@ -448,12 +449,13 @@ impl TileTable {
     pub fn get_tile_mut(&mut self, cx: i64, cy: i64) -> Option<&mut Tile> {
         let mut idx = Self::hash(cx, cy);
         for _ in 0..TILE_TABLE_CAPACITY {
-            let bucket = &self.buckets[idx];
+            // Unsafe: idx is masked by TILE_TABLE_MASK
+            let bucket = unsafe { self.buckets.get_unchecked(idx) };
             match bucket.state {
                 BucketState::Empty => return None,
                 BucketState::Occupied => {
                     if bucket.cx == cx && bucket.cy == cy {
-                        return Some(&mut self.buckets[idx].tile);
+                        return Some(unsafe { &mut self.buckets.get_unchecked_mut(idx).tile });
                     }
                 }
                 BucketState::Tombstone => {}
@@ -469,9 +471,13 @@ impl TileTable {
         let mut idx = Self::hash(cx, cy);
 
         loop {
-            match self.buckets[idx].state {
+            // Unsafe: idx is masked by TILE_TABLE_MASK
+            let bucket = unsafe { self.buckets.get_unchecked(idx) };
+            match bucket.state {
                 BucketState::Empty | BucketState::Tombstone => {
-                    self.buckets[idx] = Bucket {
+                    // We found a slot, get mutable reference safely (or use unchecked_mut)
+                    let bucket_mut = unsafe { self.buckets.get_unchecked_mut(idx) };
+                    *bucket_mut = Bucket {
                         cx,
                         cy,
                         state: BucketState::Occupied,
@@ -479,11 +485,11 @@ impl TileTable {
                     };
                     self.count += 1;
                     self.occ_mask[idx / 64] |= 1u64 << (idx % 64);
-                    return &mut self.buckets[idx].tile;
+                    return &mut bucket_mut.tile;
                 }
                 BucketState::Occupied => {
-                    if self.buckets[idx].cx == cx && self.buckets[idx].cy == cy {
-                        return &mut self.buckets[idx].tile;
+                    if bucket.cx == cx && bucket.cy == cy {
+                        return unsafe { &mut self.buckets.get_unchecked_mut(idx).tile };
                     }
                 }
             }
@@ -499,11 +505,15 @@ impl TileTable {
         let start_idx = idx;
 
         loop {
-            match self.buckets[idx].state {
+            // Unsafe: idx is masked by TILE_TABLE_MASK
+            let bucket = unsafe { self.buckets.get_unchecked(idx) };
+            match bucket.state {
                 BucketState::Occupied => {
-                    if self.buckets[idx].cx == cx && self.buckets[idx].cy == cy {
-                        self.buckets[idx].state = BucketState::Tombstone;
-                        self.buckets[idx].tile.clear();
+                    if bucket.cx == cx && bucket.cy == cy {
+                        // Found logic
+                        let bucket_mut = unsafe { self.buckets.get_unchecked_mut(idx) };
+                        bucket_mut.state = BucketState::Tombstone;
+                        bucket_mut.tile.clear();
                         self.count -= 1;
                         self.occ_mask[idx / 64] &= !(1u64 << (idx % 64));
                         return;
@@ -657,23 +667,17 @@ impl<'a> Iterator for TilePieceIter<'a> {
         }
         let idx = self.bits.trailing_zeros() as usize;
         self.bits &= self.bits - 1; // Clear lowest bit
-        let packed = self.piece[idx];
-        if packed != 0 {
-            Some((idx, Piece::from_packed(packed)))
-        } else {
-            self.next() // Skip if somehow piece array is inconsistent
-        }
+        Some((idx, Piece::from_packed(self.piece[idx])))
     }
 }
 
 // ============================================================================
-// TileTable Fast Piece Iteration (for Evaluation)
+// TileTable Piece Iteration
 // ============================================================================
 
 impl TileTable {
     /// Iterate all pieces across all tiles.
     /// Yields (world_x, world_y, Piece) using CTZ bitboard iteration.
-    /// Much faster than HashMap iteration for evaluation loops.
     #[inline]
     pub fn iter_all_pieces(&self) -> impl Iterator<Item = (i64, i64, Piece)> + '_ {
         TileTablePieceIter {
@@ -724,14 +728,12 @@ impl<'a> Iterator for TileTablePieceIter<'a> {
 
                 if let Some(bucket_idx) = self.current_bucket_idx {
                     let bucket = &self.table.buckets[bucket_idx];
+                    let local_x = (local_idx % 8) as i64;
+                    let local_y = (local_idx / 8) as i64;
+                    let world_x = bucket.cx * TILE_SIZE + local_x;
+                    let world_y = bucket.cy * TILE_SIZE + local_y;
                     let packed = bucket.tile.piece[local_idx];
-                    if packed != 0 {
-                        let local_x = (local_idx % 8) as i64;
-                        let local_y = (local_idx / 8) as i64;
-                        let world_x = bucket.cx * TILE_SIZE + local_x;
-                        let world_y = bucket.cy * TILE_SIZE + local_y;
-                        return Some((world_x, world_y, Piece::from_packed(packed)));
-                    }
+                    return Some((world_x, world_y, Piece::from_packed(packed)));
                 }
                 continue;
             }
@@ -784,14 +786,12 @@ impl<'a> Iterator for TileTableColorIter<'a> {
 
                 if let Some(bucket_idx) = self.current_bucket_idx {
                     let bucket = &self.table.buckets[bucket_idx];
+                    let local_x = (local_idx % 8) as i64;
+                    let local_y = (local_idx / 8) as i64;
+                    let world_x = bucket.cx * TILE_SIZE + local_x;
+                    let world_y = bucket.cy * TILE_SIZE + local_y;
                     let packed = bucket.tile.piece[local_idx];
-                    if packed != 0 {
-                        let local_x = (local_idx % 8) as i64;
-                        let local_y = (local_idx / 8) as i64;
-                        let world_x = bucket.cx * TILE_SIZE + local_x;
-                        let world_y = bucket.cy * TILE_SIZE + local_y;
-                        return Some((world_x, world_y, Piece::from_packed(packed)));
-                    }
+                    return Some((world_x, world_y, Piece::from_packed(packed)));
                 }
                 continue;
             }

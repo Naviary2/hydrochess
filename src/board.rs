@@ -227,7 +227,6 @@ impl PieceType {
         }
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn from_site_code(code: &str) -> Self {
         match code {
             "VO" => PieceType::Void,
@@ -308,9 +307,7 @@ impl PieceType {
 // Piece - Packed representation (1 byte)
 
 /// Packed piece representation: encodes both piece type and color in a single byte.
-///
-/// Encoding: `packed = color * NUM_PIECE_TYPES + piece_type`
-/// Matches the infinitechess.org JS encoding.
+/// Encoding: `packed = (color << 5) | piece_type`
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Piece(u8);
@@ -357,7 +354,7 @@ impl<'de> Deserialize<'de> for Piece {
 impl Piece {
     #[inline]
     pub fn new(piece_type: PieceType, color: PlayerColor) -> Self {
-        Piece((color as u8) * NUM_PIECE_TYPES + (piece_type as u8))
+        Piece((color as u8) << 5 | (piece_type as u8))
     }
 
     #[inline(always)]
@@ -372,12 +369,12 @@ impl Piece {
 
     #[inline(always)]
     pub fn piece_type(&self) -> PieceType {
-        PieceType::from_u8(self.0 % NUM_PIECE_TYPES)
+        PieceType::from_u8(self.0 & 31)
     }
 
     #[inline(always)]
     pub fn color(&self) -> PlayerColor {
-        PlayerColor::from_u8(self.0 / NUM_PIECE_TYPES)
+        PlayerColor::from_u8(self.0 >> 5)
     }
 }
 
@@ -388,14 +385,12 @@ impl Piece {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "BoardRaw", into = "BoardRaw")]
 pub struct Board {
-    // HashMap for cold-path access and serialization
-    pieces: FxHashMap<(i64, i64), Piece>,
-    #[serde(skip)]
-    pub active_coords: Option<FxHashSet<(i64, i64)>>,
-    /// Sparse tiled bitboards for HOT PATH operations (attack detection, move gen, eval)
-    /// NOT updated incrementally - call rebuild_tiles() before hot path usage
     #[serde(skip)]
     pub tiles: TileTable,
+    #[serde(skip)]
+    pub piece_count: usize,
+    #[serde(skip)]
+    pub active_coords: Option<FxHashSet<(i64, i64)>>,
 }
 
 /// Raw representation for serialization
@@ -421,18 +416,20 @@ impl From<BoardRaw> for Board {
             set
         });
 
-        // Build tiles immediately for hot path usage
+        // Build tiles and count pieces
         let mut tiles = TileTable::new();
+        let mut piece_count = 0;
         for (&(x, y), &piece) in &raw.pieces {
             let (cx, cy) = tile_coords(x, y);
             let idx = local_index(x, y);
             tiles.get_or_create(cx, cy).set_piece(idx, piece);
+            piece_count += 1;
         }
 
         Board {
-            pieces: raw.pieces,
-            active_coords,
             tiles,
+            piece_count,
+            active_coords,
         }
     }
 }
@@ -440,30 +437,10 @@ impl From<BoardRaw> for Board {
 impl From<Board> for BoardRaw {
     fn from(board: Board) -> Self {
         BoardRaw {
-            pieces: board.pieces,
+            pieces: board.iter().map(|(x, y, p)| ((x, y), p)).collect(),
         }
     }
 }
-
-pub struct BoardIter<'a> {
-    iter: std::collections::hash_map::Iter<'a, (i64, i64), Piece>,
-}
-
-impl<'a> Iterator for BoardIter<'a> {
-    type Item = (&'a (i64, i64), &'a Piece);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-
-impl ExactSizeIterator for BoardIter<'_> {}
 
 impl Default for Board {
     fn default() -> Self {
@@ -474,26 +451,24 @@ impl Default for Board {
 impl Board {
     pub fn new() -> Self {
         Self {
-            pieces: FxHashMap::default(),
             active_coords: None,
             tiles: TileTable::new(),
+            piece_count: 0,
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.pieces.len()
+        self.piece_count
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.pieces.is_empty()
+        self.piece_count == 0
     }
 
-    pub fn iter(&self) -> BoardIter<'_> {
-        BoardIter {
-            iter: self.pieces.iter(),
-        }
+    pub fn iter(&self) -> impl Iterator<Item = (i64, i64, Piece)> + '_ {
+        self.tiles.iter_all_pieces()
     }
 
     /// Fast bitboard-based iteration of pieces by color.
@@ -512,51 +487,61 @@ impl Board {
     }
 
     pub fn set_piece(&mut self, x: i64, y: i64, piece: Piece) {
-        let pos = (x, y);
-
-        // Active coords tracking
-        if piece.piece_type().is_neutral_type() && self.active_coords.is_none() {
-            // Need to initialize active_coords by scanning current pieces
-            let mut set = FxHashSet::default();
-            for (p_pos, p) in self.iter() {
-                if !p.piece_type().is_neutral_type() {
-                    set.insert(*p_pos);
-                }
-            }
-            self.active_coords = Some(set);
-        }
-
-        self.pieces.insert(pos, piece);
-
-        // INLINE TILE SYNC: Single fast update - set_piece handles overwrite
         let (cx, cy) = tile_coords(x, y);
         let idx = local_index(x, y);
         let tile = self.tiles.get_or_create(cx, cy);
-        // Clear old occupancy bits first to handle overwrites correctly
+
+        // Check if we are overwriting an existing piece
+        let old_piece = tile.get_piece(idx);
+
+        // Update bitmasks
         let bit = 1u64 << idx;
         tile.occ_all &= !bit;
         tile.occ_white &= !bit;
         tile.occ_black &= !bit;
         tile.occ_void &= !bit;
-        // Set new piece
+
         tile.set_piece(idx, piece);
+
+        // Update count
+        if old_piece.is_none() {
+            self.piece_count += 1;
+        }
+
+        // Active coords tracking
+        if piece.piece_type().is_neutral_type() && self.active_coords.is_none() {
+            let mut set = FxHashSet::default();
+
+            // Iterate ALL pieces from tiles to populate set
+            for (px, py, p) in self.tiles.iter_all_pieces() {
+                if !p.piece_type().is_neutral_type() {
+                    set.insert((px, py));
+                }
+            }
+            self.active_coords = Some(set);
+        }
 
         if let Some(ref mut active) = self.active_coords {
             if !piece.piece_type().is_neutral_type() {
-                active.insert(pos);
+                active.insert((x, y));
             } else {
-                active.remove(&pos);
+                active.remove(&(x, y));
             }
         }
     }
 
     #[inline]
-    pub fn get_piece(&self, x: i64, y: i64) -> Option<&Piece> {
-        self.pieces.get(&(x, y))
+    pub fn get_piece(&self, x: i64, y: i64) -> Option<Piece> {
+        let (cx, cy) = tile_coords(x, y);
+        if let Some(tile) = self.tiles.get_tile(cx, cy) {
+            let idx = local_index(x, y);
+            tile.get_piece(idx)
+        } else {
+            None
+        }
     }
 
     /// BITBOARD: O(1) occupancy check using tile bitboards.
-    /// Use this instead of get_piece().is_some() in hot paths.
     #[inline]
     pub fn is_occupied(&self, x: i64, y: i64) -> bool {
         let (cx, cy) = tile_coords(x, y);
@@ -586,50 +571,30 @@ impl Board {
     }
 
     pub fn remove_piece(&mut self, x: &i64, y: &i64) -> Option<Piece> {
-        let pos = (*x, *y);
-        let removed = self.pieces.remove(&pos);
-
-        // INLINE TILE SYNC: Always keep tiles valid for hot path
         let (cx, cy) = tile_coords(*x, *y);
         let idx = local_index(*x, *y);
+
+        let mut removed = None;
         if let Some(tile) = self.tiles.get_tile_mut(cx, cy) {
-            tile.remove_piece(idx);
+            removed = tile.get_piece(idx);
+            if removed.is_some() {
+                tile.remove_piece(idx);
+                self.piece_count -= 1;
+            }
         }
-        if let (Some(active), Some(_)) = (
-            self.active_coords.as_mut(),
-            removed
-                .as_ref()
-                .filter(|p| !p.piece_type().is_neutral_type()),
-        ) {
-            active.remove(&pos);
+
+        if let (Some(active), Some(p)) = (self.active_coords.as_mut(), removed)
+            && !p.piece_type().is_neutral_type()
+        {
+            active.remove(&(*x, *y));
         }
         removed
     }
 
     pub fn clear(&mut self) {
-        self.pieces.clear();
         self.active_coords = None;
         self.tiles.clear();
-    }
-
-    /// Rebuild tiles from HashMap. Call this ONCE before hot-path operations
-    /// (attack detection, move generation, evaluation).
-    /// This is O(n) where n = number of pieces, but only needs to be called
-    /// once per position, not per operation.
-    #[inline]
-    pub fn rebuild_tiles(&mut self) {
-        self.tiles.clear();
-        for (&(x, y), &piece) in &self.pieces {
-            let (cx, cy) = tile_coords(x, y);
-            let idx = local_index(x, y);
-            self.tiles.get_or_create(cx, cy).set_piece(idx, piece);
-        }
-    }
-
-    /// Force rebuild tiles (for use after make_move/undo_move cycles)
-    #[inline]
-    pub fn ensure_tiles(&mut self) {
-        self.rebuild_tiles();
+        self.piece_count = 0;
     }
 
     /// Get 3x3 tile neighborhood around world coordinate.
@@ -689,12 +654,18 @@ mod tests {
 
     #[test]
     fn test_piece_packed_values() {
-        // Test that packed values match JS encoding: color * NUM_TYPES + type
+        // Test packed values match bitwise encoding: (color << 5) | type
         let white_pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
-        assert_eq!(white_pawn.packed(), 22 + 21); // White=1, Pawn=21
+        // White=1, Pawn=21. (1 << 5) | 21 = 32 | 21 = 53
+        assert_eq!(white_pawn.packed(), (1 << 5) | 21);
 
         let black_king = Piece::new(PieceType::King, PlayerColor::Black);
-        assert_eq!(black_king.packed(), 2 * 22 + 2); // Black=2, King=2
+        // Black=2, King=2. (2 << 5) | 2 = 64 | 2 = 66
+        assert_eq!(black_king.packed(), (2 << 5) | 2);
+
+        // Neutral=0, Void=0. 0 | 0 = 0
+        let neutral_void = Piece::new(PieceType::Void, PlayerColor::Neutral);
+        assert_eq!(neutral_void.packed(), 0);
     }
 
     #[test]
@@ -843,7 +814,6 @@ mod tests {
     fn test_board_is_occupied() {
         let mut board = Board::new();
         board.set_piece(3, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
-        board.rebuild_tiles();
 
         assert!(board.is_occupied(3, 4));
         assert!(!board.is_occupied(3, 5));
@@ -854,7 +824,6 @@ mod tests {
         let mut board = Board::new();
         board.set_piece(3, 4, Piece::new(PieceType::Pawn, PlayerColor::White));
         board.set_piece(5, 6, Piece::new(PieceType::Pawn, PlayerColor::Black));
-        board.rebuild_tiles();
 
         assert!(board.is_occupied_by_color(3, 4, PlayerColor::White));
         assert!(!board.is_occupied_by_color(3, 4, PlayerColor::Black));

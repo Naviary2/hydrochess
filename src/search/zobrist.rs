@@ -37,36 +37,25 @@ pub const SIDE_KEY: u64 = 0x9E3779B97F4A7C15;
 /// Key for en passant file
 const EN_PASSANT_KEY_MIXER: u64 = 0xCAFEBABE87654321;
 
-/// Normalize coordinate for hashing (handle infinite board via bucketing)
-///
-/// This mirrors the old TT behaviour: coordinates within [-BOUND, BOUND]
-/// are kept distinct; far-away squares are wrapped into BUCKETS-sized
-/// buckets at the edges, preserving some translation invariance.
+/// Normalize coordinate for hashing
 #[inline(always)]
-fn normalize_coord(coord: i64) -> i32 {
-    const BOUND: i64 = 150;
-    const BUCKETS: i64 = 8;
-
-    if coord.abs() <= BOUND {
-        coord as i32
-    } else {
-        let sign = coord.signum();
-        let delta = (coord - sign * BOUND) % BUCKETS;
-        (sign * BOUND + delta) as i32
-    }
+fn normalize_coord(coord: i64) -> u64 {
+    coord as u64
 }
 
 /// Hash a coordinate into a u64
-/// Uses a fast mixing function on *bucketed* coordinates, preserving
-/// the infinite-board semantics while being efficient for incremental use.
 #[inline(always)]
 pub fn hash_coordinate(x: i64, y: i64) -> u64 {
-    let nx = normalize_coord(x) as u64;
-    let ny = normalize_coord(y) as u64;
+    let nx = normalize_coord(x);
+    let ny = normalize_coord(y);
 
-    // Fast mixing - fewer operations, good enough distribution
-    let h = nx.wrapping_mul(0x517cc1b727220a95) ^ ny.wrapping_mul(0x9e3779b97f4a7c15);
-    h ^ (h >> 32)
+    // MurmurHash3-style finalizer for good mixing of 64-bit coordinates
+    let mut h = nx ^ (ny.rotate_left(32));
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
+    h ^= h >> 33;
+    h
 }
 
 /// Get the Zobrist key for a piece at a position
@@ -165,7 +154,7 @@ const PAWN_KEY_MIXER: u64 = 0xABCDEF0123456789;
 
 #[inline(always)]
 pub fn pawn_key(color: PlayerColor, x: i64, y: i64) -> u64 {
-    hash_coordinate(x, y) ^ PAWN_KEY_MIXER ^ (color as u64 * 0x9E3779B97F4A7C15)
+    hash_coordinate(x, y) ^ PAWN_KEY_MIXER ^ (color as u64).wrapping_mul(0x9E3779B97F4A7C15)
 }
 
 /// Key for material configuration hash (used by correction history).
@@ -177,7 +166,7 @@ pub fn material_key(piece_type: PieceType, color: PlayerColor) -> u64 {
     // Use piece type as a simple hash - no position dependency
     let pt = piece_type as u64;
     let c = color as u64;
-    MATERIAL_KEY_MIXER.wrapping_mul(pt.wrapping_add(1)) ^ (c * 0x517CC1B727220A95)
+    MATERIAL_KEY_MIXER.wrapping_mul(pt.wrapping_add(1)) ^ c.wrapping_mul(0x517CC1B727220A95)
 }
 
 #[cfg(test)]

@@ -14,24 +14,24 @@ const EngineOld = wasmOld.Engine;
 import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
 const EngineNew = wasmNew.Engine;
 const initThreadPool = wasmNew.initThreadPool;
-import { getVariantData, getAllVariants } from './variants.js';
+import { getVariantData, getAllVariants, generateSetupICN } from './variants.js';
 
 let wasmReady = false;
 let threadPoolInitialized = false;
 
-async function tryInitThreadPool(count) {
-    if (threadPoolInitialized) return;
-    if (typeof initThreadPool !== 'function') return;
+// async function tryInitThreadPool(count) {
+//     if (threadPoolInitialized) return;
+//     if (typeof initThreadPool !== 'function') return;
 
-    try {
-        console.log(`[sprt-worker] Initializing thread pool with ${count} threads...`);
-        await initThreadPool(count);
-        threadPoolInitialized = true;
-        console.log(`[sprt-worker] Thread pool initialized.`);
-    } catch (e) {
-        console.warn(`[sprt-worker] Failed to initialize thread pool:`, e);
-    }
-}
+//     try {
+//         console.log(`[sprt-worker] Initializing thread pool with ${count} threads...`);
+//         await initThreadPool(count);
+//         threadPoolInitialized = true;
+//         console.log(`[sprt-worker] Thread pool initialized.`);
+//     } catch (e) {
+//         console.warn(`[sprt-worker] Failed to initialize thread pool:`, e);
+//     }
+// }
 
 function getVariantPosition(variantName, clock = null) {
     const variantData = getVariantData(variantName);
@@ -483,15 +483,18 @@ async function ensureInit() {
         await initNew();
 
         // Detect thread support and initialize pool if available
-        await tryInitThreadPool(2);
+        // await tryInitThreadPool(2);
 
         wasmReady = true;
     }
 }
 
-async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth, searchNoise, seed) {
+async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThreshold, baseTimeMs, incrementMs, timeControl, variantName = 'Classical', maxDepth, searchNoise, seed, oldStrength) {
     if (typeof wasmNew.reset_engine_state === 'function') {
         wasmNew.reset_engine_state();
+    }
+    if (typeof wasmOld.reset_engine_state === 'function') {
+        wasmOld.reset_engine_state();
     }
     const startPosition = getVariantPosition(variantName);
     let position = clonePosition(startPosition);
@@ -528,12 +531,14 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
     // Helper for definitive terminal check (mate/stalemate) to prioritize over adjudication
     const getTerminalResult = (context = "") => {
         try {
-            const gameInput = clonePosition(startPosition);
-            gameInput.move_history = moveHistory.slice();
-            gameInput.halfmove_clock = halfmoveClock;
-            gameInput.fullmove_number = fullmoveNumber;
-
-            const checker = new EngineNew(gameInput);
+            const icnString = generateSetupICN(
+                variantName,
+                startPosition.turn,
+                halfmoveClock,
+                fullmoveNumber,
+                moveHistory
+            );
+            const checker = wasmNew.Engine.from_icn(icnString, {});
             const legal = typeof checker.get_legal_moves_js === 'function' ? checker.get_legal_moves_js() : [];
             const inCheck = typeof checker.is_in_check === 'function' && checker.is_in_check();
             checker.free();
@@ -586,20 +591,6 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
             const earlyTerminal = getTerminalResult(' (terminal state detected at start of ply)');
             if (earlyTerminal) return earlyTerminal;
 
-            // Build authoritative game input for engine search
-            const engineInput = clonePosition(startPosition);
-            engineInput.move_history = moveHistory.slice();
-            engineInput.halfmove_clock = halfmoveClock;
-            engineInput.fullmove_number = fullmoveNumber;
-            if (haveClocks) {
-                engineInput.clock = {
-                    wtime: Math.floor(whiteClock),
-                    btime: Math.floor(blackClock),
-                    winc: Math.floor(increment),
-                    binc: Math.floor(increment),
-                };
-            }
-
             // Let the appropriate engine choose a move
             const EngineClass = isWhiteTurn
                 ? (newPlaysWhite ? EngineNew : EngineOld)
@@ -609,7 +600,48 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                 : (newPlaysWhite ? 'old' : 'new');
 
             let searchTimeMs = timePerMove;
-            const engine = new EngineClass(engineInput);
+
+            // Build ICN string from initial position and move history using the shared helper.
+            // This ensures dynamic promotion ranks, world bounds, and move rule limits.
+            const icnString = generateSetupICN(
+                variantName,
+                startPosition.turn,
+                halfmoveClock,
+                fullmoveNumber,
+                moveHistory
+            );
+
+            const engineConfig = {
+                strength_level: (engineName === 'old' && oldStrength && oldStrength < 3) ? oldStrength : 3,
+                wtime: Math.floor(whiteClock),
+                btime: Math.floor(blackClock),
+                winc: Math.floor(increment),
+                binc: Math.floor(increment)
+            };
+
+            let engine;
+            if (typeof EngineClass.from_icn === 'function') {
+                engine = EngineClass.from_icn(icnString, engineConfig);
+            } else {
+                // Backward compatibility for versions that don't support from_icn
+                const engineInput = clonePosition(startPosition);
+                engineInput.move_history = moveHistory.slice();
+                engineInput.halfmove_clock = halfmoveClock;
+                engineInput.fullmove_number = fullmoveNumber;
+                if (oldStrength && oldStrength < 3) {
+                    engineInput.strength_level = oldStrength;
+                }
+                if (haveClocks) {
+                    engineInput.clock = {
+                        wtime: Math.floor(whiteClock),
+                        btime: Math.floor(blackClock),
+                        winc: Math.floor(increment),
+                        binc: Math.floor(increment),
+                    };
+                }
+                engine = new EngineClass(engineInput);
+            }
+
             const startMs = nowMs();
 
             // Safety check: if clock time is already zero or negative, flag timeout immediately
@@ -687,12 +719,14 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
 
                 let hasLegalMoves = false;
                 try {
-                    const checkerInput = clonePosition(startPosition);
-                    checkerInput.move_history = moveHistory.slice();
-                    checkerInput.halfmove_clock = halfmoveClock;
-                    checkerInput.fullmove_number = fullmoveNumber;
-
-                    const checker = new EngineNew(checkerInput);
+                    const icnString = generateSetupICN(
+                        variantName,
+                        startPosition.turn,
+                        halfmoveClock,
+                        fullmoveNumber,
+                        moveHistory
+                    );
+                    const checker = wasmNew.Engine.from_icn(icnString, {});
                     if (typeof checker.get_legal_moves_js === 'function') {
                         const legal = checker.get_legal_moves_js();
                         if (Array.isArray(legal) && legal.length > 0) {
@@ -710,12 +744,14 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
 
                 if (!hasLegalMoves) {
                     // True terminal: no legal moves for sideToMove.
-                    const checkerInput = clonePosition(startPosition);
-                    checkerInput.move_history = moveHistory.slice();
-                    checkerInput.halfmove_clock = halfmoveClock;
-                    checkerInput.fullmove_number = fullmoveNumber;
-
-                    const checker = new EngineNew(checkerInput);
+                    const icnString = generateSetupICN(
+                        variantName,
+                        startPosition.turn,
+                        halfmoveClock,
+                        fullmoveNumber,
+                        moveHistory
+                    );
+                    const checker = wasmNew.Engine.from_icn(icnString, {});
                     const inCheck = typeof checker.is_in_check === 'function' && checker.is_in_check();
                     checker.free();
 
@@ -908,12 +944,14 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
 
             // Check for insufficient material using a fresh game input representing the state AFTER the move
             try {
-                const afterMoveInput = clonePosition(startPosition);
-                afterMoveInput.move_history = moveHistory.slice();
-                afterMoveInput.halfmove_clock = halfmoveClock;
-                afterMoveInput.fullmove_number = fullmoveNumber;
-
-                const checker = new EngineNew(afterMoveInput);
+                const icnString = generateSetupICN(
+                    variantName,
+                    startPosition.turn,
+                    halfmoveClock,
+                    fullmoveNumber,
+                    moveHistory
+                );
+                const checker = wasmNew.Engine.from_icn(icnString, {});
                 const hasSufficientMaterial = typeof checker.is_sufficient_material === 'function'
                     ? checker.is_sufficient_material()
                     : true; // Default to true if function doesn't exist (old engine builds)
@@ -1017,7 +1055,8 @@ self.onmessage = async (e) => {
                 msg.variantName || 'Classical',
                 msg.maxDepth,
                 msg.searchNoise,
-                msg.seed
+                msg.seed,
+                msg.oldStrength
             );
 
             // Timeout wrapper - treat timeout as draw

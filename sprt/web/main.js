@@ -3,20 +3,9 @@ const EngineOld = wasmOld.Engine;
 import initNew, * as wasmNew from './pkg-new/hydrochess_wasm.js';
 const EngineNew = wasmNew.Engine;
 const initThreadPoolNew = wasmNew.initThreadPool;
-import { VARIANTS, getVariantData, getAllVariants, getVariantsWithCustomEval } from './variants.js';
+import { getVariantData, getAllVariants, generateSetupICN, engineLetterToICNCode, getVariantsWithCustomEval } from './variants.js';
 
 let isNewEngineMT = false;
-
-// Map internal engine piece letters to infinitechess.org ICN codes (lowercase for ICN)
-function engineLetterToICNCode(letter) {
-    const map = {
-        'k': 'k', 'q': 'q', 'r': 'r', 'b': 'b', 'n': 'n', 'p': 'p',
-        'm': 'am', 'c': 'ch', 'a': 'ar', 'h': 'ha', 'g': 'gu',
-        'l': 'ca', 'i': 'gi', 'z': 'ze', 'e': 'ce', 'y': 'rq',
-        'd': 'rc', 's': 'nr', 'u': 'hu', 'o': 'ro', 'x': 'ob', 'v': 'vo'
-    };
-    return map[letter] || letter;
-}
 
 function updateMTUI() {
     if (isNewEngineMT) {
@@ -78,8 +67,6 @@ const copyLogBtn = document.getElementById('copyLog');
 const downloadLogsBtn = document.getElementById('downloadLogs');
 const downloadGamesTxtBtn = document.getElementById('downloadGames-txt');
 const downloadGamesJsonBtn = document.getElementById('downloadGames-json');
-const icnOutputEl = document.getElementById('icnOutput');
-const icnTextEl = document.getElementById('icnText');
 const sprtStatusEl = document.getElementById('sprtStatus');
 
 let wasmReady = false;
@@ -105,6 +92,9 @@ let availableVariants = [];
 let selectedVariants = [];
 let variantQueue = [];
 let currentVariantIndex = 0;
+let currentOldStrength = 3; // 1 = Easy, 2 = Medium, 3 = Hard
+let skillPopupTimeout = null;
+let activeWorkerResolvers = [];
 
 // SPRT configuration
 const CONFIG = {
@@ -248,6 +238,32 @@ function getNextVariant() {
     currentVariantIndex = (currentVariantIndex + 1) % variantQueue.length;
     return result;
 }
+
+function showSkillPopup() {
+    const popup = document.getElementById('skillPopup');
+    const levelEl = document.getElementById('skillLevel');
+
+    const names = ["Easy", "Medium", "Hard"];
+    levelEl.textContent = names[currentOldStrength - 1];
+
+    popup.classList.add('show');
+
+    if (skillPopupTimeout) clearTimeout(skillPopupTimeout);
+    skillPopupTimeout = setTimeout(() => {
+        popup.classList.remove('show');
+    }, 1500);
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() === 'd') {
+        const active = document.activeElement;
+        const isInput = active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA';
+        if (!isInput && !sprtRunning) {
+            currentOldStrength = (currentOldStrength % 3) + 1;
+            showSkillPopup();
+        }
+    }
+});
 
 const BOUNDS_PRESETS = {
     stockfish_ltc: {
@@ -482,64 +498,20 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
     }).filter(Boolean);
 
     const movesStr = moves.join('|');
-    // Determine promotion ranks and allowed promotions for the variant
-    // Default to standard 8 for white, 1 for black, with q,r,b,n allowed
-    let whiteRank = '8';
-    let blackRank = '1';
-    let promotionsAllowed = ['q', 'r', 'b', 'n'];
-    let worldBoundsStr = '';
-    try {
-        const vdata = getVariantData(variantName);
-        if (vdata && vdata.game_rules) {
-            if (vdata.game_rules.promotion_ranks) {
-                const ranks = vdata.game_rules.promotion_ranks;
-                if (ranks.white && ranks.white.length > 0) whiteRank = ranks.white[0];
-                if (ranks.black && ranks.black.length > 0) blackRank = ranks.black[0];
-            }
-            if (vdata.game_rules.promotions_allowed && Array.isArray(vdata.game_rules.promotions_allowed)) {
-                promotionsAllowed = vdata.game_rules.promotions_allowed;
-            }
+    const moveHistoryList = moves.map(m => {
+        const promoIdx = m.indexOf('=');
+        let move = m;
+        let promotion = null;
+        if (promoIdx !== -1) {
+            move = m.slice(0, promoIdx);
+            promotion = m.slice(promoIdx + 1);
         }
-        // Compute world bounds: if worldBorder is a number, calculate finite bounds
-        // Otherwise, use infinite bounds
-        if (typeof vdata.worldBorder === 'number' && startPositionStr) {
-            // Parse pieces to find min/max coordinates
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-            for (const pieceStr of startPositionStr.split('|')) {
-                const parts = pieceStr.split(',');
-                if (parts.length < 2) continue;
-                // Extract x from first part (after piece code)
-                const firstPart = parts[0];
-                let xStart = 0;
-                while (xStart < firstPart.length && !/[-0-9]/.test(firstPart[xStart])) xStart++;
-                const xStr = firstPart.slice(xStart).replace(/\+$/, '');
-                const yStr = parts[1].replace(/\+$/, '');
-                const x = parseInt(xStr, 10);
-                const y = parseInt(yStr, 10);
-                if (Number.isFinite(x) && Number.isFinite(y)) {
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                }
-            }
-            if (Number.isFinite(minX)) {
-                const pad = vdata.worldBorder;
-                worldBoundsStr = `${minX - pad},${maxX + pad},${minY - pad},${maxY + pad}`;
-            }
-        } else {
-            // Infinite bounds for classical-style variants
-            worldBoundsStr = '-999999999999999,1000000000000008,-999999999999999,1000000000000008';
-        }
-    } catch (e) {
-        // Use infinite bounds on error
-        worldBoundsStr = '-999999999999999,1000000000000008,-999999999999999,1000000000000008';
-    }
-    // Build promotion token: (whiteRank;promo1,promo2,...|blackRank;promo1,promo2,...)
-    // Convert engine piece letters to ICN codes (e.g., 'm' -> 'am')
-    const promotionsICN = promotionsAllowed.map(p => engineLetterToICNCode(p)).join(',');
-    const promotionRanksToken = `(${whiteRank};${promotionsICN}|${blackRank};${promotionsICN})`;
-    return `${headers} ${nextTurn} ${halfmove}/100 ${fullmove} ${promotionRanksToken} ${worldBoundsStr} ${startPositionStr}${movesStr ? ' ' + movesStr : ''}`;
+        const parts = move.split('>');
+        return { from: parts[0], to: parts[1], promotion };
+    });
+
+    const setupIcn = generateSetupICN(variantName, nextTurn, halfmove, fullmove, moveHistoryList);
+    return `${headers} ${setupIcn}`;
 }
 
 function log(message, type) {
@@ -713,8 +685,10 @@ async function initWasm() {
         log('WASM module initialized successfully', 'success');
 
 
-        const testPos = getStandardPosition();
-        const engine = new EngineNew(testPos);
+        const classicalIcn = getVariantData('Classical').position;
+        // Use the shared generator for the sanity test to ensure it works end-to-end
+        const icn = generateSetupICN('Classical', 'w', 0, 1, []);
+        const engine = EngineNew.from_icn(icn, { strength_level: 3 });
         const move = engine.get_best_move_with_time(100, true);
         engine.free();
         log('Quick test: Best move = ' + (move ? move.from + ' to ' + move.to : 'null'), 'info');
@@ -847,10 +821,10 @@ async function runSprt() {
     lastLLR = 0;
     lastBounds = null;
 
-    sprtRunning = true;
     stopRequested = false;
     runSprtBtn.disabled = true;
     stopSprtBtn.disabled = false;
+    sprtRunning = true;
 
     // Read configuration from UI into global CONFIG first (to persist defaults)
     CONFIG.boundsPreset = sprtBoundsPreset.value || 'all';
@@ -997,206 +971,221 @@ async function runSprt() {
             maxDepth: tcParams.maxDepth,
             timeControl: tcParams.tcString,
             variantName, // Add variant to the message
+            oldStrength: currentOldStrength,
         });
         return true;
     }
 
     activeSprtWorkers = workers;
+    activeWorkerResolvers = [];
 
-    await Promise.all(
-        Array.from({ length: maxConcurrent }, async (_, i) => {
-            const worker = new Worker(new URL('./sprt-worker.js', import.meta.url), { type: 'module' });
-            workers.push(worker);
+    try {
+        await Promise.all(
+            Array.from({ length: maxConcurrent }, async (_, i) => {
+                const worker = new Worker(new URL('./sprt-worker.js', import.meta.url), { type: 'module' });
+                workers.push(worker);
 
-            await new Promise((resolve) => {
-                // If no games available for this worker, resolve immediately
-                if (nextGameIndex >= maxGames) {
-                    resolve(undefined);
-                    return;
-                }
+                await new Promise((resolve) => {
+                    activeWorkerResolvers.push(resolve);
+                    // If no games available for this worker, resolve immediately
+                    if (nextGameIndex >= maxGames) {
+                        resolve(undefined);
+                        return;
+                    }
 
-                worker.onmessage = (e) => {
-                    const msg = e.data;
-                    if (msg.type === 'result') {
-                        const result = msg.result;
-                        if (Array.isArray(msg.samples) && msg.samples.length) {
-                            texelSamples.push(...msg.samples);
-                        }
-                        const icnLog = generateICNFromWorkerLog(
-                            msg.log,
-                            msg.gameIndex,
-                            result,
-                            msg.newPlaysWhite,
-                            msg.reason,
-                            msg.materialThreshold,
-                            msg.timeControl,
-                            msg.variantName, // Add variant to ICN log
-                        );
-                        gameLogs.push(icnLog);
-                        // Enable download buttons immediately upon first result
-                        downloadGamesTxtBtn.disabled = false;
-                        downloadGamesJsonBtn.disabled = false;
-                        // Global results
-                        if (result === 'win') wins++;
-                        else if (result === 'loss') losses++;
-                        else draws++;
+                    worker.onmessage = (e) => {
+                        const msg = e.data;
+                        if (msg.type === 'result') {
+                            const result = msg.result;
+                            if (Array.isArray(msg.samples) && msg.samples.length) {
+                                texelSamples.push(...msg.samples);
+                            }
+                            const icnLog = generateICNFromWorkerLog(
+                                msg.log,
+                                msg.gameIndex,
+                                result,
+                                msg.newPlaysWhite,
+                                msg.reason,
+                                msg.materialThreshold,
+                                msg.timeControl,
+                                msg.variantName, // Add variant to ICN log
+                            );
+                            gameLogs.push(icnLog);
+                            // Enable download buttons immediately upon first result
+                            downloadGamesTxtBtn.disabled = false;
+                            downloadGamesJsonBtn.disabled = false;
+                            // Global results
+                            if (result === 'win') wins++;
+                            else if (result === 'loss') losses++;
+                            else draws++;
 
-                        // Per-variant results
-                        const vName = msg.variantName || 'Classical';
-                        if (!perVariantStats[vName]) {
-                            perVariantStats[vName] = { wins: 0, losses: 0, draws: 0 };
-                        }
-                        if (result === 'win') perVariantStats[vName].wins++;
-                        else if (result === 'loss') perVariantStats[vName].losses++;
-                        else perVariantStats[vName].draws++;
+                            // Per-variant results
+                            const vName = msg.variantName || 'Classical';
+                            if (!perVariantStats[vName]) {
+                                perVariantStats[vName] = { wins: 0, losses: 0, draws: 0 };
+                            }
+                            if (result === 'win') perVariantStats[vName].wins++;
+                            else if (result === 'loss') perVariantStats[vName].losses++;
+                            else perVariantStats[vName].draws++;
 
-                        const total = wins + losses + draws;
-                        // Use runConfig for ELO
-                        llr = calculateLLR(wins, losses, draws, runConfig.elo0, runConfig.elo1);
-                        const { elo, error } = estimateElo(wins, losses, draws);
+                            const total = wins + losses + draws;
+                            // Use runConfig for ELO
+                            llr = calculateLLR(wins, losses, draws, runConfig.elo0, runConfig.elo1);
+                            const { elo, error } = estimateElo(wins, losses, draws);
 
-                        // update last stats snapshot so Stop can show partial results
-                        lastWins = wins;
-                        lastLosses = losses;
-                        lastDraws = draws;
-                        lastElo = elo;
-                        lastEloError = error;
-                        lastLLR = llr;
+                            // update last stats snapshot so Stop can show partial results
+                            lastWins = wins;
+                            lastLosses = losses;
+                            lastDraws = draws;
+                            lastElo = elo;
+                            lastEloError = error;
+                            lastLLR = llr;
 
-                        sprtWinsEl.textContent = String(wins);
-                        sprtLossesEl.textContent = String(losses);
-                        sprtDrawsEl.textContent = String(draws);
-                        sprtEloEl.textContent = String(Math.round(elo));
+                            sprtWinsEl.textContent = String(wins);
+                            sprtLossesEl.textContent = String(losses);
+                            sprtDrawsEl.textContent = String(draws);
+                            sprtEloEl.textContent = String(Math.round(elo));
 
-                        sprtLog('Game ' + total + ': ' + result +
-                            ' (W:' + wins + ' L:' + losses + ' D:' + draws + ')' +
-                            ' Elo≈' + elo.toFixed(1) + '±' + error.toFixed(1) +
-                            ' LLR=' + llr.toFixed(2));
+                            sprtLog('Game ' + total + ': ' + result +
+                                ' (W:' + wins + ' L:' + losses + ' D:' + draws + ')' +
+                                ' Elo≈' + elo.toFixed(1) + '±' + error.toFixed(1) +
+                                ' LLR=' + llr.toFixed(2));
 
-                        log(
-                            'Games: ' + total + '/' + maxGames +
-                            '  W:' + wins + ' L:' + losses + ' D:' + draws +
-                            '  Elo≈' + elo.toFixed(1) + '±' + error.toFixed(1) +
-                            '  LLR ' + llr.toFixed(2) +
-                            ' in [' + bounds.lower.toFixed(2) + ', ' + bounds.upper.toFixed(2) + ']',
-                            'info'
-                        );
+                            log(
+                                'Games: ' + total + '/' + maxGames +
+                                '  W:' + wins + ' L:' + losses + ' D:' + draws +
+                                '  Elo≈' + elo.toFixed(1) + '±' + error.toFixed(1) +
+                                '  LLR ' + llr.toFixed(2) +
+                                ' in [' + bounds.lower.toFixed(2) + ', ' + bounds.upper.toFixed(2) + ']',
+                                'info'
+                            );
 
-                        // Only check SPRT termination after even number of games (completed pairs)
-                        const canTerminate = (total % 2 === 0);
-                        const reachedBounds = canTerminate &&
-                            total >= runConfig.minGames && (llr >= bounds.upper || llr <= bounds.lower);
-                        const reachedMax = canTerminate && total >= runConfig.maxGames;
+                            // Only check SPRT termination after even number of games (completed pairs)
+                            const canTerminate = (total % 2 === 0);
+                            const reachedBounds = canTerminate &&
+                                total >= runConfig.minGames && (llr >= bounds.upper || llr <= bounds.lower);
+                            const reachedMax = canTerminate && total >= runConfig.maxGames;
 
-                        activeWorkers--;
+                            activeWorkers--;
 
-                        if (!stopRequested && !reachedBounds && !reachedMax) {
-                            // Try to start another game; if none left, resolve
-                            if (!startWorker(worker, i)) {
+                            if (!stopRequested && !reachedBounds && !reachedMax) {
+                                // Try to start another game; if none left, resolve
+                                if (!startWorker(worker, i)) {
+                                    resolve(undefined);
+                                }
+                            } else {
+                                // This worker is done; resolve its promise
                                 resolve(undefined);
                             }
-                        } else {
-                            // This worker is done; resolve its promise
-                            resolve(undefined);
-                        }
-                    } else if (msg.type === 'error') {
-                        console.error('Worker error for game', msg.gameIndex, msg.error);
+                        } else if (msg.type === 'error') {
+                            console.error('Worker error for game', msg.gameIndex, msg.error);
 
-                        // Check for WASM unreachable or panic
-                        const errStr = (msg.error || '').toString();
-                        if (errStr.includes("unreachable") || errStr.includes("panic") || errStr.includes("RuntimeError")) {
-                            stopRequested = true;
-                            log("CRITICAL ERROR: WASM Panic detected in game " + msg.gameIndex, "error");
-                            sprtLog("CRITICAL ERROR: WASM Panic detected in game " + msg.gameIndex);
-                            sprtLog("Variant: " + (msg.variantName || 'Classical'));
-                            sprtLog("Error: " + msg.error);
-                            if (msg.log) {
-                                sprtLog("--- Game History ---");
-                                sprtLog(msg.log);
-                                sprtLog("--------------------");
+                            // Check for WASM unreachable or panic
+                            const errStr = (msg.error || '').toString();
+                            if (errStr.includes("unreachable") || errStr.includes("panic") || errStr.includes("RuntimeError")) {
+                                stopRequested = true;
+                                log("CRITICAL ERROR: WASM Panic detected in game " + msg.gameIndex, "error");
+                                sprtLog("CRITICAL ERROR: WASM Panic detected in game " + msg.gameIndex);
+                                sprtLog("Variant: " + (msg.variantName || 'Classical'));
+                                sprtLog("Error: " + msg.error);
+
+                                if (msg.log) {
+                                    // Generate a full ICN log for the crashed game to make it reproducible
+                                    const icnLog = generateICNFromWorkerLog(
+                                        msg.log,
+                                        msg.gameIndex,
+                                        'draw', // Result is unknown due to crash, use draw as placeholder
+                                        msg.newPlaysWhite,
+                                        'WASM Panic / Crash',
+                                        msg.materialThreshold,
+                                        msg.timeControl,
+                                        msg.variantName
+                                    );
+                                    sprtLog("--- Game ICN ---");
+                                    sprtLog(icnLog);
+                                    sprtLog("----------------");
+                                }
+                                // Force stop all workers immediately
+                                workers.forEach(w => w.terminate());
+                                activeSprtWorkers = [];
+                                sprtRunning = false;
+                                // Resolve all workers to unblock Promise.all
+                                activeWorkerResolvers.forEach(res => res(undefined));
+                                return;
                             }
-                            // Force stop all workers immediately
-                            workers.forEach(w => w.terminate());
-                            activeSprtWorkers = [];
-                            resolve(undefined);
-                            return;
-                        }
 
+                            activeWorkers--;
+
+                            const oomLike = errStr.includes('Out of memory') ||
+                                errStr.includes('Cannot allocate Wasm memory');
+                            if (oomLike) {
+                                const stored = loadStoredMaxConcurrency();
+                                const current = runConfig.concurrency | 0;
+                                const proposed = Math.max(1, Math.min(current - 1, stored || current));
+                                if (proposed < (stored || Infinity)) {
+                                    saveStoredMaxConcurrency(proposed);
+                                    log('Detected WASM OOM at concurrency ' + current + ', lowering stored max to ' + proposed, 'warn');
+                                    sprtLog('WASM out-of-memory detected at concurrency ' + current + ' – new stored max: ' + proposed);
+                                }
+                            }
+
+                            // This worker encountered an error; resolve its promise
+                            resolve(undefined);
+                        }
+                    };
+
+                    worker.onerror = (e) => {
                         activeWorkers--;
+                        resolve(undefined);
+                    };
 
-                        // If this looks like a WebAssembly out-of-memory error,
-                        // dynamically lower the stored max safe concurrency so
-                        // future runs with "max" avoid this level.
-                        const oomLike = errStr.includes('Out of memory') ||
-                            errStr.includes('Cannot allocate Wasm memory');
-                        if (oomLike) {
-                            const stored = loadStoredMaxConcurrency();
-                            const current = runConfig.concurrency | 0;
-                            const proposed = Math.max(1, Math.min(current - 1, stored || current));
-                            if (proposed < (stored || Infinity)) {
-                                saveStoredMaxConcurrency(proposed);
-                                log('Detected WASM OOM at concurrency ' + current + ', lowering stored max to ' + proposed, 'warn');
-                                sprtLog('WASM out-of-memory detected at concurrency ' + current + ' – new stored max: ' + proposed);
-                            }
-                        }
-
-                        // This worker encountered an error; resolve its promise
+                    if (!startWorker(worker, i)) {
                         resolve(undefined);
                     }
-                };
+                });
+            })
+        );
 
-                worker.onerror = (e) => {
-                    activeWorkers--;
-                    resolve(undefined);
-                };
+        const { elo: finalElo, error: finalErr } = estimateElo(wins, losses, draws);
+        const verdict = llr >= bounds.upper ? 'PASSED (new > old)'
+            : (llr <= bounds.lower ? 'FAILED (no gain)' : 'INCONCLUSIVE');
 
-                if (!startWorker(worker, i)) {
-                    resolve(undefined);
-                }
-            });
-        })
-    );
-
-    workers.forEach(w => w.terminate());
-    activeSprtWorkers = [];
-
-    const { elo: finalElo, error: finalErr } = estimateElo(wins, losses, draws);
-    const verdict = llr >= bounds.upper ? 'PASSED (new > old)'
-        : (llr <= bounds.lower ? 'FAILED (no gain)' : 'INCONCLUSIVE');
-
-    log('SPRT Complete: ' + wins + 'W ' + losses + 'L ' + draws + 'D, Elo≈ ' +
-        finalElo.toFixed(1) + '±' + finalErr.toFixed(1) + ' (' + verdict + ')', 'success');
-    // Detailed final summary block similar to sprt.js printResult
-    const totalGames = wins + losses + draws;
-    const winRate = totalGames > 0 ? (((wins + draws * 0.5) / totalGames) * 100).toFixed(1) : '0.0';
-    sprtLog('');
-    sprtLog('═══════════════════════════════════════════════════════════════════');
-    sprtLog('Final Results:');
-    sprtLog('  Total Games: ' + totalGames);
-    sprtLog('  Score: +' + wins + ' -' + losses + ' =' + draws + ' (' + winRate + '%)');
-    sprtLog('  Elo Difference: ' + (finalElo >= 0 ? '+' : '') + finalElo.toFixed(1) + ' ±' + finalErr.toFixed(1));
-    sprtLog('');
-    sprtLog('Per-Variant Breakdown:');
-    const variantNames = Object.keys(perVariantStats).sort();
-    variantNames.forEach((name) => {
-        const s = perVariantStats[name];
-        const { elo, error } = estimateElo(s.wins, s.losses, s.draws);
-        const vtTotal = s.wins + s.losses + s.draws;
-        const vtScore = vtTotal > 0 ? (((s.wins + s.draws * 0.5) / vtTotal) * 100).toFixed(1) : '0.0';
-        sprtLog('  [' + name + ']: +' + s.wins + ' -' + s.losses + ' =' + s.draws + ' (' + vtScore + '%), Elo≈ ' + (elo >= 0 ? '+' : '') + elo.toFixed(1) + ' ±' + error.toFixed(1));
-    });
-    sprtLog('═══════════════════════════════════════════════════════════════════');
-    // Update status line with colored verdict
-    sprtStatusEl.textContent = 'Status: ' + verdict;
-    let cls = 'sprt-status ';
-    if (verdict.startsWith('PASSED')) cls += 'pass';
-    else if (verdict.startsWith('FAILED')) cls += 'fail';
-    else cls += 'inconclusive';
-    sprtStatusEl.className = cls;
-
-    sprtRunning = false;
-    runSprtBtn.disabled = false;
-    stopSprtBtn.disabled = true;
+        log('SPRT Complete: ' + wins + 'W ' + losses + 'L ' + draws + 'D, Elo≈ ' +
+            finalElo.toFixed(1) + '±' + finalErr.toFixed(1) + ' (' + verdict + ')', 'success');
+        // Detailed final summary block similar to sprt.js printResult
+        const totalGames = wins + losses + draws;
+        const winRate = totalGames > 0 ? (((wins + draws * 0.5) / totalGames) * 100).toFixed(1) : '0.0';
+        sprtLog('');
+        sprtLog('═══════════════════════════════════════════════════════════════════');
+        sprtLog('Final Results:');
+        sprtLog('  Total Games: ' + totalGames);
+        sprtLog('  Score: +' + wins + ' -' + losses + ' =' + draws + ' (' + winRate + '%)');
+        sprtLog('  Elo Difference: ' + (finalElo >= 0 ? '+' : '') + finalElo.toFixed(1) + ' ±' + finalErr.toFixed(1));
+        sprtLog('');
+        sprtLog('Per-Variant Breakdown:');
+        const variantNames = Object.keys(perVariantStats).sort();
+        variantNames.forEach((name) => {
+            const s = perVariantStats[name];
+            const { elo, error } = estimateElo(s.wins, s.losses, s.draws);
+            const vtTotal = s.wins + s.losses + s.draws;
+            const vtScore = vtTotal > 0 ? (((s.wins + s.draws * 0.5) / vtTotal) * 100).toFixed(1) : '0.0';
+            sprtLog('  [' + name + ']: +' + s.wins + ' -' + s.losses + ' =' + s.draws + ' (' + vtScore + '%), Elo≈ ' + (elo >= 0 ? '+' : '') + elo.toFixed(1) + ' ±' + error.toFixed(1));
+        });
+        sprtLog('═══════════════════════════════════════════════════════════════════');
+        // Update status line with colored verdict
+        sprtStatusEl.textContent = 'Status: ' + verdict;
+        let cls = 'sprt-status ';
+        if (verdict.startsWith('PASSED')) cls += 'pass';
+        else if (verdict.startsWith('FAILED')) cls += 'fail';
+        else cls += 'inconclusive';
+        sprtStatusEl.className = cls;
+    } finally {
+        workers.forEach(w => w.terminate());
+        activeSprtWorkers = [];
+        sprtRunning = false;
+        runSprtBtn.disabled = false;
+        stopSprtBtn.disabled = true;
+    }
 }
 
 function stopSprt() {
@@ -1207,6 +1196,11 @@ function stopSprt() {
             try { w.terminate(); } catch (e) { }
         });
         activeSprtWorkers = [];
+    }
+    // Unblock any pending promises in runSprt
+    if (activeWorkerResolvers && activeWorkerResolvers.length) {
+        activeWorkerResolvers.forEach(res => res(undefined));
+        activeWorkerResolvers = [];
     }
     sprtRunning = false;
     runSprtBtn.disabled = false;

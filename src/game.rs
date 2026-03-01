@@ -1,6 +1,4 @@
-#[cfg(any(test, not(target_arch = "wasm32")))]
 use crate::Variant;
-#[cfg(any(test, not(target_arch = "wasm32")))]
 use crate::evaluation::calculate_initial_material;
 
 use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
@@ -90,16 +88,25 @@ pub struct EnPassantState {
 }
 
 /// Promotion ranks configuration for a variant
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionRanks {
     pub white: Vec<i64>,
     pub black: Vec<i64>,
 }
 
+impl Default for PromotionRanks {
+    fn default() -> Self {
+        Self {
+            white: vec![8],
+            black: vec![1],
+        }
+    }
+}
+
 /// Game rules that can vary between chess variants
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GameRules {
-    pub promotion_ranks: Option<PromotionRanks>,
+    pub promotion_ranks: PromotionRanks,
     #[serde(skip)]
     pub promotion_types: Option<Vec<PieceType>>, // Pre-converted promotion piece types (fast)
     pub promotions_allowed: Option<Vec<String>>, // Piece type codes (only for serialization)
@@ -255,9 +262,12 @@ pub struct GameState {
     /// Pawn structure hash for correction history (helps CoaIP variants).
     #[serde(skip)]
     pub pawn_hash: u64,
-    /// Non-pawn piece position hash for correction history.
+    /// White non-pawn piece position hash for correction history.
     #[serde(skip)]
-    pub nonpawn_hash: u64,
+    pub white_nonpawn_hash: u64,
+    /// Black non-pawn piece position hash for correction history.
+    #[serde(skip)]
+    pub black_nonpawn_hash: u64,
     /// Material configuration hash for correction history.
     #[serde(skip)]
     pub material_hash: u64,
@@ -368,8 +378,8 @@ impl GameState {
             starting_squares: FxHashSet::default(),
             white_back_rank: 1,
             black_back_rank: 8,
-            white_promo_rank: 2_000_000_000_000_000,
-            black_promo_rank: -2_000_000_000_000_000,
+            white_promo_rank: i64::MIN,
+            black_promo_rank: i64::MAX,
             white_king_pos: None,
             black_king_pos: None,
             check_squares_white: FxHashSet::default(),
@@ -379,7 +389,8 @@ impl GameState {
             discovered_check_squares_white: FxHashSet::default(),
             discovered_check_squares_black: FxHashSet::default(),
             pawn_hash: 0,
-            nonpawn_hash: 0,
+            white_nonpawn_hash: 0,
+            black_nonpawn_hash: 0,
             material_hash: 0,
             minor_hash: 0,
             repetition: 0,
@@ -436,7 +447,8 @@ impl GameState {
             discovered_check_squares_white: FxHashSet::default(),
             discovered_check_squares_black: FxHashSet::default(),
             pawn_hash: 0,
-            nonpawn_hash: 0,
+            white_nonpawn_hash: 0,
+            black_nonpawn_hash: 0,
             material_hash: 0,
             minor_hash: 0,
             repetition: 0,
@@ -468,25 +480,35 @@ impl GameState {
         self.white_king_pos = None;
         self.black_king_pos = None;
 
-        if let Some(active) = &self.board.active_coords {
-            for (x, y) in active {
-                let piece = match self.board.get_piece(*x, *y) {
-                    Some(p) => p,
-                    None => continue,
-                };
+        // BITBOARD: Use tile-based CTZ iteration for O(popcount) piece enumeration
+        for (cx, cy, tile) in self.board.tiles.iter() {
+            let mut bits = tile.occ_all;
+            while bits != 0 {
+                let idx = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+
+                let packed = tile.piece[idx];
+                if packed == 0 {
+                    continue;
+                }
+
+                let piece = crate::board::Piece::from_packed(packed);
+                let x = cx * 8 + (idx % 8) as i64;
+                let y = cy * 8 + (idx / 8) as i64;
+
                 // Track king positions (any royal piece)
                 if piece.piece_type().is_royal() {
                     if piece.color() == PlayerColor::White {
-                        self.white_king_pos = Some(Coordinate::new(*x, *y));
+                        self.white_king_pos = Some(Coordinate::new(x, y));
                     } else if piece.color() == PlayerColor::Black {
-                        self.black_king_pos = Some(Coordinate::new(*x, *y));
+                        self.black_king_pos = Some(Coordinate::new(x, y));
                     }
                 }
                 self.total_phase += get_piece_phase(piece.piece_type());
                 match piece.color() {
                     PlayerColor::White => {
                         white = white.saturating_add(1);
-                        self.white_pieces.push((*x, *y));
+                        self.white_pieces.push((x, y));
                         // Track pawns and non-pawn material
                         if piece.piece_type() == PieceType::Pawn {
                             white_pawns += 1;
@@ -496,42 +518,7 @@ impl GameState {
                     }
                     PlayerColor::Black => {
                         black = black.saturating_add(1);
-                        self.black_pieces.push((*x, *y));
-                        // Track pawns and non-pawn material
-                        if piece.piece_type() == PieceType::Pawn {
-                            black_pawns += 1;
-                        } else if !piece.piece_type().is_royal() {
-                            black_npm = true;
-                        }
-                    }
-                    PlayerColor::Neutral => {}
-                }
-            }
-        } else {
-            for ((x, y), piece) in self.board.iter() {
-                // Track king positions (any royal piece)
-                if piece.piece_type().is_royal() {
-                    if piece.color() == PlayerColor::White {
-                        self.white_king_pos = Some(Coordinate::new(*x, *y));
-                    } else if piece.color() == PlayerColor::Black {
-                        self.black_king_pos = Some(Coordinate::new(*x, *y));
-                    }
-                }
-                self.total_phase += get_piece_phase(piece.piece_type());
-                match piece.color() {
-                    PlayerColor::White => {
-                        white = white.saturating_add(1);
-                        self.white_pieces.push((*x, *y));
-                        // Track pawns and non-pawn material
-                        if piece.piece_type() == PieceType::Pawn {
-                            white_pawns += 1;
-                        } else if !piece.piece_type().is_royal() {
-                            white_npm = true;
-                        }
-                    }
-                    PlayerColor::Black => {
-                        black = black.saturating_add(1);
-                        self.black_pieces.push((*x, *y));
+                        self.black_pieces.push((x, y));
                         // Track pawns and non-pawn material
                         if piece.piece_type() == PieceType::Pawn {
                             black_pawns += 1;
@@ -619,6 +606,50 @@ impl GameState {
         self.recompute_correction_hashes();
     }
 
+    /// Compute pinned pieces for a specific king position.
+    /// Returns a map of pinned piece coordinate -> pin direction (dx, dy).
+    /// Used by move generation to ensure pinned pieces only move along the pin ray.
+    pub fn compute_pins(
+        &self,
+        king_pos: &Coordinate,
+        us: PlayerColor,
+    ) -> rustc_hash::FxHashMap<Coordinate, (i64, i64)> {
+        let mut pinned = rustc_hash::FxHashMap::default();
+        let them = us.opponent();
+
+        // 8 directions for slider rays
+        const DIRECTIONS: [(i64, i64); 8] = [
+            (0, 1),
+            (0, -1),
+            (1, 0),
+            (-1, 0),
+            (1, 1),
+            (-1, 1),
+            (1, -1),
+            (-1, -1),
+        ];
+        use crate::attacks::{is_diag_slider, is_ortho_slider};
+
+        for (dir_idx, (dx, dy)) in DIRECTIONS.iter().enumerate() {
+            let is_ortho = dir_idx < 4;
+
+            // Find first blocker
+            if let Some((bx, by)) = self.find_first_blocker_on_ray(king_pos.x, king_pos.y, *dx, *dy)
+                && self.board.is_occupied_by_color(bx, by, us)
+                && let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
+                && let Some(p2) = self.board.get_piece(bx2, by2)
+                && p2.color() == them
+            {
+                // Check if it attacks along this ray
+                let pt2 = p2.piece_type();
+                if (is_ortho && is_ortho_slider(pt2)) || (!is_ortho && is_diag_slider(pt2)) {
+                    pinned.insert(Coordinate::new(bx, by), (*dx, *dy));
+                }
+            }
+        }
+        pinned
+    }
+
     /// Precompute check squares for both kings.
     /// For each king, stores the (x, y, piece_type) tuples for squares from which
     /// knights and pawns can give check. Also computes slider rays for O(1) slider check.
@@ -696,8 +727,15 @@ impl GameState {
                     self.slider_rays_white[dir_idx] = Some((bx, by));
                     let p1 = self.board.get_piece(bx, by).unwrap();
                     let is_ortho = dir_idx < 4;
+                    let p1_color = p1.color();
 
-                    if p1.color() == PlayerColor::Black {
+                    // Neutral pieces (obstacles/voids) completely block slider rays.
+                    // Skip further processing on this ray.
+                    if p1_color == PlayerColor::Neutral {
+                        continue;
+                    }
+
+                    if p1_color == PlayerColor::Black {
                         // Immediate Checker?
                         let pt1 = p1.piece_type();
                         if (is_ortho && is_ortho_slider(pt1)) || (!is_ortho && is_diag_slider(pt1))
@@ -718,7 +756,7 @@ impl GameState {
                             }
                         }
                     } else {
-                        // Friendly piece - could be pinned?
+                        // Friendly piece (White) - could be pinned?
                         if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
                             && let Some(p2) = self.board.get_piece(bx2, by2)
                             && p2.color() == PlayerColor::Black
@@ -770,8 +808,15 @@ impl GameState {
                     self.slider_rays_black[dir_idx] = Some((bx, by));
                     let p1 = self.board.get_piece(bx, by).unwrap();
                     let is_ortho = dir_idx < 4;
+                    let p1_color = p1.color();
 
-                    if p1.color() == PlayerColor::White {
+                    // Neutral pieces (obstacles/voids) completely block slider rays.
+                    // Skip further processing on this ray.
+                    if p1_color == PlayerColor::Neutral {
+                        continue;
+                    }
+
+                    if p1_color == PlayerColor::White {
                         // Immediate Checker?
                         let pt1 = p1.piece_type();
                         if (is_ortho && is_ortho_slider(pt1)) || (!is_ortho && is_diag_slider(pt1))
@@ -792,7 +837,7 @@ impl GameState {
                             }
                         }
                     } else {
-                        // Friendly piece - could be pinned?
+                        // Friendly piece (Black) - could be pinned?
                         if let Some((bx2, by2)) = self.find_first_blocker_on_ray(bx, by, *dx, *dy)
                             && let Some(p2) = self.board.get_piece(bx2, by2)
                             && p2.color() == PlayerColor::White
@@ -829,7 +874,7 @@ impl GameState {
         if dx == 0 {
             // Vertical ray (N or S) - use cols[start_x] to get all y coords
             if let Some(col_vec) = self.spatial_indices.cols.get(&start_x)
-                && let Some((found_y, _packed)) = SpatialIndices::find_nearest(col_vec, start_y, dy)
+                && let Some((found_y, _packed)) = col_vec.find_nearest(start_y, dy)
             {
                 return Some((start_x, found_y));
             }
@@ -839,7 +884,7 @@ impl GameState {
                 .spatial_indices
                 .rows
                 .get(&start_y)
-                .and_then(|row_vec| SpatialIndices::find_nearest(row_vec, start_x, dx))
+                .and_then(|row_vec| row_vec.find_nearest(start_x, dx))
             {
                 return Some((found_x, start_y));
             }
@@ -852,9 +897,7 @@ impl GameState {
                 // Main diagonal (NE or SW: dx == dy) - use diag1
                 if let Some(diag_vec) = self.spatial_indices.diag1.get(&diag_key) {
                     // diag1 is indexed by x, so search for x in direction dx
-                    if let Some((found_x, _packed)) =
-                        SpatialIndices::find_nearest(diag_vec, start_x, dx)
-                    {
+                    if let Some((found_x, _packed)) = diag_vec.find_nearest(start_x, dx) {
                         // Reconstruct y from x: on main diagonal, x - y = diag_key
                         let found_y = found_x - diag_key;
                         return Some((found_x, found_y));
@@ -864,9 +907,7 @@ impl GameState {
                 // Anti-diagonal (NW or SE: dx != dy) - use diag2
                 if let Some(anti_vec) = self.spatial_indices.diag2.get(&anti_key) {
                     // diag2 is indexed by x, search in direction dx
-                    if let Some((found_x, _packed)) =
-                        SpatialIndices::find_nearest(anti_vec, start_x, dx)
-                    {
+                    if let Some((found_x, _packed)) = anti_vec.find_nearest(start_x, dx) {
                         // Reconstruct y from x: on anti-diagonal, x + y = anti_key
                         let found_y = anti_key - found_x;
                         return Some((found_x, found_y));
@@ -958,10 +999,7 @@ impl GameState {
         let dist = dx.abs().max(dy.abs());
         if dist <= 1 {
             // Target is adjacent, check if occupied by friendly
-            if let Some(p) = self.board.get_piece(to.x, to.y) {
-                return p.color() != self.turn; // Can capture enemy
-            }
-            return true;
+            return !self.board.is_occupied_by_color(to.x, to.y, self.turn);
         }
         // Use find_first_blocker_on_ray to check path
         if let Some((bx, by)) = self.find_first_blocker_on_ray(from.x, from.y, step_x, step_y) {
@@ -971,12 +1009,7 @@ impl GameState {
                 return false;
             }
             // If blocker is exactly at target, check if it's enemy (capture) or friendly
-            if blocker_dist == dist
-                && self
-                    .board
-                    .get_piece(bx, by)
-                    .is_some_and(|p| p.color() != self.turn)
-            {
+            if blocker_dist == dist && !self.board.is_occupied_by_color(bx, by, self.turn) {
                 return true;
             }
             if blocker_dist == dist {
@@ -1000,22 +1033,14 @@ impl GameState {
         let step_y = dy.signum();
         let dist = dx.abs();
         if dist <= 1 {
-            if let Some(p) = self.board.get_piece(to.x, to.y) {
-                return p.color() != self.turn;
-            }
-            return true;
+            return !self.board.is_occupied_by_color(to.x, to.y, self.turn);
         }
         if let Some((bx, by)) = self.find_first_blocker_on_ray(from.x, from.y, step_x, step_y) {
             let blocker_dist = (bx - from.x).abs();
             if blocker_dist < dist {
                 return false;
             }
-            if blocker_dist == dist
-                && self
-                    .board
-                    .get_piece(bx, by)
-                    .is_some_and(|p| p.color() != self.turn)
-            {
+            if blocker_dist == dist && !self.board.is_occupied_by_color(bx, by, self.turn) {
                 return true;
             }
             if blocker_dist == dist {
@@ -1081,7 +1106,7 @@ impl GameState {
                     let sq = Coordinate::new(checker_sq.x + int_dx, checker_sq.y + int_dy);
 
                     // Check if this intermediate square is occupied
-                    if self.board.get_piece(sq.x, sq.y).is_some() {
+                    if self.board.is_occupied(sq.x, sq.y) {
                         path_blocked = true;
                         break;
                     }
@@ -1131,9 +1156,9 @@ impl GameState {
     /// from an initial position before replaying move history.
     pub fn init_starting_squares(&mut self) {
         self.starting_squares.clear();
-        for ((x, y), piece) in self.board.iter() {
+        for (x, y, piece) in self.board.iter() {
             if piece.piece_type() != PieceType::Pawn && !piece.piece_type().is_royal() {
-                self.starting_squares.insert(Coordinate::new(*x, *y));
+                self.starting_squares.insert(Coordinate::new(x, y));
             }
         }
     }
@@ -1144,7 +1169,7 @@ impl GameState {
     pub fn init_starting_piece_counts(&mut self) {
         let mut white: u16 = 0;
         let mut black: u16 = 0;
-        for (_, piece) in self.board.iter() {
+        for (_, _, piece) in self.board.iter() {
             if piece.piece_type() != PieceType::Pawn && piece.color() != PlayerColor::Neutral {
                 match piece.color() {
                     PlayerColor::White => white += 1,
@@ -1280,7 +1305,7 @@ impl GameState {
             return false;
         }
 
-        // Use minimum of halfmove_clock and plies_from_null like Stockfish
+        // Use minimum of halfmove_clock and plies_from_null
         let end = (self.halfmove_clock as usize).min(self.plies_from_null as usize);
         if end < 3 {
             return false;
@@ -1377,7 +1402,7 @@ impl GameState {
                 }
             }
         } else {
-            for (_, piece) in self.board.iter() {
+            for (_, _, piece) in self.board.iter() {
                 if piece.piece_type() != PieceType::King {
                     if piece.color() == PlayerColor::White {
                         white_has_non_king = true;
@@ -1513,11 +1538,11 @@ impl GameState {
                 h ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
             }
         } else {
-            for ((x, y), piece) in self.board.iter() {
+            for (x, y, piece) in self.board.iter() {
                 if piece.color() == PlayerColor::Neutral {
                     continue;
                 }
-                h ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+                h ^= piece_key(piece.piece_type(), piece.color(), x, y);
             }
         }
 
@@ -1553,11 +1578,12 @@ impl GameState {
         use crate::search::zobrist::{material_key, pawn_key, piece_key};
 
         let mut ph: u64 = 0; // Pawn structure hash
-        let mut nph: u64 = 0; // Non-pawn piece hash
+        let mut wnph: u64 = 0; // White non-pawn piece hash
+        let mut bnph: u64 = 0; // Black non-pawn piece hash
         let mut mh: u64 = 0; // Material hash
         let mut mih: u64 = 0; // Minor piece hash
 
-        for ((x, y), piece) in self.board.iter() {
+        for (x, y, piece) in self.board.iter() {
             if piece.color() == PlayerColor::Neutral {
                 continue;
             }
@@ -1567,22 +1593,27 @@ impl GameState {
 
             if piece.piece_type() == PieceType::Pawn {
                 // Pawn hash: only pawns (helps CoaIP variants)
-                ph ^= pawn_key(piece.color(), *x, *y);
+                ph ^= pawn_key(piece.color(), x, y);
             } else {
-                // Non-pawn hash: all pieces except pawns
-                nph ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+                // Non-pawn hash: tracked per color
+                if piece.color() == PlayerColor::White {
+                    wnph ^= piece_key(piece.piece_type(), piece.color(), x, y);
+                } else {
+                    bnph ^= piece_key(piece.piece_type(), piece.color(), x, y);
+                }
 
                 // Minor hash: Knights and Bishops
                 if piece.piece_type() == PieceType::Knight
                     || piece.piece_type() == PieceType::Bishop
                 {
-                    mih ^= piece_key(piece.piece_type(), piece.color(), *x, *y);
+                    mih ^= piece_key(piece.piece_type(), piece.color(), x, y);
                 }
             }
         }
 
         self.pawn_hash = ph;
-        self.nonpawn_hash = nph;
+        self.white_nonpawn_hash = wnph;
+        self.black_nonpawn_hash = bnph;
         self.material_hash = mh;
         self.minor_hash = mih;
     }
@@ -1607,7 +1638,20 @@ impl GameState {
             return out;
         }
 
+        let king_pos = if self.turn == PlayerColor::White {
+            self.white_king_pos
+        } else {
+            self.black_king_pos
+        };
+
+        let pinned = if let Some(kp) = king_pos {
+            self.compute_pins(&kp, self.turn)
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
         let ctx = crate::moves::MoveGenContext {
+            pinned: &pinned,
             special_rights: &self.special_rights,
             en_passant: &self.en_passant,
             game_rules: &self.game_rules,
@@ -1641,7 +1685,20 @@ impl GameState {
             return;
         }
 
+        let king_pos = if self.turn == PlayerColor::White {
+            self.white_king_pos
+        } else {
+            self.black_king_pos
+        };
+
+        let pinned = if let Some(kp) = king_pos {
+            self.compute_pins(&kp, self.turn)
+        } else {
+            rustc_hash::FxHashMap::default()
+        };
+
         let ctx = crate::moves::MoveGenContext {
+            pinned: &pinned,
             special_rights: &self.special_rights,
             en_passant: &self.en_passant,
             game_rules: &self.game_rules,
@@ -1651,8 +1708,51 @@ impl GameState {
 
         get_legal_moves_into(&self.board, self.turn, &ctx, out);
 
-        if out.is_empty() {
-            get_legal_moves_into(&self.board, self.turn, &ctx, out);
+        // Filter illegal moves (King into check, Pinned pieces leaving ray, EP check reveal)
+        // When not in check, only (King, Pinned, EP) moves can be illegal.
+        let mut i = 0;
+        while i < out.len() {
+            let m = out[i];
+            let mut illegal = false;
+            let pt = m.piece.piece_type();
+
+            if pt.is_royal() {
+                // King moves: destination must not be attacked
+                use crate::moves::is_square_attacked;
+                if is_square_attacked(
+                    &self.board,
+                    &m.to,
+                    self.turn.opponent(),
+                    &self.spatial_indices,
+                ) {
+                    illegal = true;
+                }
+            } else if let Some(&(pdx, pdy)) = pinned.get(&m.from) {
+                // Pinned piece: must move along the pin ray
+                let dx = m.to.x - m.from.x;
+                let dy = m.to.y - m.from.y;
+                // Cross product check for collinearity
+                if dx * pdy != dy * pdx {
+                    illegal = true;
+                }
+            } else if let Some(ep) = &self.en_passant
+                && pt == PieceType::Pawn
+                && m.to == ep.square
+            {
+                // En passant: double removal can reveal horizontal check.
+                // Strict check for this rare case.
+                let mut s_mut = self.clone();
+                let _undo = s_mut.make_move(&m);
+                if s_mut.is_move_illegal() {
+                    illegal = true;
+                }
+            }
+
+            if illegal {
+                out.swap_remove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -1675,9 +1775,12 @@ impl GameState {
         };
 
         let king_piece = match self.board.get_piece(king_sq.x, king_sq.y) {
-            Some(p) => *p,
+            Some(p) => p,
             None => return,
         };
+
+        // Compute pinned pieces for blocking/capturing moves
+        let pinned = self.compute_pins(&king_sq, our_color);
 
         // Use stack-allocated array for checkers
         let mut checkers: [Coordinate; 16] = [Coordinate::new(0, 0); 16];
@@ -1692,7 +1795,7 @@ impl GameState {
                     p.color() == their_color
                         && crate::moves::is_piece_attacking_square(
                             &self.board,
-                            p,
+                            &p,
                             &Coordinate::new(ax, ay),
                             &king_sq,
                             indices,
@@ -1705,11 +1808,11 @@ impl GameState {
                 }
             }
         } else {
-            for (&(ax, ay), p) in self.board.iter() {
+            for (ax, ay, p) in self.board.iter() {
                 if p.color() == their_color
                     && crate::moves::is_piece_attacking_square(
                         &self.board,
-                        p,
+                        &p,
                         &Coordinate::new(ax, ay),
                         &king_sq,
                         indices,
@@ -1728,12 +1831,14 @@ impl GameState {
         }
 
         // 1. King escapes (Legal regardless of checker count, as long as target not attacked)
+        let empty_pins = rustc_hash::FxHashMap::default();
         let ctx = crate::moves::MoveGenContext {
             special_rights: &self.special_rights,
             en_passant: &self.en_passant,
             game_rules: &self.game_rules,
             indices: &self.spatial_indices,
             enemy_king_pos: self.enemy_king_pos(),
+            pinned: &empty_pins,
         };
         get_pseudo_legal_moves_for_piece_into(&self.board, &king_piece, &king_sq, &ctx, out);
 
@@ -1828,7 +1933,9 @@ impl GameState {
             };
 
             if let Some(vec) = line_vec {
-                for &(coord, packed) in vec {
+                for i in 0..vec.len() {
+                    let coord = vec.coords[i];
+                    let packed = vec.pieces[i];
                     let piece = Piece::from_packed(packed);
                     if piece.color() != our_color || piece.piece_type() != PieceType::Huygen {
                         continue;
@@ -1873,9 +1980,7 @@ impl GameState {
                         } else {
                             block_coord
                         };
-                        if let Some(p) = self.board.get_piece(bx, by)
-                            && p.color() == our_color
-                        {
+                        if self.board.is_occupied_by_color(bx, by, our_color) {
                             continue;
                         }
 
@@ -1891,7 +1996,8 @@ impl GameState {
 
                         // Blocker check (ignore checker since it's the checker)
                         let dir_to_block = (block_coord - our_huygen_coord).signum();
-                        for &(other_coord, _) in vec {
+                        for j in 0..vec.len() {
+                            let other_coord = vec.coords[j];
                             if other_coord == our_huygen_coord || other_coord == checker_coord {
                                 continue;
                             }
@@ -1938,13 +2044,8 @@ impl GameState {
             let can_king = attacks_like_king(pt);
 
             // Helper to check if target is valid for blocking (empty or enemy)
-            let can_block_at = |tx: i64, ty: i64| -> bool {
-                if let Some(target_p) = s.board.get_piece(tx, ty) {
-                    target_p.color() != our_color
-                } else {
-                    true
-                }
-            };
+            let can_block_at =
+                |tx: i64, ty: i64| -> bool { !s.board.is_occupied_by_color(tx, ty, our_color) };
 
             // Helper to check if a target square is on the check blocking path
             // For knightrider checkers, use the pre-computed knight hop path
@@ -2140,7 +2241,8 @@ impl GameState {
                         // Horizontal move
                         if let Some(vec) = row_pieces {
                             let dir = d_x.signum();
-                            for &(coord, _) in vec {
+                            for k in 0..vec.len() {
+                                let coord = vec.coords[k];
                                 let dp = (coord - from.x) * dir;
                                 if dp > 0 && dp < dist && is_prime_fast(dp) {
                                     blocked = true;
@@ -2152,7 +2254,8 @@ impl GameState {
                         // Vertical move
                         if let Some(vec) = col_pieces {
                             let dir = d_y.signum();
-                            for &(coord, _) in vec {
+                            for k in 0..vec.len() {
+                                let coord = vec.coords[k];
                                 let dp = (coord - from.y) * dir;
                                 if dp > 0 && dp < dist && is_prime_fast(dp) {
                                     blocked = true;
@@ -2292,10 +2395,7 @@ impl GameState {
                                 // Check path is clear for knightrider
                                 let mut path_clear = true;
                                 for i in 1..t {
-                                    if s.board
-                                        .get_piece(from.x + i * ndx, from.y + i * ndy)
-                                        .is_some()
-                                    {
+                                    if s.board.is_occupied(from.x + i * ndx, from.y + i * ndy) {
                                         path_clear = false;
                                         break;
                                     }
@@ -2447,7 +2547,8 @@ impl GameState {
 
                         let mut blocked = false;
                         if let Some(vec) = line_vec {
-                            for &(coord, _) in vec {
+                            for k in 0..vec.len() {
+                                let coord = vec.coords[k];
                                 let d = (coord - our_coord) * dir;
                                 if d > 0 && d < dist && is_prime_fast(d) {
                                     blocked = true;
@@ -2474,6 +2575,7 @@ impl GameState {
                 game_rules: &s.game_rules,
                 indices: &s.spatial_indices,
                 enemy_king_pos: s.enemy_king_pos(),
+                pinned: &pinned,
             };
             get_pseudo_legal_moves_for_piece_into(&s.board, piece, &from, &ctx, &mut pseudo);
 
@@ -2537,12 +2639,12 @@ impl GameState {
         if let Some(active) = &self.board.active_coords {
             for &(ax, ay) in active {
                 if let Some(p) = self.board.get_piece(ax, ay) {
-                    process_piece(self, Coordinate::new(ax, ay), p, out);
+                    process_piece(self, Coordinate::new(ax, ay), &p, out);
                 }
             }
         } else {
-            for (&(ax, ay), p) in self.board.iter() {
-                process_piece(self, Coordinate::new(ax, ay), p, out);
+            for (ax, ay, p) in self.board.iter() {
+                process_piece(self, Coordinate::new(ax, ay), &p, out);
             }
         }
     }
@@ -2682,9 +2784,9 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in self.board.iter() {
+            for (x, y, piece) in self.board.iter() {
                 if piece.color() == moved_color && piece.piece_type().is_royal() {
-                    let pos = Coordinate::new(*x, *y);
+                    let pos = Coordinate::new(x, y);
                     if is_square_attacked(&self.board, &pos, self.turn, indices) {
                         return true;
                     }
@@ -2748,9 +2850,9 @@ impl GameState {
                 }
             }
         } else {
-            for ((x, y), piece) in self.board.iter() {
+            for (x, y, piece) in self.board.iter() {
                 if piece.color() == self.turn && piece.piece_type().is_royal() {
-                    let pos = Coordinate::new(*x, *y);
+                    let pos = Coordinate::new(x, y);
                     if is_square_attacked(&self.board, &pos, attacker_color, indices) {
                         return true;
                     }
@@ -2761,8 +2863,7 @@ impl GameState {
     }
 
     /// Make a move given just from/to coordinates and optional promotion.
-    /// Like UCI - we trust the input is valid and just execute it directly.
-    /// This is much faster than generating all legal moves for history replay.
+    /// We trust the input is valid and execute directly.
     pub fn make_move_coords(
         &mut self,
         from_x: i64,
@@ -2772,7 +2873,7 @@ impl GameState {
         promotion: Option<&str>,
     ) {
         let piece = match self.board.get_piece(from_x, from_y) {
-            Some(p) => *p,
+            Some(p) => p,
             None => return, // No piece at from - invalid move, just skip
         };
 
@@ -2789,16 +2890,14 @@ impl GameState {
         if piece.piece_type().is_royal() {
             let dx = to_x - from_x;
             if dx.abs() > 1 {
-                // Use spatial indices to find castling partner - O(log n) instead of O(distance)
+                // Use spatial indices to find castling partner
                 let partner_dir = if dx > 0 { 1i64 } else { -1i64 };
                 if let Some(row_pieces) = self.spatial_indices.rows.get(&from_y) {
                     // Find nearest piece past king's destination
-                    if let Some((partner_x, packed)) =
-                        SpatialIndices::find_nearest(row_pieces, to_x, partner_dir)
-                    {
+                    if let Some((partner_x, packed)) = row_pieces.find_nearest(to_x, partner_dir) {
                         let partner = Piece::from_packed(packed);
                         let partner_coord = Coordinate::new(partner_x, from_y);
-                        // Accept any non-pawn, non-royal piece with special rights as a castling partner
+
                         if partner.color() == piece.color()
                             && partner.piece_type() != PieceType::Pawn
                             && !partner.piece_type().is_royal()
@@ -2817,7 +2916,7 @@ impl GameState {
 
     pub fn make_move(&mut self, m: &Move) -> UndoMove {
         use crate::search::zobrist::{
-            SIDE_KEY, en_passant_key, material_key, pawn_special_right_key, piece_key,
+            SIDE_KEY, en_passant_key, material_key, pawn_key, pawn_special_right_key, piece_key,
         };
 
         // Push current position hash BEFORE making the move (for repetition detection)
@@ -2832,13 +2931,24 @@ impl GameState {
         // Hash: remove piece from source
         self.hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
 
-        // Update minor_hash if needed
-        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
-            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+        // Update correction hashes incrementally
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_hash ^= pawn_key(piece.color(), m.from.x, m.from.y);
+        } else {
+            if piece.color() == PlayerColor::White {
+                self.white_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            } else {
+                self.black_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            }
+            if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+                self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            }
         }
 
         let mut undo_info = UndoMove {
-            captured_piece: self.board.get_piece(m.to.x, m.to.y).copied(),
+            captured_piece: self.board.get_piece(m.to.x, m.to.y),
             old_en_passant: self.en_passant,
             old_halfmove_clock: self.halfmove_clock,
             old_hash: self.hash_stack.last().copied().unwrap_or(0),
@@ -2884,12 +2994,23 @@ impl GameState {
             // - Neutral: wasn't in hash, XOR adds "removed obstacle" marker
             self.hash ^= piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
 
-            // Update minor_hash for captured Knights/Bishops
-            if captured.piece_type() == PieceType::Knight
-                || captured.piece_type() == PieceType::Bishop
-            {
-                self.minor_hash ^=
-                    piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+            // Update correction hashes incrementally for captured piece
+            if captured.piece_type() == PieceType::Pawn {
+                self.pawn_hash ^= pawn_key(captured.color(), m.to.x, m.to.y);
+            } else {
+                if captured.color() == PlayerColor::White {
+                    self.white_nonpawn_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                } else if captured.color() == PlayerColor::Black {
+                    self.black_nonpawn_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                }
+                if captured.piece_type() == PieceType::Knight
+                    || captured.piece_type() == PieceType::Bishop
+                {
+                    self.minor_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                }
             }
 
             // Update spatial indices for captured piece on destination square
@@ -2958,6 +3079,7 @@ impl GameState {
                 ep.pawn_square.x,
                 ep.pawn_square.y,
             );
+            self.pawn_hash ^= pawn_key(captured_pawn.color(), ep.pawn_square.x, ep.pawn_square.y);
             self.spatial_indices
                 .remove(ep.pawn_square.x, ep.pawn_square.y);
 
@@ -3072,6 +3194,13 @@ impl GameState {
                 }
             } else {
                 // Non-pawn partner captured
+                if captured.color() == PlayerColor::White {
+                    self.white_nonpawn_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                } else if captured.color() == PlayerColor::Black {
+                    self.black_nonpawn_hash ^=
+                        piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+                }
                 if captured.piece_type() == PieceType::Knight
                     || captured.piece_type() == PieceType::Bishop
                 {
@@ -3111,6 +3240,18 @@ impl GameState {
             // Hash: remove rook from original, add at new position
             self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
             self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+
+            if rook.color() == PlayerColor::White {
+                self.white_nonpawn_hash ^=
+                    piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
+                self.white_nonpawn_hash ^=
+                    piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+            } else {
+                self.black_nonpawn_hash ^=
+                    piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
+                self.black_nonpawn_hash ^=
+                    piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+            }
             self.board.set_piece(rook_to_x, m.from.y, rook);
             // Update spatial indices for rook move
             self.spatial_indices.remove(rook_coord.x, rook_coord.y);
@@ -3161,15 +3302,34 @@ impl GameState {
             m.to.x,
             m.to.y,
         );
-        if final_piece.piece_type() == PieceType::Knight
-            || final_piece.piece_type() == PieceType::Bishop
-        {
-            self.minor_hash ^= piece_key(
-                final_piece.piece_type(),
-                final_piece.color(),
-                m.to.x,
-                m.to.y,
-            );
+        if final_piece.piece_type() == PieceType::Pawn {
+            self.pawn_hash ^= crate::search::zobrist::pawn_key(final_piece.color(), m.to.x, m.to.y);
+        } else {
+            if final_piece.color() == PlayerColor::White {
+                self.white_nonpawn_hash ^= crate::search::zobrist::piece_key(
+                    final_piece.piece_type(),
+                    final_piece.color(),
+                    m.to.x,
+                    m.to.y,
+                );
+            } else {
+                self.black_nonpawn_hash ^= crate::search::zobrist::piece_key(
+                    final_piece.piece_type(),
+                    final_piece.color(),
+                    m.to.x,
+                    m.to.y,
+                );
+            }
+            if final_piece.piece_type() == PieceType::Knight
+                || final_piece.piece_type() == PieceType::Bishop
+            {
+                self.minor_hash ^= crate::search::zobrist::piece_key(
+                    final_piece.piece_type(),
+                    final_piece.color(),
+                    m.to.x,
+                    m.to.y,
+                );
+            }
         }
         self.board.set_piece(m.to.x, m.to.y, final_piece);
         // Update spatial indices for moved piece on destination square
@@ -3252,7 +3412,7 @@ impl GameState {
     }
 
     pub fn undo_move(&mut self, m: &Move, undo: UndoMove) {
-        use crate::search::zobrist::{material_key, piece_key};
+        use crate::search::zobrist::{material_key, pawn_key, piece_key};
 
         // Pop the hash that was pushed in make_move and restore the saved hash
         self.hash_stack.pop();
@@ -3271,8 +3431,19 @@ impl GameState {
         // Update spatial indices: remove piece from destination square
         self.spatial_indices.remove(m.to.x, m.to.y);
 
-        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
-            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.to.x, m.to.y);
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_hash ^= pawn_key(piece.color(), m.to.x, m.to.y);
+        } else {
+            if piece.color() == PlayerColor::White {
+                self.white_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.to.x, m.to.y);
+            } else {
+                self.black_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.to.x, m.to.y);
+            }
+            if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+                self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.to.x, m.to.y);
+            }
         }
 
         // Handle Promotion Revert
@@ -3307,8 +3478,19 @@ impl GameState {
         // Update spatial indices for moved piece back on source square
         self.spatial_indices.add(m.from.x, m.from.y, piece.packed());
 
-        if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
-            self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+        if piece.piece_type() == PieceType::Pawn {
+            self.pawn_hash ^= pawn_key(piece.color(), m.from.x, m.from.y);
+        } else {
+            if piece.color() == PlayerColor::White {
+                self.white_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            } else {
+                self.black_nonpawn_hash ^=
+                    piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            }
+            if piece.piece_type() == PieceType::Knight || piece.piece_type() == PieceType::Bishop {
+                self.minor_hash ^= piece_key(piece.piece_type(), piece.color(), m.from.x, m.from.y);
+            }
         }
 
         // Restore captured piece
@@ -3341,11 +3523,35 @@ impl GameState {
             // Update spatial indices for restored captured piece
             self.spatial_indices.add(m.to.x, m.to.y, captured.packed());
 
-            if captured.piece_type() == PieceType::Knight
-                || captured.piece_type() == PieceType::Bishop
-            {
-                self.minor_hash ^=
-                    piece_key(captured.piece_type(), captured.color(), m.to.x, m.to.y);
+            if captured.piece_type() == PieceType::Pawn {
+                self.pawn_hash ^=
+                    crate::search::zobrist::pawn_key(captured.color(), m.to.x, m.to.y);
+            } else {
+                if captured.color() == PlayerColor::White {
+                    self.white_nonpawn_hash ^= crate::search::zobrist::piece_key(
+                        captured.piece_type(),
+                        captured.color(),
+                        m.to.x,
+                        m.to.y,
+                    );
+                } else if captured.color() == PlayerColor::Black {
+                    self.black_nonpawn_hash ^= crate::search::zobrist::piece_key(
+                        captured.piece_type(),
+                        captured.color(),
+                        m.to.x,
+                        m.to.y,
+                    );
+                }
+                if captured.piece_type() == PieceType::Knight
+                    || captured.piece_type() == PieceType::Bishop
+                {
+                    self.minor_hash ^= crate::search::zobrist::piece_key(
+                        captured.piece_type(),
+                        captured.color(),
+                        m.to.x,
+                        m.to.y,
+                    );
+                }
             }
         }
 
@@ -3364,6 +3570,7 @@ impl GameState {
                 captured_pawn.piece_type(),
                 captured_pawn.color(),
             ));
+            self.pawn_hash ^= pawn_key(captured_pawn.color(), ep.pawn_square.x, ep.pawn_square.y);
 
             // Restore material value and piece counts
             let value = get_piece_value(captured_pawn.piece_type());
@@ -3391,6 +3598,27 @@ impl GameState {
                         self.spatial_indices.remove(rook_to_x, m.from.y);
                         self.spatial_indices
                             .add(rook_coord.x, rook_coord.y, rook.packed());
+
+                        // Revert non-pawn hash for rook
+                        if rook.color() == PlayerColor::White {
+                            self.white_nonpawn_hash ^=
+                                piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+                            self.white_nonpawn_hash ^= piece_key(
+                                rook.piece_type(),
+                                rook.color(),
+                                rook_coord.x,
+                                rook_coord.y,
+                            );
+                        } else {
+                            self.black_nonpawn_hash ^=
+                                piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
+                            self.black_nonpawn_hash ^= piece_key(
+                                rook.piece_type(),
+                                rook.color(),
+                                rook_coord.x,
+                                rook_coord.y,
+                            );
+                        }
                     }
                 }
             }
@@ -3455,7 +3683,6 @@ impl GameState {
         nodes
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn setup_position_from_icn(&mut self, position_icn: &str) {
         self.board = Board::new();
         self.special_rights.clear();
@@ -3465,42 +3692,63 @@ impl GameState {
         self.fullmove_number = 1;
         self.material_score = 0;
 
-        // Step 1: Strip [...] metadata tags
-        let content = if let Some(idx) = position_icn.rfind(']') {
-            &position_icn[idx + 1..]
-        } else {
-            position_icn
-        };
+        let mut content = position_icn.trim();
 
-        let content = content.trim();
+        // Scan for Variant Tag [Variant "Name"]
+        while content.starts_with('[') {
+            if let Some(end) = content.find(']') {
+                let tag = &content[1..end];
+                if tag.starts_with("Variant \"")
+                    && let Some(v_end) = tag[9..].find('"')
+                {
+                    let v_name = &tag[9..9 + v_end];
+                    self.variant = Some(Variant::parse(v_name));
+                }
+                content = content[end + 1..].trim();
+            } else {
+                break;
+            }
+        }
+
         if content.is_empty() {
             return;
         }
 
         // Tokenize by whitespace
         let tokens: Vec<&str> = content.split_whitespace().collect();
+        let mut moves_to_play = Vec::new();
+        let mut wc_list = Vec::new();
+        let mut pieces_token = None;
 
-        // Handle the case where it's JUST pieces
-        if tokens.len() == 1 {
+        // Handle the case where it's just pieces
+        if tokens.len() == 1 && !tokens[0].contains('>') {
             self.parse_icn_pieces(tokens[0]);
             self.finalize_setup();
             return;
         }
-
-        let mut wc_list = Vec::new();
-        let mut pieces_token = None;
 
         for token in tokens {
             if token == "-" {
                 continue;
             }
 
-            // identify token by structure
+            if token.contains('>') {
+                for m in token.split('|') {
+                    if !m.is_empty() {
+                        moves_to_play.push(m);
+                    }
+                }
+                continue;
+            }
+
+            // Identify token by structure
             if token == "w" {
                 self.turn = PlayerColor::White;
             } else if token == "b" {
                 self.turn = PlayerColor::Black;
-            } else if token.contains('/') {
+            } else if token.contains('/')
+                && token.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
                 // Clocks: halfmove/limit
                 let parts: Vec<&str> = token.split('/').collect();
                 if let Some(hm_str) = parts.first() {
@@ -3514,13 +3762,14 @@ impl GameState {
                 let inner = &token[1..token.len() - 1];
                 let sides: Vec<&str> = inner.split('|').collect();
                 let mut promo_types = Vec::new();
+                let mut seen_promos = FxHashSet::default();
 
                 for (idx, side_str) in sides.iter().enumerate() {
                     let parts: Vec<&str> = side_str.split(';').collect();
                     if parts.is_empty() {
                         continue;
                     }
-
+                    // Parse promotion logic
                     if let Ok(rank) = parts[0].parse::<i64>() {
                         if idx == 0 {
                             self.white_promo_rank = rank;
@@ -3528,23 +3777,23 @@ impl GameState {
                             self.black_promo_rank = rank;
                         }
 
-                        if self.game_rules.promotion_ranks.is_none() {
-                            self.game_rules.promotion_ranks = Some(PromotionRanks::default());
-                        }
-                        if let Some(ref mut pr) = self.game_rules.promotion_ranks {
-                            if idx == 0 {
-                                pr.white = vec![rank];
-                            } else {
-                                pr.black = vec![rank];
-                            }
-                        }
+                        self.game_rules.promotion_ranks.white = if idx == 0 {
+                            vec![rank]
+                        } else {
+                            self.game_rules.promotion_ranks.white.clone()
+                        };
+                        self.game_rules.promotion_ranks.black = if idx != 0 {
+                            vec![rank]
+                        } else {
+                            self.game_rules.promotion_ranks.black.clone()
+                        };
                     }
 
                     if parts.len() > 1 {
                         let types: Vec<&str> = parts[1].split(',').collect();
                         for t in &types {
                             let pt = PieceType::from_site_code(&t.to_uppercase());
-                            if pt != PieceType::Void {
+                            if pt != PieceType::Void && seen_promos.insert(pt) {
                                 promo_types.push(pt);
                             }
                         }
@@ -3629,9 +3878,39 @@ impl GameState {
         self.game_rules.black_win_condition = WinCondition::select(&wc_list, white_has_royal);
 
         self.finalize_setup();
+
+        for move_str in moves_to_play {
+            let clean_move = move_str.trim_start_matches(|c: char| c.is_alphabetic() && c != '>');
+            let parts: Vec<&str> = clean_move.split('>').collect();
+            if parts.len() == 2 {
+                let from_str = parts[0];
+                let mut to_str = parts[1];
+                let mut promotion = None;
+
+                if let Some(idx) = to_str.find('=') {
+                    promotion = Some(&to_str[idx + 1..]);
+                    to_str = &to_str[..idx];
+                }
+
+                let parse_coord = |s: &str| -> Option<(i64, i64)> {
+                    let p: Vec<&str> = s.split(',').collect();
+                    if p.len() != 2 {
+                        return None;
+                    }
+                    let y_part =
+                        p[1].trim_matches(|c| c == '+' || c == '!' || c == '#' || c == '?');
+                    Some((p[0].parse().ok()?, y_part.parse().ok()?))
+                };
+
+                if let (Some((fx, fy)), Some((tx, ty))) =
+                    (parse_coord(from_str), parse_coord(to_str))
+                {
+                    self.make_move_coords(fx, fy, tx, ty, promotion);
+                }
+            }
+        }
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn parse_icn_pieces(&mut self, piece_segment: &str) {
         for piece_def in piece_segment.split('|') {
             if piece_def.is_empty() {
@@ -3675,13 +3954,16 @@ impl GameState {
 
             let first_char = code_str.chars().next().unwrap();
             let is_white = first_char.is_uppercase();
-            let color = if is_white {
+            let mut color = if is_white {
                 PlayerColor::White
             } else {
                 PlayerColor::Black
             };
 
             let piece_type = PieceType::from_site_code(&code_str.to_uppercase());
+            if piece_type.is_neutral_type() {
+                color = PlayerColor::Neutral;
+            }
 
             self.board.set_piece(x, y, Piece::new(piece_type, color));
 
@@ -3691,13 +3973,63 @@ impl GameState {
         }
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn finalize_setup(&mut self) {
         // Calculate initial material
         self.material_score = calculate_initial_material(&self.board);
 
         // Rebuild piece lists and counts
         self.recompute_piece_counts();
+
+        let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+
+        // Filter special rights outside world bounds
+        self.special_rights
+            .retain(|c| c.x >= min_x && c.x <= max_x && c.y >= min_y && c.y <= max_y);
+
+        // Filter en passant outside world bounds
+        if let Some(ep) = self.en_passant
+            && (ep.square.x < min_x
+                || ep.square.x > max_x
+                || ep.square.y < min_y
+                || ep.square.y > max_y
+                || ep.pawn_square.x < min_x
+                || ep.pawn_square.x > max_x
+                || ep.pawn_square.y < min_y
+                || ep.pawn_square.y > max_y)
+        {
+            self.en_passant = None;
+        }
+
+        // Auto-detect back ranks based on King positions
+        if let Some(wk) = self.white_king_pos {
+            self.white_back_rank = wk.y;
+        }
+        if let Some(bk) = self.black_king_pos {
+            self.black_back_rank = bk.y;
+        }
+
+        // Validate promotion ranks against world bounds
+        if self.white_promo_rank < min_y || self.white_promo_rank > max_y {
+            self.white_promo_rank = i64::MIN;
+        }
+        if self.black_promo_rank < min_y || self.black_promo_rank > max_y {
+            self.black_promo_rank = i64::MAX;
+        }
+
+        self.game_rules
+            .promotion_ranks
+            .white
+            .retain(|&r| r >= min_y && r <= max_y);
+        self.game_rules
+            .promotion_ranks
+            .black
+            .retain(|&r| r >= min_y && r <= max_y);
+
+        // Cache starting non-pawn piece counts for phase detection
+        self.init_starting_piece_counts();
+
+        // Initialize starting squares
+        self.init_starting_squares();
 
         // Compute initial hash
         self.recompute_hash();
@@ -3706,12 +4038,12 @@ impl GameState {
         self.spatial_indices = SpatialIndices::new(&self.board);
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
+    #[cfg(any(test, not(target_arch = "wasm32"), feature = "parallel_solver"))]
     pub fn setup_variant(&mut self, variant: Variant) {
         self.setup_position_from_icn(variant.starting_icn());
     }
 
-    #[cfg(any(test, not(target_arch = "wasm32")))]
+    #[cfg(any(test, not(target_arch = "wasm32"), feature = "parallel_solver"))]
     pub fn setup_standard_chess(&mut self) {
         self.setup_variant(Variant::Classical);
     }

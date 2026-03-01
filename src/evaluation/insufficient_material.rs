@@ -36,26 +36,13 @@ fn get_best_promotion_piece(game_rules: &crate::game::GameRules) -> Option<Piece
 /// Check if a pawn at position y can still promote for the given color
 fn can_pawn_promote(y: i64, color: PlayerColor, game_rules: &crate::game::GameRules) -> bool {
     // Get promotion ranks for this color
-    let promo_ranks = if let Some(ref ranks) = game_rules.promotion_ranks {
+    let promo_ranks = {
+        let ranks = &game_rules.promotion_ranks;
         match color {
             PlayerColor::White => &ranks.white,
             PlayerColor::Black => &ranks.black,
             PlayerColor::Neutral => return false,
         }
-    } else if game_rules
-        .promotions_allowed
-        .as_ref()
-        .is_none_or(|v| v.is_empty())
-    {
-        // No promotion ranks AND no promotions_allowed = no promotions
-        return false;
-    } else {
-        // Use classical defaults: white promotes at 8, black at 1
-        return match color {
-            PlayerColor::White => y < 8,
-            PlayerColor::Black => y > 1,
-            PlayerColor::Neutral => false,
-        };
     };
 
     if promo_ranks.is_empty() {
@@ -113,7 +100,7 @@ fn has_sufficient_mating_material(
     let mut light_bishops = 0;
     let mut dark_bishops = 0;
 
-    for ((x, y), piece) in board.iter() {
+    for (x, y, piece) in board.iter() {
         if piece.color() != color {
             continue;
         }
@@ -136,7 +123,7 @@ fn has_sufficient_mating_material(
             PieceType::Pawn => {
                 // KEY CHANGE: If this pawn can promote, count it as the best promotion piece
                 if let Some(promo_piece) = best_promo {
-                    if can_pawn_promote(*y, color, game_rules) {
+                    if can_pawn_promote(y, color, game_rules) {
                         // Count as the promotion piece instead of a pawn
                         match promo_piece {
                             PieceType::Queen | PieceType::RoyalQueen => queens += 1,
@@ -714,7 +701,7 @@ fn compute_insufficient_material(game: &crate::game::GameState) -> Option<i32> {
     let mut white_pieces = 0; // Non-king pieces
     let mut black_pieces = 0; // Non-king pieces
 
-    for (_, p) in board.iter() {
+    for (_, _, p) in board.iter() {
         let is_royal = p.piece_type().is_royal();
         match p.color() {
             PlayerColor::White => {
@@ -964,10 +951,10 @@ mod tests {
     #[test]
     fn test_can_pawn_promote_basic() {
         let rules = GameRules {
-            promotion_ranks: Some(PromotionRanks {
+            promotion_ranks: PromotionRanks {
                 white: vec![8],
                 black: vec![1],
-            }),
+            },
             promotion_types: None,
             promotions_allowed: None,
             move_rule_limit: None,
@@ -990,7 +977,11 @@ mod tests {
 
     #[test]
     fn test_can_pawn_promote_no_ranks() {
-        let rules = GameRules::default();
+        let mut rules = GameRules::default();
+        rules.promotion_ranks = PromotionRanks {
+            white: vec![],
+            black: vec![],
+        };
 
         // No promotion ranks defined - pawns can never promote
         assert!(!can_pawn_promote(5, PlayerColor::White, &rules));
@@ -1053,10 +1044,10 @@ mod tests {
             (0, 10, PieceType::Pawn, PlayerColor::White), // Past rank 8
             (5, 5, PieceType::King, PlayerColor::Black),
         ]));
-        game.game_rules.promotion_ranks = Some(PromotionRanks {
+        game.game_rules.promotion_ranks = PromotionRanks {
             white: vec![8],
             black: vec![1],
-        });
+        };
 
         let result = compute_insufficient_material(&game);
         // White only has a dead pawn and a king.

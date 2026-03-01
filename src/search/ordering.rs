@@ -42,17 +42,16 @@ pub fn score_move(
         // SEE threshold check
         let is_winning = super::see_ge(game, m, see_winning_threshold());
 
-        score += mvv_lva;
+        // Capture history
+        let cap_hist =
+            searcher.capture_history[m.piece.piece_type() as usize][target.piece_type() as usize];
+
+        score += mvv_lva + (cap_hist / 8);
         if is_winning {
             score += sort_winning_capture();
         } else {
             score += DEFAULT_SORT_LOSING_CAPTURE;
         }
-
-        // Capture history
-        let cap_hist =
-            searcher.capture_history[m.piece.piece_type() as usize][target.piece_type() as usize];
-        score += cap_hist / 16;
     } else {
         // Quiet move scoring
 
@@ -99,18 +98,22 @@ pub fn score_move(
             let cur_from_hash = hash_coord_32(m.from.x, m.from.y);
             let cur_to_hash = hash_coord_32(m.to.x, m.to.y);
 
-            for &plies_ago in &[0usize, 1, 2, 3, 4, 5] {
-                if ply > plies_ago
-                    && let Some(ref prev_move) = searcher.move_history[ply - plies_ago - 1]
+            // ply_offset_idx: 0 -> 1 ply ago, 1 -> 2 plies ago, 2 -> 4 plies ago
+            let offsets = [1usize, 2, 4];
+            const CONT_WEIGHTS: [i32; 3] = [1024, 712, 410];
+            for (idx, &plies_ago) in offsets.iter().enumerate() {
+                if ply >= plies_ago
+                    && let Some(ref prev_move) = searcher.move_history[ply - plies_ago]
                 {
-                    let prev_piece = searcher.moved_piece_history[ply - plies_ago - 1] as usize;
+                    let prev_piece = searcher.moved_piece_history[ply - plies_ago] as usize;
                     if prev_piece < 32 {
                         let prev_to_hash = hash_coord_32(prev_move.to.x, prev_move.to.y);
-                        let prev_ic = searcher.in_check_history[ply - plies_ago - 1] as usize;
-                        let prev_cap = searcher.capture_history_stack[ply - plies_ago - 1] as usize;
+                        let prev_ic = searcher.in_check_history[ply - plies_ago] as usize;
+                        let prev_cap = searcher.capture_history_stack[ply - plies_ago] as usize;
 
-                        score += searcher.cont_history[prev_cap][prev_ic][prev_piece][prev_to_hash]
-                            [cur_from_hash][cur_to_hash];
+                        let val = searcher.cont_history[idx][prev_cap][prev_ic][prev_piece]
+                            [prev_to_hash][cur_from_hash][cur_to_hash];
+                        score += (val * CONT_WEIGHTS[idx]) / 1024;
                     }
                 }
             }
@@ -242,7 +245,8 @@ pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
 pub fn hash_move_dest(m: &Move) -> usize {
     let x = m.to.x as u64;
     let y = m.to.y as u64;
-    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9136a9a9f9065e33);
+    // Parallel multiplier mix for better distribution on infinite board
+    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9e3779b185ebca87).rotate_left(32);
     ((h ^ (h >> 32)) & 0xFF) as usize
 }
 
@@ -251,16 +255,17 @@ pub fn hash_move_dest(m: &Move) -> usize {
 pub fn hash_move_from(m: &Move) -> usize {
     let x = m.from.x as u64;
     let y = m.from.y as u64;
-    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9136a9a9f9065e33);
+    // Standardized parallel mix
+    let h = x.wrapping_mul(0x517cc1b727220a95) ^ y.wrapping_mul(0x9e3779b185ebca87).rotate_left(32);
     ((h ^ (h >> 32)) & 0xFF) as usize
 }
 
 /// Hash coordinate to 32-size index (for continuation history)
 #[inline]
 pub fn hash_coord_32(x: i64, y: i64) -> usize {
-    let ux = x.wrapping_abs() as u64;
-    let uy = y.wrapping_abs() as u64;
-    ((ux ^ uy) & 0x1F) as usize
+    let h = (x as u64).wrapping_mul(0x517cc1b727220a95)
+        ^ (y as u64).wrapping_mul(0x9e3779b185ebca87).rotate_left(32);
+    ((h ^ (h >> 32)) & 0x1F) as usize
 }
 
 /// Hash move for low-ply history table (1024 entries)
@@ -325,7 +330,6 @@ mod tests {
             .set_piece(0, 0, Piece::new(PieceType::Knight, PlayerColor::White));
         game.board
             .set_piece(1, 1, Piece::new(PieceType::Pawn, PlayerColor::White));
-        game.board.rebuild_tiles();
 
         let mut moves: MoveList = vec![
             Move::new(

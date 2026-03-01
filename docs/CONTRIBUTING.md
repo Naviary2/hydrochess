@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to HydroChess! This guide explains the workflow for making changes to the engine.
 
-**[← Back to README](../README.md)** | **[Setup Guide](SETUP.md)** | **[SPRT Testing](../sprt/README.md)**
+**[← Back to README](../README.md)** | **[Setup Guide](SETUP.md)** | **[SPRT Testing](../sprt/README.md)** | **[Roadmap](ROADMAP.md)**
 
 ---
 
@@ -130,7 +130,6 @@ npm run dev
 4. **Open** `http://localhost:3000` and configure your test:
    - Use `all` preset for most changes
    - Mode: `Gainer` (proving improvement) or `Non-Regression` (proving no regression)
-   - Time: 200ms is a good starting point
 
 5. **Wait for result**:
    - ✅ **PASSED**: Your change is an improvement (or at least not worse)
@@ -184,6 +183,12 @@ Understanding the codebase:
 | `evaluation/mop_up.rs` | Endgame evaluation for mating |
 | `evaluation/insufficient_material.rs` | Draw detection |
 | `evaluation/variants/*.rs` | Variant-specific evaluation |
+
+### Utilities
+
+| Module | Purpose |
+|--------|---------|
+| `src/bin/*.rs` | Standalone tools: Helpmate solver, SPSA tuner, debuggers (see **[src/bin/README.md](../src/bin/README.md)**) |
 
 ---
 

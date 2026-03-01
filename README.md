@@ -1,6 +1,6 @@
 # HydroChess WASM
 
-A high-performance Rust chess engine compiled to WebAssembly, designed for [Infinite Chess](https://www.infinitechess.org/) variants.
+A high-performance Rust chess engine compiled to WebAssembly, designed for [Infinite Chess](https://www.infinitechess.org/).
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 
@@ -11,33 +11,18 @@ A high-performance Rust chess engine compiled to WebAssembly, designed for [Infi
 | **[Setup Guide](docs/SETUP.md)** | Install Rust, wasm-pack, and build the engine |
 | **[Contributing Guide](docs/CONTRIBUTING.md)** | Workflow for adding features and testing changes |
 | **[SPRT Testing](sprt/README.md)** | Run strength tests to validate engine changes |
+| **[Roadmap](docs/ROADMAP.md)** | Planned features, technical debt, and backlog |
+| **[Utility Binaries](src/bin/README.md)** | Solvers, debuggers, and tuning tools |
 
 ---
 
 ## ✨ Features
 
-### Search
-- **Iterative deepening** with aspiration windows
-- **Alpha-beta pruning** with principal variation search
-- **Null move pruning** and **late move reductions (LMR)**
-- **Transposition table** with Zobrist hashing
-- **Killer moves** and **history heuristic** for move ordering
-- **Quiescence search** for tactical accuracy
-- **Static Exchange Evaluation (SEE)** for capture pruning
-- **Lazy SMP Multithreading**: Scalable parallel search with runtime implementation dispatch
-
-### Evaluation
-- Material counting with tuned piece values
-- Piece-square considerations for positional play
-- King safety evaluation
-- Pawn structure analysis (isolated, doubled, passed pawns)
-- Endgame detection with specialized mop-up evaluation
-- Insufficient material draw detection
-
-### Infinite Chess Support
-- **Coordinate-based board**: Arbitrary positions (not limited to 8x8)
-- **Fairy pieces**: Amazon, Chancellor, Archbishop, Centaur, Hawk, Knightrider, Rose, Huygen, and more
-- **Variant-specific evaluation**: Chess, Confined Classical, Obstocean, Pawn Horde, Palace
+- **Infinite Architecture**: Coordinate-based board supporting arbitrary world sizes and non-standard geometries.
+- **Advanced Search**: Iterative deepening PVS with Aspiration Windows, Null Move Pruning, LMR, history-based move ordering, and more.
+- **Evaluation**: Modular **HCE** (Material, Cloud Centrality, Pawn Advancement, King Safety, etc.) with experimental **NNUE** support.
+- **Scalable Performance**: High-performance Rust core with **Lazy SMP** multithreading.
+- **Variants & Fairy Pieces**: Full support for all fairy pieces and unique infinite chess variants.
 
 ---
 
@@ -51,7 +36,7 @@ cargo install wasm-pack
 # 2. Build for browser (Single-threaded)
 wasm-pack build --target web
 
-# 3. Build for browser (Multi-threaded / Lazy SMP)
+# 3. Build for browser (Multi-threaded)
 node build_mt.js
 
 # 4. Output is in pkg/ - ready for use with your bundler
@@ -70,62 +55,45 @@ import init, { Engine } from './pkg/hydrochess_wasm.js';
 
 await init();
 
-const engine = new Engine(gameStateJson);
+// Initialize engine from ICN string
+const icnString = "w 0/100 1 (8|1) P1,2+|P2,2+|P3,2+|P4,2+|P5,2+|P6,2+|P7,2+|P8,2+|...|K5,1+|k5,8+";
+const engineConfig = {
+    strength_level: 3, // 1=Easy, 2=Medium, 3=Hard (default)
+    wtime: 60000,      // White clock in ms
+    btime: 60000,      // Black clock in ms
+    winc: 1000,        // White increment in ms
+    binc: 1000         // Black increment in ms
+};
+
+const engine = Engine.from_icn(icnString, engineConfig);
+
+// Get best move
+const result = engine.get_best_move();
+// Example result: { from: "1,2", to: "1,4", promotion: null, eval: 34, depth: 12 }
 
 // Get best move with time limit (milliseconds)
 const result = engine.get_best_move_with_time(500);
-// Returns: { from: "5,2", to: "5,4", promotion: null, eval: 34 }
 
 // Get all legal moves
 const moves = engine.get_legal_moves_js();
 ```
 
-### Multithreaded usage (Lazy SMP)
+### Multithreaded usage
 
-To use parallel search, you must initialize the WASM module's thread pool and set the desired number of threads:
+To use parallel search, you must initialize the WASM module's thread pool:
 
 ```javascript
 import init, { Engine, initThreadPool } from './pkg/hydrochess_wasm.js';
 
 await init();
+await initThreadPool(navigator.hardwareConcurrency);
 
-// Initialize thread pool (e.g., 2 threads)
-await initThreadPool(2);
-
-const engine = new Engine(gameState);
-const result = engine.get_best_move_with_time(1000); // Now uses 2 threads
+const engine = Engine.from_icn(icnString, engineConfig);
+const result = engine.get_best_move(); // Now uses all available cores
 ```
 
 > [!NOTE]
 > Parallel WASM requires specific HTTP headers (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`) to be served by your web server.
-
-### Game State Format
-
-```javascript
-const gameState = {
-    board: {
-        pieces: [
-            { x: "1", y: "1", piece_type: "r", player: "w" },
-            { x: "5", y: "1", piece_type: "k", player: "w" },
-            // ... all pieces
-        ]
-    },
-    turn: "w",
-    special_rights: ["1,1", "5,1", "8,1"],
-    en_passant: null,
-    halfmove_clock: 0,
-    fullmove_number: 1,
-    move_history: [
-        { from: "5,2", to: "5,4", promotion: null },
-        // ... moves played
-    ],
-    game_rules: {
-        promotion_ranks: { white: ["8"], black: ["1"] },
-        promotions_allowed: ["q", "r", "b", "n"],
-        win_conditions: { white: ["checkmate"], black: ["checkmate"] }
-    }
-};
-```
 
 ---
 

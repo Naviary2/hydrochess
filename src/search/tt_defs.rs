@@ -23,6 +23,25 @@ pub fn value_to_tt(value: i32, ply: usize) -> i32 {
     }
 }
 
+#[inline]
+pub fn clamp_to_i16(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+#[inline]
+pub fn pack_coord(c: i64) -> u64 {
+    (c.clamp(MIN_TT_COORD, MAX_TT_COORD) & COORD_MASK as i64) as u64
+}
+
+#[inline]
+pub fn unpack_coord(v: u64) -> i64 {
+    let mut val = (v & COORD_MASK) as i64;
+    if val >= (1 << (COORD_BITS - 1)) {
+        val -= 1 << COORD_BITS;
+    }
+    val
+}
+
 /// Value adjustment for retrieval:
 /// Inverse of value_to_tt: adjusts TT score back to root-relative.
 /// Downgrades mate scores that are unreachable due to the 50-move rule.
@@ -92,6 +111,15 @@ pub struct TTProbeParams {
     pub rule50_count: u32,
     pub rule_limit: i32,
 }
+
+/// Promotion type is 5 bits (supporting 32 types)
+pub const PROMO_BITS: u32 = 5;
+
+/// Coordinate bit-packing (13 bits = +/- 4096 range)
+pub const COORD_BITS: u32 = 13;
+pub const COORD_MASK: u64 = (1 << COORD_BITS) - 1;
+pub const MAX_TT_COORD: i64 = (1 << (COORD_BITS - 1)) - 1;
+pub const MIN_TT_COORD: i64 = -MAX_TT_COORD - 1;
 
 /// Parameters for storing to the TT
 pub struct TTStoreParams {

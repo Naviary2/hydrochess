@@ -2,7 +2,7 @@
 
 This guide walks you through setting up your development environment for HydroChess WASM.
 
-**[← Back to README](../README.md)**
+**[← Back to README](../README.md)** | **[Contributing Guide](CONTRIBUTING.md)** | **[Roadmap](ROADMAP.md)**
 
 ---
 
@@ -105,9 +105,9 @@ cargo llvm-cov --lib
 
 ---
 
-## 5. Multi-threaded Build (Lazy SMP)
+## 5. Multi-threaded Build
 
-The engine supports parallel search (Lazy SMP) in WebAssembly. This requires a nightly Rust toolchain and specific compilation flags to enable shared memory and atomics.
+The engine supports parallel search in WebAssembly. This requires a nightly Rust toolchain and specific compilation flags to enable shared memory and atomics.
 
 ### Setup for Multithreading
 
@@ -134,13 +134,11 @@ This script handles the complex configuration required for WASM threads and uses
 Recommended extensions:
 
 1. **rust-analyzer** - Rust language support
-2. **CodeLLDB** - Debugging support
 
 Settings (`.vscode/settings.json`):
 
 ```json
 {
-    "rust-analyzer.cargo.target": null,
     "rust-analyzer.check.command": "clippy"
 }
 ```
@@ -151,30 +149,10 @@ Install the **Rust** plugin from JetBrains Marketplace.
 
 ---
 
-## Troubleshooting
-
-### "wasm-pack: command not found"
-
-Ensure `~/.cargo/bin` is in your PATH:
-
-```bash
-# Add to ~/.bashrc or ~/.zshrc:
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-### "error[E0463]: can't find crate"
-
-Run:
-
-```bash
-rustup update
-rustup target add wasm32-unknown-unknown
-```
----
-
 ## Next Steps
 
 - **[Contributing Guide](CONTRIBUTING.md)** - Learn the development workflow
+- **[Roadmap](ROADMAP.md)** - See planned features and where to help
 - **[SPRT Testing](../sprt/README.md)** - Validate engine strength changes
 - **[Main README](../README.md)** - Project overview
 
