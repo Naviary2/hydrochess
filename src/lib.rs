@@ -265,7 +265,55 @@ impl Engine {
             strength_level,
         })
     }
+}
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Engine {
+    pub fn new_native(icn_string: &str) -> Engine {
+        let mut game = GameState::new();
+        game.setup_position_from_icn(icn_string);
+        Engine {
+            game,
+            clock: None,
+            strength_level: None,
+        }
+    }
+
+    pub fn set_clock(&mut self, wtime: u64, btime: u64, winc: u64, binc: u64) {
+        self.clock = Some(JsClock {
+            wtime,
+            btime,
+            winc,
+            binc,
+        });
+    }
+
+    pub fn search_native(
+        &mut self,
+        time_limit_ms: u32,
+        max_depth: Option<usize>,
+    ) -> Option<(crate::moves::Move, i32, crate::search::SearchStats)> {
+        let (opt_time, max_time, is_soft_limit) =
+            if time_limit_ms == 0 && max_depth.is_some() && self.clock.is_none() {
+                (u128::MAX, u128::MAX, true)
+            } else {
+                self.effective_time_limit_ms(time_limit_ms)
+            };
+        let depth = max_depth.unwrap_or(50).clamp(1, 100);
+
+        crate::search::get_best_move_parallel(
+            &mut self.game,
+            depth,
+            opt_time,
+            max_time,
+            false,
+            is_soft_limit,
+        )
+    }
+}
+
+#[wasm_bindgen]
+impl Engine {
     pub fn get_best_move(&mut self) -> JsValue {
         if let Some((best_move, _eval, _stats)) =
             search::get_best_move(&mut self.game, 50, u128::MAX, false, true)
@@ -459,12 +507,13 @@ impl Engine {
         // let legal_moves = self.game.get_legal_moves();
         // web_sys::console::log_1(&format!("Legal moves: {:?}", legal_moves).into());
 
-        let (opt_time, max_time, is_soft_limit) = if time_limit_ms == 0 && max_depth.is_some() {
-            // If explicit depth is requested with 0 time, treat as infinite time (fixed depth search)
-            (u128::MAX, u128::MAX, true)
-        } else {
-            self.effective_time_limit_ms(time_limit_ms)
-        };
+        let (opt_time, max_time, is_soft_limit) =
+            if time_limit_ms == 0 && max_depth.is_some() && self.clock.is_none() {
+                // If explicit depth is requested with 0 time, treat as infinite time (fixed depth search)
+                (u128::MAX, u128::MAX, true)
+            } else {
+                self.effective_time_limit_ms(time_limit_ms)
+            };
         let silent = silent.unwrap_or(false);
         let depth = max_depth.unwrap_or(50).clamp(1, 50);
         let strength = self.strength_level;

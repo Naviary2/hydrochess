@@ -3732,7 +3732,7 @@ impl GameState {
                 continue;
             }
 
-            if token.contains('>') {
+            if token.contains('>') || token.contains('x') {
                 for m in token.split('|') {
                     if !m.is_empty() {
                         moves_to_play.push(m);
@@ -3880,8 +3880,13 @@ impl GameState {
         self.finalize_setup();
 
         for move_str in moves_to_play {
-            let clean_move = move_str.trim_start_matches(|c: char| c.is_alphabetic() && c != '>');
-            let parts: Vec<&str> = clean_move.split('>').collect();
+            let clean_move =
+                move_str.trim_start_matches(|c: char| c.is_alphabetic() && c != '>' && c != 'x');
+            let parts: Vec<&str> = if clean_move.contains('>') {
+                clean_move.split('>').collect()
+            } else {
+                clean_move.split('x').collect()
+            };
             if parts.len() == 2 {
                 let from_str = parts[0];
                 let mut to_str = parts[1];
