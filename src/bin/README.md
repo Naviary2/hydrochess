@@ -43,3 +43,19 @@ Pre-computes magic number constants for sliding piece attack generation. This is
 ```bash
 cargo run --release --bin generate_magics
 ```
+
+### 6. Game Generator (`game_gen.rs`)
+A game generation tool that generates games from engine play with variance. Used before puzzle generation.
+
+**Usage:**
+```bash
+cargo run --release --bin game_gen --features puzzle_gen
+```
+
+### 7. Enhanced Puzzle Generator (`puzzle_gen.rs`)
+A high-fidelity puzzle generation tool that extracts tactical puzzles from a game database. It uses Lichess-aligned metrics (win chance differentials, Principal Variation cooking, and multi-ply validation) to ensure unique, meaningful solutions and accurate theme detection (forks, pins, discovered attacks, etc.).
+
+**Usage:**
+```bash
+cargo run --release --bin puzzle_gen --features puzzle_gen
+```

@@ -752,6 +752,7 @@ fn determine_game_result(gs: &GameState) -> i8 {
         game_rules: &gs.game_rules,
         indices: &gs.spatial_indices,
         enemy_king_pos: None,
+        pinned: todo!(),
     };
     let moves = hydrochess_wasm::moves::get_legal_moves(&gs.board, gs.turn, &ctx);
 
@@ -794,6 +795,7 @@ fn has_any_legal_move(gs: &GameState) -> bool {
         game_rules: &gs.game_rules,
         indices: &gs.spatial_indices,
         enemy_king_pos: None,
+        pinned: todo!(),
     };
     let moves = hydrochess_wasm::moves::get_legal_moves(&gs.board, gs.turn, &ctx);
     for m in moves {
@@ -814,6 +816,7 @@ fn get_weighted_random_move(gs: &GameState, prng: &mut Prng) -> Option<Move> {
         game_rules: &gs.game_rules,
         indices: &gs.spatial_indices,
         enemy_king_pos: None,
+        pinned: todo!(),
     };
 
     let moves = hydrochess_wasm::moves::get_legal_moves(&gs.board, gs.turn, &ctx);
@@ -902,6 +905,7 @@ fn play_game(
                         game_rules: &gs.game_rules,
                         indices: &gs.spatial_indices,
                         enemy_king_pos: None,
+                        pinned: todo!(),
                     };
                     let mut fallback = None;
                     let pseudo_moves =
@@ -929,6 +933,7 @@ fn play_game(
                             game_rules: &gs.game_rules,
                             indices: &gs.spatial_indices,
                             enemy_king_pos: None,
+                            pinned: todo!(),
                         };
                         let mut fallback = None;
                         let pseudo_moves =
@@ -953,6 +958,7 @@ fn play_game(
                         game_rules: &gs.game_rules,
                         indices: &gs.spatial_indices,
                         enemy_king_pos: None,
+                        pinned: todo!(),
                     };
                     let pseudo_moves =
                         hydrochess_wasm::moves::get_legal_moves(&gs.board, gs.turn, &local_ctx);

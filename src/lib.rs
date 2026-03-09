@@ -187,6 +187,13 @@ pub struct JsMoveWithEval {
     pub depth: usize, // depth reached
 }
 
+#[cfg(feature = "eval_tuning")]
+#[derive(Serialize)]
+pub struct JsEvalWithFeatures {
+    pub eval: i32,
+    pub features: crate::evaluation::base::EvalFeatures,
+}
+
 /// A single PV line for MultiPV output
 #[derive(Serialize, Deserialize)]
 pub struct JsPVLine {
@@ -333,6 +340,9 @@ impl Engine {
     #[wasm_bindgen]
     pub fn evaluate_with_features(&mut self) -> JsValue {
         crate::evaluation::reset_eval_features();
+        #[cfg(feature = "nnue")]
+        let eval = crate::evaluation::evaluate(&self.game, None);
+        #[cfg(not(feature = "nnue"))]
         let eval = crate::evaluation::evaluate(&self.game);
         let features = crate::evaluation::snapshot_eval_features();
         serde_wasm_bindgen::to_value(&JsEvalWithFeatures { eval, features }).unwrap()
@@ -518,11 +528,10 @@ impl Engine {
         let depth = max_depth.unwrap_or(50).clamp(1, 50);
         let strength = self.strength_level;
 
-        #[allow(unused_variables)]
-        let pre_stats = crate::search::get_current_tt_stats();
 
         #[cfg(target_arch = "wasm32")]
         {
+            let pre_stats = crate::search::get_current_tt_stats();
             if !silent {
                 use crate::log;
                 let variant = self
