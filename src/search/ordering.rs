@@ -1,4 +1,3 @@
-use crate::evaluation::get_piece_value;
 use crate::game::GameState;
 use crate::moves::{Move, MoveList};
 
@@ -35,8 +34,8 @@ pub fn score_move(
 
     // Capture scoring
     if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
-        let victim_val = get_piece_value(target.piece_type());
-        let attacker_val = get_piece_value(m.piece.piece_type());
+        let victim_val = game.get_piece_value(target.piece_type(), target.color());
+        let attacker_val = game.get_piece_value(m.piece.piece_type(), m.piece.color());
         let mvv_lva = victim_val * 10 - attacker_val;
 
         // SEE threshold check
@@ -208,8 +207,8 @@ pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
         let mut scores = [0i32; 128];
         for (i, m) in moves.iter().enumerate() {
             if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
-                scores[i] = get_piece_value(target.piece_type()) * 10
-                    - get_piece_value(m.piece.piece_type());
+                scores[i] = game.get_piece_value(target.piece_type(), target.color()) * 10
+                    - game.get_piece_value(m.piece.piece_type(), m.piece.color());
             }
         }
 
@@ -232,7 +231,8 @@ pub fn sort_captures(game: &GameState, moves: &mut MoveList) {
     } else {
         moves.sort_by_cached_key(|m| {
             if let Some(target) = game.board.get_piece(m.to.x, m.to.y) {
-                -(get_piece_value(target.piece_type()) * 10 - get_piece_value(m.piece.piece_type()))
+                -(game.get_piece_value(target.piece_type(), target.color()) * 10
+                    - game.get_piece_value(m.piece.piece_type(), m.piece.color()))
             } else {
                 0
             }

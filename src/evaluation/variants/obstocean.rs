@@ -15,7 +15,10 @@ pub fn evaluate(game: &GameState) -> i32 {
 #[inline]
 fn evaluate_inner(game: &GameState) -> i32 {
     let mut score = game.material_score;
-    let (wk, bk) = (game.white_king_pos, game.black_king_pos);
+    let white_royals = game.white_royals.as_slice();
+    let black_royals = game.black_royals.as_slice();
+    let wk_first = white_royals.first();
+    let bk_first = black_royals.first();
 
     base::EVAL_WHITE_PAWNS.with(|wp_cell| {
         base::EVAL_BLACK_PAWNS.with(|bp_cell| {
@@ -103,8 +106,8 @@ fn evaluate_inner(game: &GameState) -> i32 {
                                         x,
                                         y,
                                         p.color(),
-                                        &wk,
-                                        &bk,
+                                        white_royals,
+                                        black_royals,
                                         base::MAX_PHASE,
                                         white_pawns,
                                         black_pawns,
@@ -115,8 +118,8 @@ fn evaluate_inner(game: &GameState) -> i32 {
                                     x,
                                     y,
                                     p.color(),
-                                    &wk,
-                                    &bk,
+                                    white_royals,
+                                    black_royals,
                                     base::MAX_PHASE,
                                     white_pawns,
                                     black_pawns,
@@ -126,8 +129,8 @@ fn evaluate_inner(game: &GameState) -> i32 {
                                     x,
                                     y,
                                     p.color(),
-                                    &wk,
-                                    &bk,
+                                    white_royals,
+                                    black_royals,
                                     base::MAX_PHASE,
                                     white_pawns,
                                     black_pawns,
@@ -149,10 +152,10 @@ fn evaluate_inner(game: &GameState) -> i32 {
                         )
                         .is_some()
                         {
-                            if let Some(b) = &bk {
+                            if let Some(b) = bk_first {
                                 score += crate::evaluation::mop_up::evaluate_mop_up_scaled(
                                     game,
-                                    wk.as_ref(),
+                                    wk_first,
                                     b,
                                     PlayerColor::White,
                                     PlayerColor::Black,
@@ -163,11 +166,11 @@ fn evaluate_inner(game: &GameState) -> i32 {
                             PlayerColor::White,
                         )
                         .is_some()
-                            && let Some(w) = &wk
+                            && let Some(w) = wk_first
                         {
                             score -= crate::evaluation::mop_up::evaluate_mop_up_scaled(
                                 game,
-                                bk.as_ref(),
+                                bk_first,
                                 w,
                                 PlayerColor::Black,
                                 PlayerColor::White,
@@ -178,8 +181,8 @@ fn evaluate_inner(game: &GameState) -> i32 {
                         score += base::evaluate_pawn_structure_traced(
                             game,
                             game.total_phase.min(base::MAX_PHASE),
-                            &wk,
-                            &bk,
+                            white_royals,
+                            black_royals,
                             &mut base::NoTrace,
                             white_pawns,
                             black_pawns,

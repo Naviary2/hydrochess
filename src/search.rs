@@ -1,5 +1,5 @@
 use crate::board::{PieceType, PlayerColor};
-use crate::evaluation::{evaluate, get_piece_value};
+use crate::evaluation::evaluate;
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures};
 use crate::search::params::{
@@ -1239,9 +1239,9 @@ impl Searcher {
     #[inline]
     fn get_minor_index(&self, game: &GameState) -> usize {
         let king_pos = if game.turn == PlayerColor::White {
-            game.white_king_pos
+            game.white_royals.first().copied()
         } else {
-            game.black_king_pos
+            game.black_royals.first().copied()
         };
 
         let mut h = game.minor_hash;
@@ -3807,7 +3807,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
                     // Capture futility: skip captures that can't raise alpha
                     if !gives_check && lmr_depth < 7 {
-                        let cap_value = get_piece_value(cap_type);
+                        let cap_value = game.get_piece_value(cap_type, game.turn.opponent());
                         let futility_value = static_eval
                             + 232
                             + 217 * lmr_depth
@@ -4817,9 +4817,9 @@ fn quiescence(
     } else {
         // Normal quiescence: generate captures only
         let king_pos = if game.turn == PlayerColor::White {
-            game.white_king_pos
+            game.white_royals.first().copied()
         } else {
-            game.black_king_pos
+            game.black_royals.first().copied()
         };
         let pinned = if let Some(kp) = king_pos {
             game.compute_pins(&kp, game.turn)
@@ -5613,11 +5613,11 @@ mod tests {
             "Should have at least 8 black pieces"
         );
         assert!(
-            game.black_king_pos.is_some(),
+            !game.black_royals.is_empty(),
             "Black king position must be detected"
         );
         assert!(
-            game.white_king_pos.is_some(),
+            !game.white_royals.is_empty(),
             "White king position must be detected"
         );
 

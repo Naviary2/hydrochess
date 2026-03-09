@@ -487,9 +487,9 @@ fn additional_theme_logic(
                 sandbox_board.remove_piece(&mv.from.x, &mv.from.y);
 
                 let opponent_king = if winner == PlayerColor::White {
-                    initial_state.black_king_pos
+                    initial_state.black_royals.first().copied()
                 } else {
-                    initial_state.white_king_pos
+                    initial_state.white_royals.first().copied()
                 };
                 if let Some(ksq) = opponent_king {
                     let revealed_check = hydrochess_wasm::moves::is_square_attacked(
@@ -506,9 +506,9 @@ fn additional_theme_logic(
 
             let opponent_color = winner.opponent();
             let opp_king_pos = if opponent_color == PlayerColor::White {
-                initial_state.white_king_pos
+                initial_state.white_royals.first().copied()
             } else {
-                initial_state.black_king_pos
+                initial_state.black_royals.first().copied()
             };
             if let Some(okp) = opp_king_pos {
                 for (ox, oy, op) in initial_state
@@ -554,9 +554,9 @@ fn get_checkers_count(state: &GameState) -> usize {
     let our_color = state.turn;
     let their_color = our_color.opponent();
     let king_sq = if our_color == PlayerColor::White {
-        state.white_king_pos
+        state.white_royals.first().copied()
     } else {
-        state.black_king_pos
+        state.black_royals.first().copied()
     };
     let king_sq = if let Some(ks) = king_sq {
         ks

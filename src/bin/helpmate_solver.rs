@@ -356,8 +356,16 @@ impl HelpmateSolver {
         }
 
         let target_king_pos = match self.target_mated_side {
-            PlayerColor::White => state.white_king_pos.unwrap_or(Coordinate::new(0, 0)),
-            PlayerColor::Black => state.black_king_pos.unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::White => state
+                .white_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::Black => state
+                .black_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
             _ => Coordinate::new(0, 0),
         };
 
@@ -576,14 +584,30 @@ impl HelpmateSolver {
         let mut moves = SmallVec::new();
 
         let tk = match self.target_mated_side {
-            PlayerColor::White => state.white_king_pos.unwrap_or(Coordinate::new(0, 0)),
-            PlayerColor::Black => state.black_king_pos.unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::White => state
+                .white_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::Black => state
+                .black_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
             _ => Coordinate::new(0, 0),
         };
         let ok = if state.turn == PlayerColor::White {
-            state.black_king_pos.unwrap_or(Coordinate::new(0, 0))
+            state
+                .black_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0))
         } else {
-            state.white_king_pos.unwrap_or(Coordinate::new(0, 0))
+            state
+                .white_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0))
         };
 
         // At depth 1, if mating side to move, must give check.
@@ -600,9 +624,9 @@ impl HelpmateSolver {
         let max_y = tk.y.max(ok.y) + (ml * 2 + b) as i64;
 
         let us_king = if state.turn == PlayerColor::White {
-            state.white_king_pos
+            state.white_royals.first().copied()
         } else {
-            state.black_king_pos
+            state.black_royals.first().copied()
         };
         let pinned = if let Some(kp) = us_king {
             state.compute_pins(&kp, state.turn)
@@ -690,14 +714,30 @@ impl HelpmateSolver {
 
         // Depth 1 specialized search: Find ANY move that gives check and leads to mate.
         let tk = match self.target_mated_side {
-            PlayerColor::White => state.white_king_pos.unwrap_or(Coordinate::new(0, 0)),
-            PlayerColor::Black => state.black_king_pos.unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::White => state
+                .white_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
+            PlayerColor::Black => state
+                .black_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0)),
             _ => Coordinate::new(0, 0),
         };
         let ok = if state.turn == PlayerColor::White {
-            state.black_king_pos.unwrap_or(Coordinate::new(0, 0))
+            state
+                .black_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0))
         } else {
-            state.white_king_pos.unwrap_or(Coordinate::new(0, 0))
+            state
+                .white_royals
+                .first()
+                .copied()
+                .unwrap_or(Coordinate::new(0, 0))
         };
 
         // Windowing (generous for sliders)
@@ -713,9 +753,9 @@ impl HelpmateSolver {
         let mut piece_buf = MoveList::new();
 
         let us_king = if state.turn == PlayerColor::White {
-            state.white_king_pos
+            state.white_royals.first().copied()
         } else {
-            state.black_king_pos
+            state.black_royals.first().copied()
         };
         let pinned = if let Some(kp) = us_king {
             state.compute_pins(&kp, state.turn)

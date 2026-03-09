@@ -4200,7 +4200,7 @@ mod tests {
             en_passant: &game.en_passant,
             game_rules: &game.game_rules,
             indices: &game.spatial_indices,
-            enemy_king_pos: game.black_king_pos.as_ref(),
+            enemy_king_pos: game.black_royals.first(),
             pinned: &FxHashMap::default(),
         };
 

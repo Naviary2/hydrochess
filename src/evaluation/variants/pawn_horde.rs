@@ -6,7 +6,6 @@
 // 2. Black: Breaking the wall, back-rank penetration, picking off weak pawns.
 
 use crate::board::{Coordinate, PieceType, PlayerColor};
-use crate::evaluation::base::get_piece_value;
 use crate::game::GameState;
 use arrayvec::ArrayVec;
 
@@ -58,7 +57,7 @@ pub fn evaluate(game: &GameState) -> i32 {
                     score += PAWN_VALUE; // Material count
                 } else {
                     // Promoted piece! Huge value.
-                    score += get_piece_value(piece.piece_type());
+                    score += game.get_piece_value(piece.piece_type(), piece.color());
                 }
             }
             PlayerColor::Black => {
@@ -66,7 +65,7 @@ pub fn evaluate(game: &GameState) -> i32 {
                     black_king_pos = coord;
                 }
                 black_pieces.push((coord, piece.piece_type()));
-                score -= get_piece_value(piece.piece_type());
+                score -= game.get_piece_value(piece.piece_type(), piece.color());
             }
             _ => {}
         }

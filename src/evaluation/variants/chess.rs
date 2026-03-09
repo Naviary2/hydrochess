@@ -238,8 +238,16 @@ pub fn evaluate(game: &GameState) -> i32 {
 
     use crate::board::Coordinate;
 
-    let white_king = game.white_king_pos.unwrap_or(Coordinate { x: 5, y: 1 });
-    let black_king = game.black_king_pos.unwrap_or(Coordinate { x: 5, y: 8 });
+    let white_king = game
+        .white_royals
+        .first()
+        .copied()
+        .unwrap_or(Coordinate { x: 5, y: 1 });
+    let black_king = game
+        .black_royals
+        .first()
+        .copied()
+        .unwrap_or(Coordinate { x: 5, y: 8 });
 
     // SINGLE PASS: Iterating over board pieces once
     for (x, y, piece) in game.board.iter_all_pieces() {

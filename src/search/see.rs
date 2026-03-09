@@ -1,5 +1,4 @@
 use crate::board::{Coordinate, Piece, PieceType, PlayerColor};
-use crate::evaluation::get_piece_value;
 use crate::game::GameState;
 use crate::moves::Move;
 
@@ -13,8 +12,8 @@ pub(crate) fn see_ge(game: &GameState, m: &Move, threshold: i32) -> bool {
         None => return 0 >= threshold, // No capture: SEE = 0
     };
 
-    let victim_val = get_piece_value(captured.piece_type());
-    let attacker_val = get_piece_value(m.piece.piece_type());
+    let victim_val = game.get_piece_value(captured.piece_type(), captured.color());
+    let attacker_val = game.get_piece_value(m.piece.piece_type(), m.piece.color());
 
     // Early cutoff 1: if capturing loses material even if undefended, fail
     let swap = victim_val - threshold;
@@ -56,10 +55,10 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
     // 1. Initial State
     let mut gain: [i32; 32] = [0; 32];
     let mut depth = 1;
-    gain[0] = get_piece_value(captured.piece_type());
+    gain[0] = game.get_piece_value(captured.piece_type(), captured.color());
 
     let mut side = game.turn;
-    let mut occ_val = get_piece_value(m.piece.piece_type());
+    let mut occ_val = game.get_piece_value(m.piece.piece_type(), m.piece.color());
 
     // 2. Active Attacker Collection
     // We use a SmallVec for the active attackers (those we've already found)
@@ -123,7 +122,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                     let pos = Coordinate::new(nx * 8 + (i % 8) as i64, ny * 8 + (i / 8) as i64);
                     if pos != m.from {
                         attackers.push(Attacker {
-                            value: get_piece_value(p.piece_type()),
+                            value: game.get_piece_value(p.piece_type(), p.color()),
                             color: p.color(),
                             pos,
                             ray_idx: None,
@@ -156,7 +155,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                 let pos = Coordinate::new(nx * 8 + (i % 8) as i64, ny * 8 + (i / 8) as i64);
                 if pos != m.from {
                     attackers.push(Attacker {
-                        value: get_piece_value(PieceType::Pawn),
+                        value: game.get_piece_value(PieceType::Pawn, color),
                         color,
                         pos,
                         ray_idx: None,
@@ -215,7 +214,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
                 // Check if we already found this piece in the 3x3 local scan (to avoid double-counting)
                 if dist > 8 || !attackers.iter().any(|a| a.pos == pos) {
                     attackers.push(Attacker {
-                        value: get_piece_value(pt),
+                        value: game.get_piece_value(pt, p.color()),
                         color: p.color(),
                         pos,
                         ray_idx: Some(r),
@@ -284,7 +283,7 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
 
                     if can_xray {
                         attackers.push(Attacker {
-                            value: get_piece_value(npt),
+                            value: game.get_piece_value(npt, np.color()),
                             color: np.color(),
                             pos: Coordinate::new(nx, ny),
                             ray_idx: Some(r),

@@ -13,7 +13,7 @@ pub mod variants;
 use crate::Variant;
 use crate::game::GameState;
 
-pub use base::{calculate_initial_material, get_piece_phase, get_piece_value};
+pub use base::{calculate_initial_material, get_piece_phase, get_piece_value_base};
 
 #[cfg(feature = "eval_tuning")]
 pub use base::{EVAL_FEATURES, EvalFeatures, reset_eval_features, snapshot_eval_features};
@@ -131,7 +131,7 @@ mod tests {
         // Recalculate material score
         let mut score = 0i32;
         for (_, _, piece) in game.board.iter() {
-            let val = get_piece_value(piece.piece_type());
+            let val = game.get_piece_value(piece.piece_type(), piece.color());
             match piece.color() {
                 PlayerColor::White => score += val,
                 PlayerColor::Black => score -= val,
@@ -216,11 +216,11 @@ mod tests {
     #[test]
     fn test_get_piece_value() {
         // Test piece values are reasonable
-        let queen_val = get_piece_value(PieceType::Queen);
-        let rook_val = get_piece_value(PieceType::Rook);
-        let bishop_val = get_piece_value(PieceType::Bishop);
-        let knight_val = get_piece_value(PieceType::Knight);
-        let pawn_val = get_piece_value(PieceType::Pawn);
+        let queen_val = get_piece_value_base(PieceType::Queen);
+        let rook_val = get_piece_value_base(PieceType::Rook);
+        let bishop_val = get_piece_value_base(PieceType::Bishop);
+        let knight_val = get_piece_value_base(PieceType::Knight);
+        let pawn_val = get_piece_value_base(PieceType::Pawn);
 
         assert!(queen_val > rook_val, "Queen should be worth more than rook");
         assert!(
