@@ -1,7 +1,7 @@
 use csv::Writer;
 use hydrochess_wasm::Variant;
 use hydrochess_wasm::board::{Coordinate, PieceType, PlayerColor};
-use hydrochess_wasm::evaluation::get_piece_value;
+use hydrochess_wasm::evaluation::get_piece_value_base;
 use hydrochess_wasm::game::GameState;
 use hydrochess_wasm::moves::{Move, MoveGenContext, MoveList};
 use hydrochess_wasm::search;
@@ -312,7 +312,7 @@ fn material_count(state: &GameState, color: PlayerColor) -> i32 {
     let mut total = 0;
     for (_, _, p) in state.board.iter() {
         if p.color() == color {
-            total += get_piece_value(p.piece_type());
+            total += get_piece_value_base(p.piece_type());
         }
     }
     total
@@ -435,8 +435,8 @@ fn additional_theme_logic(
                     winner.opponent(),
                     &initial_state.spatial_indices,
                 );
-                let is_value_jump = get_piece_value(target_piece.piece_type())
-                    > get_piece_value(piece.piece_type());
+                let is_value_jump = get_piece_value_base(target_piece.piece_type())
+                    > get_piece_value_base(piece.piece_type());
 
                 if is_king || is_undefended || is_value_jump {
                     targets += 1;
