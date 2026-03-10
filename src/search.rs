@@ -4007,14 +4007,15 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 // TT move is singular - calculate extension level
                 let corr_val_adj = (static_eval - raw_eval).abs() / 256;
 
-                let double_margin = (depth as i32) * 2 - (tt_capture as i32 * 5) - corr_val_adj;
-                let triple_margin = (depth as i32) * 4 - (tt_capture as i32 * 10) - corr_val_adj;
+                let pv_bonus = if is_pv { (depth as i32) * 2 } else { 0 };
+                let double_margin = (depth as i32) * 2 - (tt_capture as i32 * 5) - corr_val_adj + pv_bonus;
+                let triple_margin = (depth as i32) * 4 - (tt_capture as i32 * 10) - corr_val_adj + pv_bonus * 2;
 
                 extension = 1;
                 if se_value < singular_beta - double_margin {
                     extension = 2;
                 }
-                if se_value < singular_beta - triple_margin && is_pv {
+                if se_value < singular_beta - triple_margin {
                     extension = 3;
                 }
 
