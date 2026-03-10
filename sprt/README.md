@@ -43,7 +43,7 @@ Edit the engine source code with whatever changes you want to test.
 The CLI will automatically build the new binary from the current source:
 
 ```bash
-cargo run --release --bin sprt --features sprt -- run --old-bin target\release\sprt_old.exe
+cargo run --release --bin sprt --features sprt -- run --old-bin target/release/sprt_old
 ```
 
 ### CLI Options
@@ -72,7 +72,7 @@ cargo run --release --bin sprt --features sprt -- run --old-bin target\release\s
 ### Example: Quick Regression Test
 
 ```bash
-cargo run --release --bin sprt --features sprt -- run --old-bin target\release\sprt_old.exe \
+cargo run --release --bin sprt --features sprt -- run --old-bin target/release/sprt_old \
   --tc 1+0.01 \
   --concurrency 8 \
   --games 200 \

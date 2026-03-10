@@ -682,11 +682,7 @@ fn generate_icn(
 ) -> String {
     let mut icn = String::new();
     icn.push_str(&format!("[Event \"SPRT Test Game {}\"] ", game_idx));
-    icn.push_str("[Site \"https://www.infinitechess.org/\"] ");
     icn.push_str(&format!("[Variant \"{}\"] ", variant.to_str()));
-    icn.push_str("[Round \"-\"] ");
-    icn.push_str("[UTCDate \"2026.03.10\"] ");
-    icn.push_str("[UTCTime \"17:42:33\"] ");
     icn.push_str(&format!("[Result \"{}\"] ", result_str));
     icn.push_str(&format!("[TimeControl \"{}\"] ", config.tc));
 
@@ -768,13 +764,22 @@ fn main() {
                     panic!("Failed to build new binary automatically.");
                 }
                 // Copy to a unique name to avoid file-locking when the manager
-                // binary is sprt.exe itself.
-                let src = "target/release/sprt.exe";
-                let dst = "target/release/sprt_engine.exe";
-                std::fs::copy(src, dst).unwrap_or_else(|e| {
+                let ext = std::env::consts::EXE_EXTENSION;
+                let src = if ext.is_empty() {
+                    "target/release/sprt".to_string()
+                } else {
+                    format!("target/release/sprt.{}", ext)
+                };
+                let dst = if ext.is_empty() {
+                    "target/release/sprt_engine".to_string()
+                } else {
+                    format!("target/release/sprt_engine.{}", ext)
+                };
+
+                std::fs::copy(&src, &dst).unwrap_or_else(|e| {
                     panic!("Failed to copy {} to {}: {}", src, dst, e);
                 });
-                dst.to_string()
+                dst
             };
 
             let mut config = Config {
