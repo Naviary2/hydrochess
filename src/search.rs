@@ -1658,33 +1658,35 @@ impl Searcher {
         }
         #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
-            if multipv > 1 {
-                eprintln!(
-                    "info depth {} seldepth {} multipv {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
-                    depth,
-                    self.hot.seldepth,
-                    multipv,
-                    score_str,
-                    self.hot.nodes,
-                    self.hot.qnodes,
-                    nps,
-                    time_ms,
-                    tt_fill,
-                    pv
-                );
-            } else {
-                eprintln!(
-                    "info depth {} seldepth {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
-                    depth,
-                    self.hot.seldepth,
-                    score_str,
-                    self.hot.nodes,
-                    self.hot.qnodes,
-                    nps,
-                    time_ms,
-                    tt_fill,
-                    pv
-                );
+            if !self.silent {
+                if multipv > 1 {
+                    eprintln!(
+                        "info depth {} seldepth {} multipv {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
+                        depth,
+                        self.hot.seldepth,
+                        multipv,
+                        score_str,
+                        self.hot.nodes,
+                        self.hot.qnodes,
+                        nps,
+                        time_ms,
+                        tt_fill,
+                        pv
+                    );
+                } else {
+                    eprintln!(
+                        "info depth {} seldepth {} score {} nodes {} qnodes {} nps {} time {} hashfull {} pv {}",
+                        depth,
+                        self.hot.seldepth,
+                        score_str,
+                        self.hot.nodes,
+                        self.hot.qnodes,
+                        nps,
+                        time_ms,
+                        tt_fill,
+                        pv
+                    );
+                }
             }
         }
     }
@@ -1728,14 +1730,16 @@ impl Searcher {
 
         #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
-            eprintln!(
-                "Depth {} (time {}ms, nodes {}, nps {}, hashfull {}‰)",
-                depth, time_ms, self.hot.nodes, nps, tt_fill
-            );
-            for (idx, line) in lines.iter().enumerate() {
-                let score_str = self.format_score(line.score);
-                let pv_str = self.format_pv_line(&line.pv);
-                eprintln!("#{} {} pv {}", idx + 1, score_str, pv_str);
+            if !self.silent {
+                eprintln!(
+                    "Depth {} (time {}ms, nodes {}, nps {}, hashfull {}‰)",
+                    depth, time_ms, self.hot.nodes, nps, tt_fill
+                );
+                for (idx, line) in lines.iter().enumerate() {
+                    let score_str = self.format_score(line.score);
+                    let pv_str = self.format_pv_line(&line.pv);
+                    eprintln!("#{} {} pv {}", idx + 1, score_str, pv_str);
+                }
             }
         }
     }

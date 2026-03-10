@@ -128,7 +128,7 @@ impl GameRules {
             self.promotion_types = Some(
                 allowed
                     .iter()
-                    .filter_map(|s| s.parse::<PieceType>().ok())
+                    .filter_map(|s| PieceType::parse_promotion_code(s))
                     .collect(),
             );
         }
@@ -3004,7 +3004,7 @@ impl GameState {
             from: Coordinate::new(from_x, from_y),
             to: Coordinate::new(to_x, to_y),
             piece,
-            promotion: promotion.and_then(|s| s.parse().ok()),
+            promotion: promotion.and_then(PieceType::parse_promotion_code),
             rook_coord: None,
         };
 

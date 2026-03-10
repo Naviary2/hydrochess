@@ -105,6 +105,29 @@ impl Variant {
         }
     }
 
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Variant::Classical => "Classical",
+            Variant::ConfinedClassical => "Confined_Classical",
+            Variant::ClassicalPlus => "Classical_Plus",
+            Variant::CoaIP => "CoaIP",
+            Variant::CoaIPHO => "CoaIP_HO",
+            Variant::CoaIPRO => "CoaIP_RO",
+            Variant::CoaIPNO => "CoaIP_NO",
+            Variant::Palace => "Palace",
+            Variant::Pawndard => "Pawndard",
+            Variant::Core => "Core",
+            Variant::Standarch => "Standarch",
+            Variant::SpaceClassic => "Space_Classic",
+            Variant::Space => "Space",
+            Variant::Abundance => "Abundance",
+            Variant::PawnHorde => "Pawn_Horde",
+            Variant::Knightline => "Knightline",
+            Variant::Obstocean => "Obstocean",
+            Variant::Chess => "Chess",
+        }
+    }
+
     pub fn parse(s: &str) -> Self {
         match s {
             "Classical" => Variant::Classical,
@@ -286,6 +309,16 @@ impl Engine {
         }
     }
 
+    pub fn from_icn_native(icn_string: &str, strength_level: Option<u32>) -> Engine {
+        let mut game = GameState::new();
+        game.setup_position_from_icn(icn_string);
+        Engine {
+            game,
+            clock: None,
+            strength_level,
+        }
+    }
+
     pub fn set_clock(&mut self, wtime: u64, btime: u64, winc: u64, binc: u64) {
         self.clock = Some(JsClock {
             wtime,
@@ -295,10 +328,17 @@ impl Engine {
         });
     }
 
+    pub fn game_mut(&mut self) -> &mut GameState {
+        &mut self.game
+    }
+
     pub fn search_native(
         &mut self,
         time_limit_ms: u32,
         max_depth: Option<usize>,
+        silent: bool,
+        noise_amp: Option<i32>,
+        seed: Option<u64>,
     ) -> Option<(crate::moves::Move, i32, crate::search::SearchStats)> {
         let (opt_time, max_time, is_soft_limit) =
             if time_limit_ms == 0 && max_depth.is_some() && self.clock.is_none() {
@@ -307,15 +347,31 @@ impl Engine {
                 self.effective_time_limit_ms(time_limit_ms)
             };
         let depth = max_depth.unwrap_or(50).clamp(1, 100);
+        let strength = self.strength_level;
 
-        crate::search::get_best_move_parallel(
-            &mut self.game,
-            depth,
-            opt_time,
-            max_time,
-            false,
-            is_soft_limit,
-        )
+        let effective_seed = seed.unwrap_or_else(get_random_seed);
+        crate::search::set_global_params(effective_seed, noise_amp);
+
+        if strength.is_some_and(|s| s < 3) {
+            crate::search::get_best_move_limited(
+                &mut self.game,
+                depth,
+                opt_time,
+                max_time,
+                strength,
+                silent,
+                is_soft_limit,
+            )
+        } else {
+            crate::search::get_best_move_parallel(
+                &mut self.game,
+                depth,
+                opt_time,
+                max_time,
+                silent,
+                is_soft_limit,
+            )
+        }
     }
 }
 
@@ -527,7 +583,6 @@ impl Engine {
         let silent = silent.unwrap_or(false);
         let depth = max_depth.unwrap_or(50).clamp(1, 50);
         let strength = self.strength_level;
-
 
         #[cfg(target_arch = "wasm32")]
         {
