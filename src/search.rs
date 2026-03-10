@@ -3391,8 +3391,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         static_eval += history_bonus;
     }
 
-    // Apply deterministic search noise at low plies for SPRT
-    if searcher.noise_amp > 0 && ply < 8 {
+    // Apply deterministic search noise if provided
+    if searcher.noise_amp > 0 {
         static_eval += get_noise(searcher.seed, hash, searcher.noise_amp);
     }
     searcher.eval_stack[ply] = static_eval;

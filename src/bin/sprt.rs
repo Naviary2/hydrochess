@@ -7,7 +7,6 @@ use hydrochess_wasm::Engine;
 use hydrochess_wasm::Variant;
 use hydrochess_wasm::board::{Coordinate, PlayerColor};
 use hydrochess_wasm::game::GameState;
-use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,9 +54,9 @@ enum Commands {
         #[arg(long, default_value_t = 16)]
         concurrency: usize,
 
-        /// Maximum games to run
-        #[arg(long, default_value_t = 1000)]
-        games: usize,
+        /// Maximum games to run (omit for no limit)
+        #[arg(long)]
+        games: Option<usize>,
 
         /// Minimum games before SPRT can pass/fail
         #[arg(long, default_value_t = 250)]
@@ -159,7 +158,7 @@ struct Config {
     tc_fixed_ms: Option<u32>,
     tc_max_depth: Option<usize>,
     concurrency: usize,
-    max_games: usize,
+    max_games: Option<usize>,
     min_games: usize,
     variants: Vec<Variant>,
     adjudication_threshold: i32,
@@ -849,20 +848,6 @@ fn main() {
             let mut game_logs = Vec::new();
             let mut per_variant_stats: HashMap<String, (usize, usize, usize)> = HashMap::new();
 
-            let mut pairs = Vec::new();
-            let total_pairs = config.max_games / 2;
-            for pair_idx in 0..total_pairs {
-                let variant = config.variants[pair_idx % config.variants.len()];
-                let game_idx_even = pair_idx * 2;
-                let game_idx_odd = game_idx_even + 1;
-                // Generate a shared seed sequence for this pair of games
-                let mut seeds = Vec::new();
-                for _ in 0..config.max_moves {
-                    seeds.push(rand::random::<u64>());
-                }
-                pairs.push((variant, game_idx_even, game_idx_odd, seeds));
-            }
-
             let (tx, rx) = std::sync::mpsc::channel();
             let config_clone = config.clone();
             let pool = rayon::ThreadPoolBuilder::new()
@@ -872,59 +857,90 @@ fn main() {
 
             std::thread::spawn(move || {
                 pool.install(|| {
-                    pairs.into_par_iter().for_each_with(
-                        tx,
-                        |tx, (variant, idx_even, idx_odd, seeds)| {
-                            if STOP.load(Ordering::SeqCst) {
-                                return;
-                            }
+                    rayon::scope(|scope| {
+                        for worker_idx in 0..config_clone.concurrency.max(1) {
+                            let tx = tx.clone();
+                            let config = config_clone.clone();
+                            scope.spawn(move |_| {
+                                let mut pair_idx = worker_idx;
+                                let step = config.concurrency.max(1);
 
-                            let play_new_white_first = rand::random::<bool>();
-                            let mut pair_outcomes = Vec::with_capacity(2);
+                                loop {
+                                    if STOP.load(Ordering::SeqCst) {
+                                        break;
+                                    }
 
-                            if play_new_white_first {
-                                pair_outcomes.push(play_game(
-                                    &config_clone,
-                                    variant,
-                                    true,
-                                    idx_even,
-                                    seeds.clone(),
-                                ));
-                                if STOP.load(Ordering::SeqCst) {
-                                    let _ = tx.send(pair_outcomes);
-                                    return;
+                                    let game_idx_even = pair_idx * 2;
+                                    let game_idx_odd = game_idx_even + 1;
+
+                                    if let Some(max_games) = config.max_games {
+                                        if game_idx_even >= max_games {
+                                            break;
+                                        }
+                                    }
+
+                                    let variant = config.variants[pair_idx % config.variants.len()];
+                                    let mut seeds = Vec::with_capacity(config.max_moves);
+                                    for _ in 0..config.max_moves {
+                                        seeds.push(rand::random::<u64>());
+                                    }
+
+                                    let play_new_white_first = rand::random::<bool>();
+                                    let mut pair_outcomes = Vec::with_capacity(2);
+
+                                    if play_new_white_first {
+                                        pair_outcomes.push(play_game(
+                                            &config,
+                                            variant,
+                                            true,
+                                            game_idx_even,
+                                            seeds.clone(),
+                                        ));
+                                        if STOP.load(Ordering::SeqCst) {
+                                            let _ = tx.send(pair_outcomes);
+                                            break;
+                                        }
+                                        if config.max_games.map_or(true, |max| game_idx_odd < max) {
+                                            pair_outcomes.push(play_game(
+                                                &config,
+                                                variant,
+                                                false,
+                                                game_idx_odd,
+                                                seeds,
+                                            ));
+                                        }
+                                    } else {
+                                        if config.max_games.map_or(true, |max| game_idx_odd < max) {
+                                            pair_outcomes.push(play_game(
+                                                &config,
+                                                variant,
+                                                false,
+                                                game_idx_odd,
+                                                seeds.clone(),
+                                            ));
+                                        }
+                                        if STOP.load(Ordering::SeqCst) {
+                                            let _ = tx.send(pair_outcomes);
+                                            break;
+                                        }
+                                        pair_outcomes.push(play_game(
+                                            &config,
+                                            variant,
+                                            true,
+                                            game_idx_even,
+                                            seeds,
+                                        ));
+                                    }
+
+                                    if tx.send(pair_outcomes).is_err() {
+                                        break;
+                                    }
+
+                                    pair_idx += step;
                                 }
-                                pair_outcomes.push(play_game(
-                                    &config_clone,
-                                    variant,
-                                    false,
-                                    idx_odd,
-                                    seeds,
-                                ));
-                            } else {
-                                pair_outcomes.push(play_game(
-                                    &config_clone,
-                                    variant,
-                                    false,
-                                    idx_odd,
-                                    seeds.clone(),
-                                ));
-                                if STOP.load(Ordering::SeqCst) {
-                                    let _ = tx.send(pair_outcomes);
-                                    return;
-                                }
-                                pair_outcomes.push(play_game(
-                                    &config_clone,
-                                    variant,
-                                    true,
-                                    idx_even,
-                                    seeds,
-                                ));
-                            }
-
-                            let _ = tx.send(pair_outcomes);
-                        },
-                    );
+                            });
+                        }
+                    });
                 });
             });
 
