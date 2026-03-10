@@ -43,7 +43,7 @@ This is the engine boundary.
 
 It exposes the engine to the outside world, especially the WASM/JS side, and is the place where external position/config input turns into a `GameState` plus a search request.
 
-Keep API glue here. Do not let search or evaluation grow UI-facing concerns.
+Keep API glue here. Do not let search or evaluation take on UI-facing concerns.
 
 ### `src/game.rs`
 
@@ -162,7 +162,7 @@ WASM/JS-facing concerns should stop there. The rest of the engine should read li
 
 The make/undo path is sacred. New rule state, new caches, and new bookkeeping all have to survive that path cleanly.
 
-Empty space should stay cheap. On an infinite board, any change that quietly makes work scale with geometric distance instead of occupied structure is usually a mistake.
+Empty space should stay cheap. On an infinite board, any change that makes work scale with geometric distance rather than occupied structure is usually a mistake.
 
 Search-specific move ordering belongs in `src/search/`, not in the generic move layer.
 

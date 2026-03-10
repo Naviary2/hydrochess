@@ -480,8 +480,8 @@ fn play_game(
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // Check for subprocess crash
-        if !output.status.success()
-            && !(USER_STOP.load(Ordering::SeqCst) && is_ctrl_c_exit_code(output.status.code()))
+        if !(output.status.success()
+            || USER_STOP.load(Ordering::SeqCst) && is_ctrl_c_exit_code(output.status.code()))
         {
             eprintln!(
                 "[Game {}] Subprocess crashed! exit={:?}\n  stderr={}",
@@ -865,42 +865,89 @@ fn main() {
 
             let (tx, rx) = std::sync::mpsc::channel();
             let config_clone = config.clone();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(config.concurrency.max(1))
+                .build()
+                .expect("Failed to build Rayon thread pool");
 
             std::thread::spawn(move || {
-                pairs.into_par_iter().for_each_with(
-                    tx,
-                    |tx, (variant, idx_even, idx_odd, seeds)| {
-                        if STOP.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let res1 = play_game(&config_clone, variant, true, idx_even, seeds.clone());
-                        let _ = tx.send(res1);
-                        if STOP.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let res2 = play_game(&config_clone, variant, false, idx_odd, seeds);
-                        let _ = tx.send(res2);
-                    },
-                );
+                pool.install(|| {
+                    pairs.into_par_iter().for_each_with(
+                        tx,
+                        |tx, (variant, idx_even, idx_odd, seeds)| {
+                            if STOP.load(Ordering::SeqCst) {
+                                return;
+                            }
+
+                            let play_new_white_first = rand::random::<bool>();
+                            let mut pair_outcomes = Vec::with_capacity(2);
+
+                            if play_new_white_first {
+                                pair_outcomes.push(play_game(
+                                    &config_clone,
+                                    variant,
+                                    true,
+                                    idx_even,
+                                    seeds.clone(),
+                                ));
+                                if STOP.load(Ordering::SeqCst) {
+                                    let _ = tx.send(pair_outcomes);
+                                    return;
+                                }
+                                pair_outcomes.push(play_game(
+                                    &config_clone,
+                                    variant,
+                                    false,
+                                    idx_odd,
+                                    seeds,
+                                ));
+                            } else {
+                                pair_outcomes.push(play_game(
+                                    &config_clone,
+                                    variant,
+                                    false,
+                                    idx_odd,
+                                    seeds.clone(),
+                                ));
+                                if STOP.load(Ordering::SeqCst) {
+                                    let _ = tx.send(pair_outcomes);
+                                    return;
+                                }
+                                pair_outcomes.push(play_game(
+                                    &config_clone,
+                                    variant,
+                                    true,
+                                    idx_even,
+                                    seeds,
+                                ));
+                            }
+
+                            let _ = tx.send(pair_outcomes);
+                        },
+                    );
+                });
             });
 
-            for outcome in rx {
+            for pair_outcomes in rx {
                 if STOP.load(Ordering::SeqCst) {
                     break;
                 }
-                match outcome.result {
-                    GameResult::Win => wins += 1,
-                    GameResult::Loss => losses += 1,
-                    GameResult::Draw => draws += 1,
-                }
-                game_logs.push(outcome.icn);
-                let stats = per_variant_stats
-                    .entry(outcome.variant_name)
-                    .or_insert((0, 0, 0));
-                match outcome.result {
-                    GameResult::Win => stats.0 += 1,
-                    GameResult::Loss => stats.1 += 1,
-                    GameResult::Draw => stats.2 += 1,
+
+                for outcome in pair_outcomes {
+                    match outcome.result {
+                        GameResult::Win => wins += 1,
+                        GameResult::Loss => losses += 1,
+                        GameResult::Draw => draws += 1,
+                    }
+                    game_logs.push(outcome.icn);
+                    let stats = per_variant_stats
+                        .entry(outcome.variant_name)
+                        .or_insert((0, 0, 0));
+                    match outcome.result {
+                        GameResult::Win => stats.0 += 1,
+                        GameResult::Loss => stats.1 += 1,
+                        GameResult::Draw => stats.2 += 1,
+                    }
                 }
 
                 let llr = calculate_llr(wins, losses, draws, config.elo0, config.elo1);

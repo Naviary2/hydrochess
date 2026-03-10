@@ -21,7 +21,6 @@ The CLI is built directly into the `sprt` binary. It manages game pairs, subproc
 Before making your changes, build the current source as the baseline:
 
 ```bash
-# CLI
 cargo build --release --features sprt --bin sprt
 ```
 
@@ -56,7 +55,7 @@ cargo run --release --bin sprt --features sprt -- run --old-bin target\release\s
 | `--tc <TC>` | `10+0.1` | Time control: `base+inc` (seconds), `depth N`, or `fixed Ns` |
 | `--concurrency <N>` | `16` | Number of parallel games |
 | `--games <N>` | `1000` | Maximum games to run |
-| `--min-games <N>` | `0` | Minimum games before SPRT can terminate |
+| `--min-games <N>` | `250` | Minimum games before SPRT can terminate |
 | `--elo0 <F>` | `-5.0` | H0 bound (Elo where new is NOT better) |
 | `--elo1 <F>` | `5.0` | H1 bound (Elo where new IS better) |
 | `--alpha <F>` | `0.05` | Type I error rate (false positive) |
