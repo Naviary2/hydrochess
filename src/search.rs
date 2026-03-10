@@ -3805,19 +3805,6 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 if let Some(cap_type) = captured_type {
                     let capt_hist = searcher.capture_history[p_type as usize][cap_type as usize];
 
-                    // Capture futility: skip captures that can't raise alpha
-                    if !gives_check && lmr_depth < 7 {
-                        let cap_value = game.get_piece_value(cap_type, game.turn.opponent());
-                        let futility_value = static_eval
-                            + 232
-                            + 217 * lmr_depth
-                            + cap_value
-                            + 131 * capt_hist / 1024;
-                        if futility_value <= alpha {
-                            continue;
-                        }
-                    }
-
                     // SEE pruning for captures: skip losing captures
                     // Exempt moves that give check (they have tactical significance)
                     if !gives_check {
