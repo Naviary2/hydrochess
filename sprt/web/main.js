@@ -936,7 +936,7 @@ async function runSprt() {
     sprtStatusEl.className = 'sprt-status';
     const sprtBaseSeed = Date.now() ^ ((Math.random() * 0xFFFFFFFF) | 0);
     log('Starting SPRT: ' + maxGames + ' games (' + (maxGames / 2) + ' pairs), Mode=' + runConfig.tcMode + ', TC=' + displayTcString + ', Seed=' + sprtBaseSeed, 'info');
-    sprtLog('SPRT Test Started (noisy opening moves for first 4 ply, paired games)');
+    sprtLog('SPRT Test Started (noisy opening moves for first 8 ply, paired games)');
 
     const maxConcurrent = Math.max(1, runConfig.concurrency | 0);
     const workers = [];

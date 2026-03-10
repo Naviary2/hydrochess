@@ -86,7 +86,7 @@ enum Commands {
         #[arg(long, default_value_t = 300)]
         max_moves: usize,
 
-        /// Search noise amplitude for first 4 ply
+        /// Search noise amplitude for first 8 ply
         #[arg(long, default_value_t = 50)]
         search_noise: i32,
 
@@ -461,7 +461,7 @@ fn play_game(
             cmd.arg("--fixed-time").arg(ft.to_string());
         }
 
-        if ply < 4 {
+        if ply < 8 {
             cmd.arg("--noise-amp").arg(config.search_noise.to_string());
         }
 

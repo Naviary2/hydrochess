@@ -2173,10 +2173,6 @@ fn ray_border_distance(from: &Coordinate, dir_x: i64, dir_y: i64) -> Option<i64>
         let min_y = COORD_MIN_Y;
         let max_y = COORD_MAX_Y;
 
-        // Allow one extra "infinite" move, but clamp it so we don't shoot pieces
-        // off to absurd coordinates. 256 steps is effectively infinite for any
-        // reasonable board while keeping coordinates well-behaved, even when the
-        // underlying world box is huge.
         const MAX_INF_DISTANCE: i64 = 256;
 
         if dir_x == 0 {
@@ -2216,14 +2212,6 @@ fn ray_border_distance(from: &Coordinate, dir_x: i64, dir_y: i64) -> Option<i64>
 }
 
 /// Find cross-ray attack targets for sliders - optimized for infinite chess.
-///
-/// Smart Filtering Approach:
-/// 1. Iterate over ALL pieces on the board (O(N), usually < 60).
-/// 2. For each piece P, calculate if any of its 8 attack rays intersect our slider's ray.
-/// 3. Count how many pieces are reachable from each intersection distance.
-/// 4. Only output distances where:
-///    - 2+ pieces are reachable (forks/pins/batteries - unlimited distance)
-///    - OR within SHORT_CROSS_RAY_LIMIT (single targets)
 #[inline]
 fn find_cross_ray_targets_into(
     ctx: &CrossRayContext,
@@ -2987,14 +2975,7 @@ fn find_blocker_via_indices(
     (i64::MAX, false)
 }
 
-/// OPTIMIZED Huygens move generation using precomputed primes and spatial indices.
-///
-/// Key optimizations:
-/// 1. Uses PRIMES_UNDER_128 array for direct iteration instead of primality testing
-/// 2. O(log n) binary search in spatial indices for blocker detection
-/// 3. When no blocker, only generates moves to "interesting" squares aligned with cross-ray pieces
-/// 4. is_prime_fast() for O(1) primality checks instead of O(√n)
-///    gen_type controls which move types to generate: All, Quiets only, or Captures only
+/// Huygen move generation using precomputed primes and spatial indices.
 fn generate_huygen_moves_into(
     board: &Board,
     from: &Coordinate,
