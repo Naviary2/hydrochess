@@ -584,7 +584,6 @@ impl GameState {
                 if let Some(piece) = self.board.get_piece(coord.x, coord.y)
                     && piece.color() == PlayerColor::White
                     && piece.piece_type() != PieceType::Pawn
-                    && !piece.piece_type().is_royal()
                 {
                     if coord.x > wk_pos.x {
                         self.castling_partner_counts[0] += 1;
@@ -613,7 +612,6 @@ impl GameState {
                 if let Some(piece) = self.board.get_piece(coord.x, coord.y)
                     && piece.color() == PlayerColor::Black
                     && piece.piece_type() != PieceType::Pawn
-                    && !piece.piece_type().is_royal()
                 {
                     if coord.x > bk_pos.x {
                         self.castling_partner_counts[2] += 1;
@@ -3012,7 +3010,7 @@ impl GameState {
         // Castling works with any non-pawn, non-royal piece that has special rights
         if piece.piece_type().is_royal() {
             let dx = to_x - from_x;
-            if dx.abs() > 1 {
+            if dx.abs() == 2 {
                 // Use spatial indices to find castling partner
                 let partner_dir = if dx > 0 { 1i64 } else { -1i64 };
                 if let Some(row_pieces) = self.spatial_indices.rows.get(&from_y) {
@@ -3023,7 +3021,6 @@ impl GameState {
 
                         if partner.color() == piece.color()
                             && partner.piece_type() != PieceType::Pawn
-                            && !partner.piece_type().is_royal()
                             && self.special_rights.contains(&partner_coord)
                         {
                             m.rook_coord = Some(partner_coord);
@@ -3361,14 +3358,15 @@ impl GameState {
             }
         }
 
-        // Handle Castling Move (King moves > 1 square)
-        if piece.piece_type() == PieceType::King
-            && (m.to.x - m.from.x).abs() > 1
+        // Handle Castling Move (Royal moves exactly 2 squares)
+        if piece.piece_type().is_royal()
+            && (m.to.x - m.from.x).abs() == 2
             && let Some(rook_coord) = &m.rook_coord
             && let Some(rook) = self.board.remove_piece(&rook_coord.x, &rook_coord.y)
         {
             let dx = m.to.x - m.from.x;
-            let rook_to_x = m.from.x + (if dx > 0 { 1 } else { -1 });
+            let direction = if dx > 0 { 1 } else { -1 };
+            let rook_to_x = m.to.x - direction;
             // Hash: remove rook from original, add at new position
             self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_coord.x, rook_coord.y);
             self.hash ^= piece_key(rook.piece_type(), rook.color(), rook_to_x, m.from.y);
@@ -3718,12 +3716,13 @@ impl GameState {
         }
 
         // Handle Castling Revert
-        if piece.piece_type() == PieceType::King {
+        if piece.piece_type().is_royal() {
             let dx = m.to.x - m.from.x;
-            if dx.abs() > 1 {
+            if dx.abs() == 2 {
                 // Castling was performed. Move rook back.
                 if let Some(rook_coord) = &m.rook_coord {
-                    let rook_to_x = m.from.x + (if dx > 0 { 1 } else { -1 });
+                    let direction = if dx > 0 { 1 } else { -1 };
+                    let rook_to_x = m.to.x - direction;
                     if let Some(rook) = self.board.remove_piece(&rook_to_x, &m.from.y) {
                         self.board.set_piece(rook_coord.x, rook_coord.y, rook);
                         // Update spatial indices for rook moved back

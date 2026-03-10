@@ -1602,11 +1602,11 @@ fn generate_castling_moves(
 
     // Find all pieces with special rights that could be castling partners
     for coord in special_rights.iter() {
+        if coord == from { continue; }
         if let Some(target_piece) = board.get_piece(coord.x, coord.y) {
             // Must be same color and a valid castling partner (rook-like piece, not pawn)
             if target_piece.color() == piece.color()
                 && target_piece.piece_type() != PieceType::Pawn
-                && !target_piece.piece_type().is_royal()
             {
                 let dx = coord.x - from.x;
                 let dy = coord.y - from.y;
@@ -1838,7 +1838,7 @@ fn generate_quiets_for_piece(
                 out,
             );
         }
-        PieceType::Queen | PieceType::RoyalQueen => {
+        PieceType::Queen => {
             let visited = std::cell::RefCell::new(Vec::with_capacity(16));
             generate_sliding_quiets_into(
                 &SlidingMoveContext {
@@ -1866,6 +1866,38 @@ fn generate_quiets_for_piece(
                 },
                 out,
             );
+        }
+        PieceType::RoyalQueen => {
+            let visited = std::cell::RefCell::new(Vec::with_capacity(16));
+            generate_sliding_quiets_into(
+                &SlidingMoveContext {
+                    board,
+                    from,
+                    piece,
+                    directions: &[(1, 0), (0, 1)],
+                    indices,
+                    enemy_king_pos,
+                    visited_targets: Some(&visited),
+                    pinned: ctx.pinned,
+                },
+                out,
+            );
+            generate_sliding_quiets_into(
+                &SlidingMoveContext {
+                    board,
+                    from,
+                    piece,
+                    directions: &[(1, 1), (1, -1)],
+                    indices,
+                    enemy_king_pos,
+                    visited_targets: Some(&visited),
+                    pinned: ctx.pinned,
+                },
+                out,
+            );
+            // Castling support for RoyalQueen
+            let castling = generate_castling_moves(board, from, piece, special_rights, indices);
+            out.extend(castling);
         }
         PieceType::Chancellor => {
             generate_leaper_moves_into(board, from, piece, 1, 2, MoveGenType::Quiets, out);
