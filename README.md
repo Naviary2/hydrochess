@@ -4,6 +4,9 @@ A Rust chess engine compiled to WebAssembly, designed for [Infinite Chess](https
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 
+## Elo Gain Over Time
+<img src="https://res.cloudinary.com/fireplank/image/upload/elo-history.svg" alt="HydroChess Elo gain history" width="900" />
+
 ## Documentation
 
 | Document | Description |
