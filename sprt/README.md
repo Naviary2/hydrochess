@@ -1,4 +1,4 @@
-# SPRT Testing Tool
+﻿# SPRT Testing Tool
 
 Sequential Probability Ratio Test (SPRT) tool for validating engine strength changes.
 
@@ -114,25 +114,106 @@ This builds the current source into `sprt/web/pkg-new` and starts the test serve
 
 ## SPSA Parameter Tuning
 
-SPSA (Simultaneous Perturbation Stochastic Approximation) is used to automatically tune engine constants through self-play.
+SPSA (Simultaneous Perturbation Stochastic Approximation) is used to automatically tune search and evaluation constants through self-play.
+
+The tuner lives in `src/bin/spsa.rs` and uses a single feature gate for dynamic parameter injection during tuning:
 
 ```bash
-cd sprt
-
-# Start tuning
-npm run spsa
-
-# Options
-npm run spsa -- --games 100 --iterations 500 --concurrency 20
+cargo run --release --bin spsa --features sprt,param_tuning -- run
 ```
 
-Checkpoints are saved to `sprt/checkpoints/` and can be resumed by running the command again. Use `--fresh` to start from scratch.
+### Parameter Selection
+
+`--params` controls which knobs are tuned:
+
+| Selector | Meaning |
+|----------|---------|
+| `all` | Tune every exposed search and eval parameter |
+| `search` | Tune only search parameters from `src/search/params.rs` |
+| `eval` | Tune only evaluation parameters from `src/evaluation/base.rs` |
+| `piece-values` | Tune only evaluation material / piece-value style knobs |
+| `pawn,knight,...` | Tune only the explicitly named parameters |
+
+### SPSA CLI Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `run --iterations <N>` | `100` | Number of SPSA iterations |
+| `run --pairs <N>` | `200` | Paired openings per iteration; total games = `pairs * 2` |
+| `run --checkpoint-every <N>` | `50` | Save a checkpoint every N iterations |
+| `run --resume <PATH>` | latest checkpoint | Resume from a specific checkpoint |
+| `run --fresh` | off | Ignore checkpoints and start from defaults |
+| `run --tc <TC>` | `5+0.05` | Time control: `base+inc`, `depth N`, or `fixed Ns` |
+| `run --concurrency <N>` | `16` | Number of parallel game workers |
+| `run --variants <LIST>` | default set | Comma-separated variant list |
+| `run --adjudication <N>` | `2000` | Material eval threshold for adjudication |
+| `run --max-moves <N>` | `300` | Maximum plies before forced draw |
+| `run --search-noise <N>` | `50` | Noise amplitude for first 8 ply |
+| `run --params <SELECTOR>` | `all` | Parameter preset or comma-separated names |
+| `run --config <PATH>` | none | Optional JSON override for bounds/defaults/step/weight |
+| `run --results <PATH>` | `sprt/spsa_final.json` | Final result JSON output |
+| `run --games <PATH>` | off | Write latest iteration ICNs as JSON |
+| `run --a <F>` | `160.0` | SPSA learning-rate scale |
+| `run --big-a <F>` | `10.0` | SPSA stability constant |
+| `run --alpha <F>` | `0.602` | SPSA learning-rate decay |
+| `run --c <F>` | `1.0` | SPSA perturbation scale |
+| `run --gamma <F>` | `0.101` | SPSA perturbation decay |
+| `run --verbose` | off | Inherit search subprocess stderr |
+| `list --params <SELECTOR>` | `all` | Print selected tunables with bounds and SPSA metadata |
+| `apply --input <PATH>` | latest checkpoint | Apply tuned constants back into Rust source |
+| `revert --params <SELECTOR>` | `all` | Revert selected constants back to defaults |
+
+### Tuning Config Overrides
+
+`--config` accepts a JSON object keyed by parameter name. Each entry can override any subset of `default`, `min`, `max`, `step`, and `weight`.
+
+```json
+{
+  "pawn": { "min": 80, "max": 130, "step": 2, "weight": 1.0 },
+  "knight": { "min": 180, "max": 340, "step": 4, "weight": 0.9 },
+  "razoring_linear": { "min": 300, "max": 650, "step": 16 }
+}
+```
+
+### Examples
+
+Tune all exposed params on the default variant set:
+
+```bash
+cargo run --release --bin spsa --features param_tuning -- run --pairs 100 --iterations 500 --concurrency 20
+```
+
+Tune only piece values at `5+0.1` across the default variants:
+
+```bash
+cargo run --release --bin spsa --features param_tuning -- run --tc 5+0.1 --params piece-values
+```
+
+Tune only a hand-picked subset:
+
+```bash
+cargo run --release --bin spsa --features param_tuning -- run --params pawn,knight,bishop,rook,mg_bishop_pair_bonus
+```
+
+Inspect the tunable set before a run:
+
+```bash
+cargo run --bin spsa --features param_tuning -- list --params eval
+```
+
+Apply the latest checkpoint back into source:
+
+```bash
+cargo run --bin spsa --features param_tuning -- apply
+```
+
+Checkpoints are saved to `sprt/spsa_checkpoints/` by default and resume automatically unless `--fresh` is passed.
 
 ## Project Structure
 
 - `src/bin/sprt.rs` — Native CLI (SPRT manager + search subprocess)
 - `sprt.js` — Build and server script (web UI)
-- `spsa.mjs` — SPSA tuning logic
+- `src/bin/spsa.rs` — Match-based SPSA CLI (runner + search subprocess + apply/revert)
 - `web/` — Web UI for running SPRT tests
 - `web/pkg-old/` — Baseline WebAssembly package
 - `web/pkg-new/` — Modified WebAssembly package
@@ -142,3 +223,4 @@ Checkpoints are saved to `sprt/checkpoints/` and can be resumed by running the c
 - [SPRT on Chess Programming Wiki](https://www.chessprogramming.org/Sequential_Probability_Ratio_Test)
 - [SPSA on Chess Programming Wiki](https://www.chessprogramming.org/SPSA)
 - [Stockfish Testing](https://tests.stockfishchess.org/) — Production SPRT system
+

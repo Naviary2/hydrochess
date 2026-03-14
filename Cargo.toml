@@ -12,12 +12,9 @@ build = "build.rs"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "spsa_tuner"
-required-features = ["search_tuning"]
+name = "spsa"
+required-features = ["param_tuning"]
 
-[[bin]]
-name = "apply_params"
-required-features = ["search_tuning"]
 
 [[bin]]
 name = "helpmate_solver"
@@ -75,9 +72,10 @@ ctrlc = { version = "3.5", optional = true }
 
 [features]
 default = []
-eval_tuning = ["serde_json"]
-search_tuning = ["serde_json", "rand", "rayon"]
-sprt = ["serde_json", "rand", "rayon", "clap", "ctrlc"]
+param_tuning = ["serde_json", "rand", "rayon", "clap", "ctrlc"]
+eval_tuning = ["param_tuning"]
+search_tuning = ["param_tuning"]
+sprt = ["param_tuning"]
 multithreading = ["rayon", "wasm-bindgen-rayon"]
 parallel_solver = ["rayon", "num_cpus"]
 puzzle_gen = ["csv", "serde_json", "rayon", "indicatif"]

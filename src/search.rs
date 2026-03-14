@@ -1,4 +1,4 @@
-use crate::board::{PieceType, PlayerColor};
+﻿use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::evaluate;
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures};
@@ -1143,7 +1143,7 @@ impl Searcher {
     /// Gravity-style history update: scales updates based on current value and clamps to [-MAX_HISTORY, MAX_HISTORY].
     #[inline]
     pub fn update_history(&mut self, piece: PieceType, idx: usize, bonus: i32) {
-        let max_h = params::DEFAULT_HISTORY_MAX_GRAVITY;
+        let max_h = params::history_max_gravity();
         let clamped = bonus.clamp(-max_h, max_h);
 
         let entry = &mut self.history[piece as usize][idx];
@@ -1159,7 +1159,7 @@ impl Searcher {
         to_hash: usize,
         bonus: i32,
     ) {
-        let max_h = params::DEFAULT_HISTORY_MAX_GRAVITY;
+        let max_h = params::history_max_gravity();
         let clamped = bonus.clamp(-max_h, max_h);
         let ph_idx = (pawn_hash & PAWN_HISTORY_MASK) as usize;
         let entry = &mut self.pawn_history[ph_idx][piece as usize][to_hash];
@@ -1171,7 +1171,7 @@ impl Searcher {
     #[inline]
     pub fn update_low_ply_history(&mut self, ply: usize, move_hash: usize, bonus: i32) {
         if ply < LOW_PLY_HISTORY_SIZE {
-            let max_h = params::DEFAULT_HISTORY_MAX_GRAVITY;
+            let max_h = params::history_max_gravity();
             let clamped = bonus.clamp(-max_h, max_h);
             let idx = move_hash & LOW_PLY_HISTORY_MASK;
             let entry = &mut self.low_ply_history[ply][idx];
@@ -3999,8 +3999,10 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 let corr_val_adj = (static_eval - raw_eval).abs() / 256;
 
                 let pv_bonus = if is_pv { (depth as i32) * 2 } else { 0 };
-                let double_margin = (depth as i32) * 2 - (tt_capture as i32 * 5) - corr_val_adj + pv_bonus;
-                let triple_margin = (depth as i32) * 4 - (tt_capture as i32 * 10) - corr_val_adj + pv_bonus * 2;
+                let double_margin =
+                    (depth as i32) * 2 - (tt_capture as i32 * 5) - corr_val_adj + pv_bonus;
+                let triple_margin =
+                    (depth as i32) * 4 - (tt_capture as i32 * 10) - corr_val_adj + pv_bonus * 2;
 
                 extension = 1;
                 if se_value < singular_beta - double_margin {
@@ -4503,7 +4505,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 let standard_bonus = (history_bonus_base() * depth as i32 - history_bonus_sub())
                     .min(history_bonus_cap());
                 let bonus = standard_bonus / 2;
-                let max_h = params::DEFAULT_HISTORY_MAX_GRAVITY;
+                let max_h = params::history_max_gravity();
 
                 // Update continuation history for opponent's previous move
                 // We use the same offsets (1, 2, 4) relative to the opponent's ply (ply - 1).
@@ -4549,7 +4551,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 if prev_pt != PieceType::Pawn as usize && prev_move.promotion.is_none() {
                     let ph_idx = (game.pawn_hash & PAWN_HISTORY_MASK) as usize;
                     let pawn_adj =
-                        (bonus * params::DEFAULT_PAWN_HISTORY_BONUS_SCALE).clamp(-max_h, max_h);
+                        (bonus * params::pawn_history_bonus_scale()).clamp(-max_h, max_h);
                     let pentry = &mut searcher.pawn_history[ph_idx][prev_pt][prev_idx];
                     *pentry += pawn_adj - ((*pentry * pawn_adj.abs()) >> 14);
                 }

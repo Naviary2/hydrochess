@@ -4,6 +4,14 @@ use crate::game::GameState;
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
 
+use crate::search::params::{
+    archbishop, bishop, camel, centaur, chancellor_bonus, eg_bishop_pair_bonus,
+    eg_doubled_pawn_penalty, eg_outpost_bonus, giraffe, guard, hawk, huygen, knightrider,
+    knight, mg_bishop_pair_bonus, mg_doubled_pawn_penalty, mg_outpost_bonus, pawn,
+    queen_open_file_bonus, queen_semi_open_file_bonus, queen_value, rook, rook_open_file_bonus,
+    rook_semi_open_file_bonus, rose, zebra,
+};
+
 // 2-Bucket LRU pawn structure cache
 const PAWN_CACHE_SIZE: usize = 16384; // 16384 buckets * 2 entries = 32768 entries
 
@@ -53,11 +61,11 @@ pub fn clear_pawn_cache() {
     });
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 use once_cell::sync::Lazy;
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 use std::sync::RwLock;
 
 /// Tracer trait for evaluation components.
@@ -125,7 +133,7 @@ impl ActiveTrace {
     }
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EvalFeatures {
     // King safety
@@ -150,23 +158,23 @@ pub struct EvalFeatures {
     pub queen_fork_zone_bonus: i32,
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 pub static EVAL_FEATURES: Lazy<RwLock<EvalFeatures>> =
     Lazy::new(|| RwLock::new(EvalFeatures::default()));
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 pub fn reset_eval_features() {
     if let Ok(mut guard) = EVAL_FEATURES.write() {
         *guard = EvalFeatures::default();
     }
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 pub fn snapshot_eval_features() -> EvalFeatures {
     EVAL_FEATURES.read().map(|g| g.clone()).unwrap_or_default()
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 macro_rules! bump_feat {
     ($field:ident, $amount:expr) => {{
         if let Ok(mut f) = $crate::evaluation::EVAL_FEATURES.write() {
@@ -175,20 +183,39 @@ macro_rules! bump_feat {
     }};
 }
 
-#[cfg(not(feature = "eval_tuning"))]
+#[cfg(not(any(feature = "param_tuning", feature = "eval_tuning")))]
 macro_rules! bump_feat {
     ($($tt:tt)*) => {};
 }
 
-// Piece Values
-const KNIGHT: i32 = 250;
-const BISHOP: i32 = KNIGHT + 200;
-const ROOK: i32 = KNIGHT + BISHOP - 50;
-const GUARD: i32 = 220;
-const CENTAUR: i32 = 550;
-const QUEEN: i32 = ROOK * 2 + COMPOUND_BONUS;
+pub const DEFAULT_EVAL_PAWN: i32 = 100;
+pub const DEFAULT_EVAL_KNIGHT: i32 = 250;
+pub const DEFAULT_EVAL_BISHOP: i32 = 450;
+pub const DEFAULT_EVAL_ROOK: i32 = 650;
+pub const DEFAULT_EVAL_GUARD: i32 = 220;
+pub const DEFAULT_EVAL_CENTAUR: i32 = 550;
+pub const DEFAULT_EVAL_COMPOUND_BONUS: i32 = 50;
+pub const DEFAULT_EVAL_CAMEL: i32 = 270;
+pub const DEFAULT_EVAL_GIRAFFE: i32 = 260;
+pub const DEFAULT_EVAL_ZEBRA: i32 = 260;
+pub const DEFAULT_EVAL_KNIGHTRIDER: i32 = 700;
+pub const DEFAULT_EVAL_HAWK: i32 = 600;
+pub const DEFAULT_EVAL_ARCHBISHOP: i32 = 900;
+pub const DEFAULT_EVAL_ROSE: i32 = 450;
+pub const DEFAULT_EVAL_HUYGEN: i32 = 355;
+pub const DEFAULT_EVAL_CHANCELLOR_BONUS: i32 = 100;
+pub const DEFAULT_EVAL_MG_DOUBLED_PAWN_PENALTY: i32 = 8;
+pub const DEFAULT_EVAL_EG_DOUBLED_PAWN_PENALTY: i32 = 12;
+pub const DEFAULT_EVAL_MG_BISHOP_PAIR_BONUS: i32 = 60;
+pub const DEFAULT_EVAL_EG_BISHOP_PAIR_BONUS: i32 = 80;
+pub const DEFAULT_EVAL_ROOK_OPEN_FILE_BONUS: i32 = 45;
+pub const DEFAULT_EVAL_ROOK_SEMI_OPEN_FILE_BONUS: i32 = 20;
+pub const DEFAULT_EVAL_QUEEN_OPEN_FILE_BONUS: i32 = 25;
+pub const DEFAULT_EVAL_QUEEN_SEMI_OPEN_FILE_BONUS: i32 = 10;
+pub const DEFAULT_EVAL_MG_OUTPOST_BONUS: i32 = 20;
+pub const DEFAULT_EVAL_EG_OUTPOST_BONUS: i32 = 50;
 
-const COMPOUND_BONUS: i32 = 50;
+// Piece Values
 
 pub fn get_piece_value_base(piece_type: PieceType) -> i32 {
     match piece_type {
@@ -197,33 +224,33 @@ pub fn get_piece_value_base(piece_type: PieceType) -> i32 {
         PieceType::Obstacle => 0,
 
         // orthodox - adjusted for infinite chess where sliders dominate
-        PieceType::Pawn => 100,
-        PieceType::Knight => KNIGHT, // Weak in infinite chess
-        PieceType::Bishop => BISHOP, // Strong slider
-        PieceType::Rook => ROOK,     // Very strong in infinite chess
-        PieceType::Queen => QUEEN,   // > 2 rooks
-        PieceType::Guard => GUARD,
+        PieceType::Pawn => pawn(),
+        PieceType::Knight => knight(), // Weak in infinite chess
+        PieceType::Bishop => bishop(), // Strong slider
+        PieceType::Rook => rook(),     // Very strong in infinite chess
+        PieceType::Queen => queen_value(),   // > 2 rooks
+        PieceType::Guard => guard(),
 
         // short / medium range
-        PieceType::Camel => 270,   // (1,3) leaper
-        PieceType::Giraffe => 260, // (1,4) leaper
-        PieceType::Zebra => 260,   // (2,3) leaper
+        PieceType::Camel => camel(),   // (1,3) leaper
+        PieceType::Giraffe => giraffe(), // (1,4) leaper
+        PieceType::Zebra => zebra(),   // (2,3) leaper
 
         // riders / compounds
-        PieceType::Knightrider => 700,
-        PieceType::Amazon => QUEEN + KNIGHT,
-        PieceType::Hawk => 600,
-        PieceType::Chancellor => ROOK + KNIGHT + 100,
-        PieceType::Archbishop => 900,
-        PieceType::Centaur => CENTAUR,
+        PieceType::Knightrider => knightrider(),
+        PieceType::Amazon => queen_value() + knight(),
+        PieceType::Hawk => hawk(),
+        PieceType::Chancellor => rook() + knight() + chancellor_bonus(),
+        PieceType::Archbishop => archbishop(),
+        PieceType::Centaur => centaur(),
 
-        PieceType::King => GUARD,
-        PieceType::RoyalQueen => QUEEN,
-        PieceType::RoyalCentaur => CENTAUR,
+        PieceType::King => guard(),
+        PieceType::RoyalQueen => queen_value(),
+        PieceType::RoyalCentaur => centaur(),
 
         // special infinite-board pieces
-        PieceType::Rose => 450,
-        PieceType::Huygen => 355,
+        PieceType::Rose => rose(),
+        PieceType::Huygen => huygen(),
     }
 }
 
@@ -367,11 +394,6 @@ const EG_KING_OPEN_FILE_PENALTY: i32 = 10;
 const MG_CONNECTED_PAWN_BONUS: i32 = 8;
 const EG_CONNECTED_PAWN_BONUS: i32 = 15; // Chains critical in EG
 
-const MG_DOUBLED_PAWN_PENALTY: i32 = 8;
-const EG_DOUBLED_PAWN_PENALTY: i32 = 12;
-
-const MG_BISHOP_PAIR_BONUS: i32 = 60;
-const EG_BISHOP_PAIR_BONUS: i32 = 80;
 
 const MG_KING_DEFENDER_BONUS: i32 = 6;
 const EG_KING_DEFENDER_BONUS: i32 = 2; // Less need for defenders
@@ -384,12 +406,6 @@ const MG_FAR_SLIDER_PENALTY_MULT: i32 = 100; // 100%
 const EG_FAR_SLIDER_PENALTY_MULT: i32 = 40; // 40%
 
 // Piece on Open File Bonuses
-const ROOK_OPEN_FILE_BONUS: i32 = 45;
-const ROOK_SEMI_OPEN_FILE_BONUS: i32 = 20;
-const QUEEN_OPEN_FILE_BONUS: i32 = 25;
-const QUEEN_SEMI_OPEN_FILE_BONUS: i32 = 10;
-const MG_OUTPOST_BONUS: i32 = 20;
-const EG_OUTPOST_BONUS: i32 = 50;
 
 // Passed Pawn Detail (MG/EG tapered arrays by relative rank 0-5)
 // Rank 0 is far, Rank 5 is near promotion.
@@ -1620,14 +1636,14 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
     let mut b_pair_bonus = 0;
 
     if metrics.white_bishops >= 2 {
-        w_pair_bonus += taper(MG_BISHOP_PAIR_BONUS, EG_BISHOP_PAIR_BONUS);
+        w_pair_bonus += taper(mg_bishop_pair_bonus(), eg_bishop_pair_bonus());
         bump_feat!(bishop_pair_bonus, 1);
         if metrics.white_bishop_colors.0 && metrics.white_bishop_colors.1 {
             w_pair_bonus += 20;
         }
     }
     if metrics.black_bishops >= 2 {
-        b_pair_bonus += taper(MG_BISHOP_PAIR_BONUS, EG_BISHOP_PAIR_BONUS);
+        b_pair_bonus += taper(mg_bishop_pair_bonus(), eg_bishop_pair_bonus());
         bump_feat!(bishop_pair_bonus, -1);
         if metrics.black_bishop_colors.0 && metrics.black_bishop_colors.1 {
             b_pair_bonus += 20;
@@ -1906,10 +1922,10 @@ pub fn evaluate_rook(
 
         if !has_enemy_pawns {
             // Open file
-            bonus += ROOK_OPEN_FILE_BONUS;
+            bonus += rook_open_file_bonus();
         } else {
             // Semi-open file
-            bonus += ROOK_SEMI_OPEN_FILE_BONUS;
+            bonus += rook_semi_open_file_bonus();
         }
     }
 
@@ -2005,10 +2021,10 @@ pub fn evaluate_queen(
 
         if !has_enemy_pawns {
             // Open file
-            bonus += QUEEN_OPEN_FILE_BONUS;
+            bonus += queen_open_file_bonus();
         } else {
             // Semi-open file
-            bonus += QUEEN_SEMI_OPEN_FILE_BONUS;
+            bonus += queen_semi_open_file_bonus();
         }
     }
 
@@ -2091,7 +2107,7 @@ pub fn evaluate_bishop(
     let has_right_support = my_pawns.binary_search(&(x + 1, support_y)).is_ok();
 
     if has_left_support || has_right_support {
-        bonus += taper(MG_OUTPOST_BONUS, EG_OUTPOST_BONUS);
+        bonus += taper(mg_outpost_bonus(), eg_outpost_bonus());
     }
 
     bonus
@@ -2136,7 +2152,7 @@ fn evaluate_knight(
     let has_right_support = my_pawns.binary_search(&(x + 1, support_y)).is_ok();
 
     if has_left_support || has_right_support {
-        bonus += taper(MG_OUTPOST_BONUS, EG_OUTPOST_BONUS);
+        bonus += taper(mg_outpost_bonus(), eg_outpost_bonus());
     }
 
     bonus
@@ -2551,7 +2567,7 @@ fn compute_pawn_structure_traced<T: EvaluationTracer>(
             j += 1;
         }
         if count > 1 {
-            w_doubled -= (count - 1) * taper(MG_DOUBLED_PAWN_PENALTY, EG_DOUBLED_PAWN_PENALTY);
+            w_doubled -= (count - 1) * taper(mg_doubled_pawn_penalty(), eg_doubled_pawn_penalty());
         }
         i = j;
     }
@@ -2567,7 +2583,7 @@ fn compute_pawn_structure_traced<T: EvaluationTracer>(
             j += 1;
         }
         if count > 1 {
-            b_doubled -= (count - 1) * taper(MG_DOUBLED_PAWN_PENALTY, EG_DOUBLED_PAWN_PENALTY);
+            b_doubled -= (count - 1) * taper(mg_doubled_pawn_penalty(), eg_doubled_pawn_penalty());
         }
         i = j;
     }
@@ -3382,8 +3398,8 @@ mod tests {
         );
         assert_eq!(
             score_supported - score_no_support,
-            EG_OUTPOST_BONUS,
-            "Bonus should match EG_OUTPOST_BONUS in endgame"
+            eg_outpost_bonus(),
+            "Bonus should match eg_outpost_bonus() in endgame"
         );
     }
 

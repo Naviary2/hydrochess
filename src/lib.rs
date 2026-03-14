@@ -42,6 +42,8 @@ pub enum Variant {
     Knightline,
     Obstocean,
     Chess,
+    // Custom variant that uses all fairy leapers
+    ScatteredLeapers,
 }
 
 impl Variant {
@@ -102,6 +104,9 @@ impl Variant {
             Variant::Chess => {
                 "w 0/100 1 (8|1) 1,8,1,8 P1,2+|P2,2+|P3,2+|P4,2+|P5,2+|P6,2+|P7,2+|P8,2+|p1,7+|p2,7+|p3,7+|p4,7+|p5,7+|p6,7+|p7,7+|p8,7+|R1,1+|R8,1+|r1,8+|r8,8+|N2,1|N7,1|n2,8|n7,8|B3,1|B6,1|b3,8|b6,8|Q4,1|q4,8|K5,1+|k5,8+"
             }
+            Variant::ScatteredLeapers => {
+                "w 0/100 1 (8|1) P1,2+|P2,2+|P3,2+|P4,2+|P5,2+|P7,2+|P8,2+|p1,7+|p2,7+|p3,7+|p4,7+|p5,7+|p6,7+|p7,7+|R1,1+|r1,8+|r8,8+|B3,1|B6,1|b3,8|b6,8|GU2,1|gu2,8|K5,1+|k5,8+|gu7,8|P11,1+|P-2,1+|P-5,0+|P14,0+|p-2,8+|p-5,9+|p11,8+|p14,9+|nr4,9|NR4,0|CA9,-2|ca9,11|ca0,11|ze-3,12|ze12,12|ZE12,-3|GI-5,-6|GI14,-6|gi14,15|gi-5,15|ha-1,14|ha10,14|P6,2+|RO7,-6|p8,7+|ZE-3,-3|CA0,-2|GU7,1|R8,1+|HA10,-5|HA-1,-5|ro7,15"
+            }
         }
     }
 
@@ -125,6 +130,7 @@ impl Variant {
             Variant::Knightline => "Knightline",
             Variant::Obstocean => "Obstocean",
             Variant::Chess => "Chess",
+            Variant::ScatteredLeapers => "Scattered_Leapers",
         }
     }
 
@@ -210,7 +216,7 @@ pub struct JsMoveWithEval {
     pub depth: usize, // depth reached
 }
 
-#[cfg(feature = "eval_tuning")]
+#[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 #[derive(Serialize)]
 pub struct JsEvalWithFeatures {
     pub eval: i32,
@@ -403,7 +409,7 @@ impl Engine {
         }
     }
 
-    #[cfg(feature = "eval_tuning")]
+    #[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
     #[wasm_bindgen]
     pub fn evaluate_with_features(&mut self) -> JsValue {
         crate::evaluation::reset_eval_features();
@@ -415,10 +421,26 @@ impl Engine {
         serde_wasm_bindgen::to_value(&JsEvalWithFeatures { eval, features }).unwrap()
     }
 
+    /// Set evaluation parameters from a JSON string.
+    /// Only available when the `eval_tuning` feature is enabled.
+    #[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
+    #[wasm_bindgen]
+    pub fn set_eval_params(&self, json: &str) -> bool {
+        crate::evaluation::set_eval_params_from_json(json)
+    }
+
+    /// Get current evaluation parameters as a JSON string.
+    /// Only available when the `eval_tuning` feature is enabled.
+    #[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
+    #[wasm_bindgen]
+    pub fn get_eval_params(&self) -> String {
+        crate::evaluation::get_eval_params_as_json()
+    }
+
     /// Set search parameters from a JSON string.
     /// Only available when the `search_tuning` feature is enabled.
     /// Returns true on success, false on parse failure.
-    #[cfg(feature = "search_tuning")]
+    #[cfg(any(feature = "param_tuning", feature = "search_tuning"))]
     #[wasm_bindgen]
     pub fn set_search_params(&self, json: &str) -> bool {
         crate::search::params::set_search_params_from_json(json)
@@ -426,7 +448,7 @@ impl Engine {
 
     /// Get current search parameters as a JSON string.
     /// Only available when the `search_tuning` feature is enabled.
-    #[cfg(feature = "search_tuning")]
+    #[cfg(any(feature = "param_tuning", feature = "search_tuning"))]
     #[wasm_bindgen]
     pub fn get_search_params(&self) -> String {
         crate::search::params::get_search_params_as_json()
