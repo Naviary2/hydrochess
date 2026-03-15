@@ -40,7 +40,7 @@ enum Commands {
         #[arg(long, default_value_t = 100)]
         iterations: usize,
         /// Number of paired openings per iteration. Total games = `pairs * 2`.
-        #[arg(long, default_value_t = 200)]
+        #[arg(long, default_value_t = 400)]
         pairs: usize,
         /// Save a checkpoint every N iterations.
         #[arg(long, default_value_t = 1)]
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         fresh: bool,
         /// Time control: `base+inc`, `depth N`, or `fixed Ns`.
-        #[arg(long, default_value = "5+0.05")]
+        #[arg(long, default_value = "3+0.03")]
         tc: String,
         /// Number of concurrent game workers.
         #[arg(long, default_value_t = 16)]
@@ -78,18 +78,12 @@ enum Commands {
         /// Optional path to write the latest iteration's ICNs as JSON.
         #[arg(long)]
         games: Option<PathBuf>,
-        /// SPSA learning-rate scale parameter `a`.
-        #[arg(long, default_value_t = 160.0)]
-        a: f64,
-        /// SPSA stability parameter `A`.
-        #[arg(long, default_value_t = 10.0)]
-        big_a: f64,
+        /// SPSA stability parameter `A`. Defaults to `iterations / 10`.
+        #[arg(long)]
+        big_a: Option<f64>,
         /// SPSA learning-rate decay exponent `alpha`.
         #[arg(long, default_value_t = 0.602)]
         alpha: f64,
-        /// SPSA perturbation scale parameter `c`.
-        #[arg(long, default_value_t = 1.0)]
-        c: f64,
         /// SPSA perturbation decay exponent `gamma`.
         #[arg(long, default_value_t = 0.101)]
         gamma: f64,
@@ -99,7 +93,7 @@ enum Commands {
         /// Parameter selection preset or comma-separated names: `all`, `search`, `eval`, `piece-values`, or explicit names.
         #[arg(long, default_value = "all")]
         params: String,
-        /// Optional JSON file overriding bounds, defaults, step size, or weight for selected params.
+        /// Optional JSON file overriding bounds, defaults, `c_end`, or `r_end` for selected params.
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -207,7 +201,11 @@ struct IterationRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Checkpoint {
     iteration: usize,
-    theta: BTreeMap<String, i64>,
+    theta: BTreeMap<String, f64>,
+    best_theta: BTreeMap<String, f64>,
+    best_iteration: usize,
+    best_score: f64,
+    best_elo: f64,
     history: Vec<IterationRecord>,
     selected: Vec<String>,
 }
@@ -234,14 +232,18 @@ struct UnifiedSpec {
     default: i64,
     min: i64,
     max: i64,
-    step: i64,
-    weight: f64,
+    c_end: f64,
+    r_end: f64,
     description: &'static str,
 }
 
 impl UnifiedSpec {
-    fn clamp(&self, value: i64) -> i64 {
-        value.clamp(self.min, self.max)
+    fn clamp(&self, value: f64) -> f64 {
+        value.clamp(self.min as f64, self.max as f64)
+    }
+
+    fn quantize(&self, value: f64) -> i64 {
+        self.clamp(value).round() as i64
     }
 }
 
@@ -249,9 +251,9 @@ impl UnifiedSpec {
 struct SpecOverride {
     min: Option<i64>,
     max: Option<i64>,
-    step: Option<i64>,
-    weight: Option<f64>,
     default: Option<i64>,
+    c_end: Option<f64>,
+    r_end: Option<f64>,
 }
 
 fn all_specs() -> Vec<UnifiedSpec> {
@@ -263,8 +265,8 @@ fn all_specs() -> Vec<UnifiedSpec> {
             default: spec.default,
             min: spec.min,
             max: spec.max,
-            step: spec.step,
-            weight: spec.weight,
+            c_end: spec.c_end,
+            r_end: spec.r_end,
             description: spec.description,
         });
     }
@@ -275,8 +277,8 @@ fn all_specs() -> Vec<UnifiedSpec> {
             default: spec.default,
             min: spec.min,
             max: spec.max,
-            step: spec.step,
-            weight: spec.weight,
+            c_end: spec.c_end,
+            r_end: spec.r_end,
             description: spec.description,
         });
     }
@@ -338,7 +340,9 @@ fn select_specs(selector: &str, override_path: Option<&Path>) -> Vec<UnifiedSpec
     for name in names {
         if seen.insert(name) {
             if name == "pawn" {
-                eprintln!("note: `pawn` is fixed at 100 and is not a tunable parameter; ignoring selector");
+                eprintln!(
+                    "note: `pawn` is fixed at 100 and is not a tunable parameter; ignoring selector"
+                );
                 continue;
             }
             let spec = by_name
@@ -362,11 +366,11 @@ fn select_specs(selector: &str, override_path: Option<&Path>) -> Vec<UnifiedSpec
                 if let Some(v) = ov.max {
                     spec.max = v;
                 }
-                if let Some(v) = ov.step {
-                    spec.step = v.max(1);
+                if let Some(v) = ov.c_end {
+                    spec.c_end = v.max(f64::EPSILON);
                 }
-                if let Some(v) = ov.weight {
-                    spec.weight = v.max(0.0);
+                if let Some(v) = ov.r_end {
+                    spec.r_end = v.max(f64::EPSILON);
                 }
                 if spec.min > spec.max {
                     std::mem::swap(&mut spec.min, &mut spec.max);
@@ -703,14 +707,14 @@ fn default_eval_map() -> serde_json::Map<String, Value> {
         .clone()
 }
 
-fn selected_defaults(specs: &[UnifiedSpec]) -> BTreeMap<String, i64> {
+fn selected_defaults(specs: &[UnifiedSpec]) -> BTreeMap<String, f64> {
     specs
         .iter()
-        .map(|spec| (spec.name.to_string(), spec.default))
+        .map(|spec| (spec.name.to_string(), spec.default as f64))
         .collect()
 }
 
-fn clamp_theta(theta: &BTreeMap<String, i64>, selected: &[UnifiedSpec]) -> BTreeMap<String, i64> {
+fn clamp_theta(theta: &BTreeMap<String, f64>, selected: &[UnifiedSpec]) -> BTreeMap<String, f64> {
     let map: HashMap<&str, &UnifiedSpec> = selected.iter().map(|spec| (spec.name, spec)).collect();
     theta
         .iter()
@@ -733,51 +737,89 @@ fn generate_delta(selected: &[UnifiedSpec]) -> BTreeMap<String, i64> {
         .collect()
 }
 
-fn perturb(
-    theta: &BTreeMap<String, i64>,
-    delta: &BTreeMap<String, i64>,
+#[derive(Debug, Clone, Copy)]
+struct SpsaCoefficients {
     ck: f64,
+    rk: f64,
+}
+
+fn ck_for(spec: &UnifiedSpec, iteration: usize, iterations: usize, gamma: f64) -> f64 {
+    let c = spec.c_end * (iterations as f64).powf(gamma);
+    c / (iteration as f64).powf(gamma)
+}
+
+fn ak_for(spec: &UnifiedSpec, iteration: usize, iterations: usize, big_a: f64, alpha: f64) -> f64 {
+    let a_end = spec.r_end * spec.c_end * spec.c_end;
+    let a = a_end * (big_a + iterations as f64).powf(alpha);
+    a / (big_a + iteration as f64).powf(alpha)
+}
+
+fn compute_coefficients(
+    selected: &[UnifiedSpec],
+    iteration: usize,
+    iterations: usize,
+    big_a: f64,
+    alpha: f64,
+    gamma: f64,
+) -> BTreeMap<String, SpsaCoefficients> {
+    selected
+        .iter()
+        .map(|spec| {
+            let ck = ck_for(spec, iteration, iterations, gamma);
+            let ak = ak_for(spec, iteration, iterations, big_a, alpha);
+            let rk = ak / (ck * ck);
+            (
+                spec.name.to_string(),
+                SpsaCoefficients { ck, rk },
+            )
+        })
+        .collect()
+}
+
+fn perturb(
+    theta: &BTreeMap<String, f64>,
+    delta: &BTreeMap<String, i64>,
+    coeffs: &BTreeMap<String, SpsaCoefficients>,
     sign: f64,
     selected: &[UnifiedSpec],
-) -> BTreeMap<String, i64> {
+) -> BTreeMap<String, f64> {
     let map: HashMap<&str, &UnifiedSpec> = selected.iter().map(|spec| (spec.name, spec)).collect();
     theta
         .iter()
         .map(|(name, value)| {
             let spec = map[name.as_str()];
-            let offset = sign * ck * delta[name] as f64 * spec.step as f64 * spec.weight;
+            let ck = coeffs[name].ck;
+            let offset = sign * ck * delta[name] as f64;
             (
                 name.clone(),
-                spec.clamp((*value as f64 + offset).round() as i64),
+                spec.clamp(*value + offset),
             )
         })
         .collect()
 }
 
 fn update(
-    theta: &BTreeMap<String, i64>,
+    theta: &BTreeMap<String, f64>,
     delta: &BTreeMap<String, i64>,
-    ck: f64,
-    ak: f64,
-    score: f64,
+    coeffs: &BTreeMap<String, SpsaCoefficients>,
+    result: f64,
     selected: &[UnifiedSpec],
-) -> BTreeMap<String, i64> {
-    let loss_plus = 1.0 - score;
-    let loss_minus = score;
-    let loss_diff = loss_plus - loss_minus;
+) -> BTreeMap<String, f64> {
     let map: HashMap<&str, &UnifiedSpec> = selected.iter().map(|spec| (spec.name, spec)).collect();
     theta
         .iter()
         .map(|(name, value)| {
             let spec = map[name.as_str()];
-            let grad = loss_diff / (2.0 * ck * delta[name] as f64);
-            let next = *value as f64 - ak * grad * spec.step as f64 * spec.weight;
-            (name.clone(), spec.clamp(next.round() as i64))
+            let rk = coeffs[name].rk;
+            let ck = coeffs[name].ck;
+            let update = rk * ck * result / delta[name] as f64;
+            let next = *value + update;
+            (name.clone(), spec.clamp(next))
         })
         .collect()
 }
 
-fn build_json_for_domain(theta: &BTreeMap<String, i64>, domain: Domain) -> Option<String> {
+fn build_json_for_domain(theta: &BTreeMap<String, f64>, domain: Domain) -> Option<String> {
     let mut map = match domain {
         Domain::Search => default_search_map(),
         Domain::Eval => default_eval_map(),
@@ -785,7 +827,10 @@ fn build_json_for_domain(theta: &BTreeMap<String, i64>, domain: Domain) -> Optio
     let mut touched = false;
     for spec in all_specs().iter().filter(|spec| spec.domain == domain) {
         if let Some(value) = theta.get(spec.name) {
-            map.insert(spec.name.to_string(), Value::Number(Number::from(*value)));
+            map.insert(
+                spec.name.to_string(),
+                Value::Number(Number::from(spec.quantize(*value))),
+            );
             touched = true;
         }
     }
@@ -799,8 +844,8 @@ fn build_json_for_domain(theta: &BTreeMap<String, i64>, domain: Domain) -> Optio
 fn run_batch(
     config: &RunConfig,
     pairs: usize,
-    plus_theta: &BTreeMap<String, i64>,
-    minus_theta: &BTreeMap<String, i64>,
+    plus_theta: &BTreeMap<String, f64>,
+    minus_theta: &BTreeMap<String, f64>,
 ) -> BatchResults {
     let plus_search_json = build_json_for_domain(plus_theta, Domain::Search);
     let minus_search_json = build_json_for_domain(minus_theta, Domain::Search);
@@ -978,8 +1023,11 @@ fn apply_constants(path: &str, values: &[(String, String, i64)]) {
         let lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
         let mut out = Vec::with_capacity(lines.len());
         for line in lines {
-            if line.trim().starts_with("pub const ")
-                && line.contains(const_name)
+            let trimmed = line.trim();
+            if trimmed.starts_with("pub const ")
+                && let Some(rest) = trimmed.strip_prefix("pub const ")
+                && let Some((name_part, _)) = rest.split_once(':')
+                && name_part.trim() == const_name
                 && let Some(eq_idx) = line.find('=')
                 && let Some(semi_idx) = line.find(';')
                 && eq_idx < semi_idx
@@ -1000,19 +1048,20 @@ fn apply_constants(path: &str, values: &[(String, String, i64)]) {
     fs::write(path, content).expect("write constants file");
 }
 
-fn apply_selected_values(theta: &BTreeMap<String, i64>) {
+fn apply_selected_values(theta: &BTreeMap<String, f64>) {
     let mut search_updates = Vec::new();
     let mut eval_updates = Vec::new();
     for spec in all_specs() {
         if let Some(value) = theta.get(spec.name) {
+            let quantized = spec.quantize(*value);
             match spec.domain {
                 Domain::Search => search_updates.push((
                     spec.name.to_string(),
                     search_const_name(spec.name),
-                    *value,
+                    quantized,
                 )),
                 Domain::Eval => {
-                    eval_updates.push((spec.name.to_string(), eval_const_name(spec.name), *value))
+                    eval_updates.push((spec.name.to_string(), eval_const_name(spec.name), quantized))
                 }
             }
         }
@@ -1025,7 +1074,7 @@ fn apply_selected_values(theta: &BTreeMap<String, i64>) {
     }
 }
 
-fn load_values(path: &Path) -> BTreeMap<String, i64> {
+fn load_values(path: &Path) -> BTreeMap<String, f64> {
     let root: Value =
         serde_json::from_str(&fs::read_to_string(path).expect("read json")).expect("parse json");
     let obj = root.as_object().expect("json object");
@@ -1045,7 +1094,8 @@ fn load_values(path: &Path) -> BTreeMap<String, i64> {
                 value
                     .as_i64()
                     .or_else(|| value.as_u64().map(|v| v as i64))
-                    .map(|raw| (name.clone(), spec.clamp(raw)))
+                    .or_else(|| value.as_f64().map(|v| v.round() as i64))
+                    .map(|raw| (name.clone(), spec.clamp(raw as f64)))
             })
         })
         .collect()
@@ -1061,10 +1111,8 @@ fn run_spsa(
     checkpoint_dir: PathBuf,
     results_path: PathBuf,
     games_path: Option<PathBuf>,
-    a: f64,
     big_a: f64,
     alpha: f64,
-    c: f64,
     gamma: f64,
     params: String,
     spec_config: Option<PathBuf>,
@@ -1090,11 +1138,19 @@ fn run_spsa(
             .join(", ")
     );
     let mut theta = selected_defaults(&selected);
+    let mut best_theta = theta.clone();
+    let mut best_iteration = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut best_elo = f64::NEG_INFINITY;
     let mut history = Vec::new();
     let mut start_iteration = 1;
     if !fresh && let Some(path) = resume.or_else(|| latest_checkpoint(&checkpoint_dir)) {
         let checkpoint = load_checkpoint(&path);
         theta = clamp_theta(&checkpoint.theta, &selected);
+        best_theta = clamp_theta(&checkpoint.best_theta, &selected);
+        best_iteration = checkpoint.best_iteration;
+        best_score = checkpoint.best_score;
+        best_elo = checkpoint.best_elo;
         history = checkpoint.history;
         start_iteration = checkpoint.iteration + 1;
         println!("Resuming from {}", path.display());
@@ -1106,11 +1162,10 @@ fn run_spsa(
             break;
         }
         let started = Instant::now();
-        let ak = a / (big_a + k as f64).powf(alpha);
-        let ck = c / (k as f64).powf(gamma);
         let delta = generate_delta(&selected);
-        let theta_plus = perturb(&theta, &delta, ck, 1.0, &selected);
-        let theta_minus = perturb(&theta, &delta, ck, -1.0, &selected);
+        let coeffs = compute_coefficients(&selected, k, iterations, big_a, alpha, gamma);
+        let theta_plus = perturb(&theta, &delta, &coeffs, 1.0, &selected);
+        let theta_minus = perturb(&theta, &delta, &coeffs, -1.0, &selected);
         let batch = run_batch(&config, pairs, &theta_plus, &theta_minus);
         latest_games = batch.games.clone();
         let total = batch.plus_wins + batch.minus_wins + batch.draws;
@@ -1119,13 +1174,23 @@ fn run_spsa(
             continue;
         }
         let score = (batch.plus_wins as f64 + 0.5 * batch.draws as f64) / total as f64;
-        let next_theta = clamp_theta(&update(&theta, &delta, ck, ak, score, &selected), &selected);
+        let match_result = batch.plus_wins as f64 - batch.minus_wins as f64;
+        let next_theta = clamp_theta(
+            &update(&theta, &delta, &coeffs, match_result, &selected),
+            &selected,
+        );
         let changed = next_theta
             .iter()
             .filter(|(name, value)| theta.get(*name) != Some(*value))
             .count();
         theta = next_theta;
         let elo = score_to_elo(score);
+        if score > best_score {
+            best_score = score;
+            best_elo = elo;
+            best_iteration = k;
+            best_theta = theta.clone();
+        }
         let elapsed_ms = started.elapsed().as_millis();
         println!(
             "iter {:>5} | + {:>4} - {:>4} = {:>4} | score {:.3} | elo {:>6.1} | changed {}",
@@ -1145,6 +1210,10 @@ fn run_spsa(
             let checkpoint = Checkpoint {
                 iteration: k,
                 theta: theta.clone(),
+                best_theta: best_theta.clone(),
+                best_iteration,
+                best_score,
+                best_elo,
                 history: history.clone(),
                 selected: selected.iter().map(|s| s.name.to_string()).collect(),
             };
@@ -1155,7 +1224,7 @@ fn run_spsa(
     if let Some(parent) = results_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let root = serde_json::json!({ "theta": theta, "history": history, "selected": selected.iter().map(|s| s.name).collect::<Vec<_>>() });
+    let root = serde_json::json!({ "theta": theta, "best_theta": best_theta, "best_iteration": best_iteration, "best_score": best_score, "best_elo": best_elo, "history": history, "selected": selected.iter().map(|s| s.name).collect::<Vec<_>>() });
     fs::write(
         &results_path,
         serde_json::to_string_pretty(&root).expect("serialize final"),
@@ -1194,10 +1263,8 @@ fn main() {
             checkpoint_dir,
             results,
             games,
-            a,
             big_a,
             alpha,
-            c,
             gamma,
             verbose,
             params,
@@ -1227,10 +1294,8 @@ fn main() {
                 checkpoint_dir,
                 results,
                 games,
-                a,
-                big_a,
+                big_a.unwrap_or(iterations as f64 / 10.0),
                 alpha,
-                c,
                 gamma,
                 params,
                 config,
@@ -1298,7 +1363,7 @@ fn main() {
         Some(Commands::List { params }) => {
             for spec in select_specs(&params, None) {
                 println!(
-                    "{:<28} {:<6} [{:>5}, {:>5}] step {:>3} weight {:.2} {}",
+                    "{:<28} {:<6} [{:>5}, {:>5}] c_end {:>8.3} R_end {:>7.4} {}",
                     spec.name,
                     match spec.domain {
                         Domain::Search => "search",
@@ -1306,8 +1371,8 @@ fn main() {
                     },
                     spec.min,
                     spec.max,
-                    spec.step,
-                    spec.weight,
+                    spec.c_end,
+                    spec.r_end,
                     spec.description
                 );
             }

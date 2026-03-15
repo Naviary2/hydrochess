@@ -139,39 +139,37 @@ cargo run --release --bin spsa --features sprt,param_tuning -- run
 | Option | Default | Description |
 |--------|---------|-------------|
 | `run --iterations <N>` | `100` | Number of SPSA iterations |
-| `run --pairs <N>` | `200` | Paired openings per iteration; total games = `pairs * 2` |
-| `run --checkpoint-every <N>` | `50` | Save a checkpoint every N iterations |
+| `run --pairs <N>` | `400` | Paired openings per iteration; total games = `pairs * 2` |
+| `run --checkpoint-every <N>` | `1` | Save a checkpoint every N iterations |
 | `run --resume <PATH>` | latest checkpoint | Resume from a specific checkpoint |
 | `run --fresh` | off | Ignore checkpoints and start from defaults |
-| `run --tc <TC>` | `5+0.05` | Time control: `base+inc`, `depth N`, or `fixed Ns` |
+| `run --tc <TC>` | `3+0.03` | Time control: `base+inc`, `depth N`, or `fixed Ns` |
 | `run --concurrency <N>` | `16` | Number of parallel game workers |
 | `run --variants <LIST>` | default set | Comma-separated variant list |
 | `run --adjudication <N>` | `2000` | Material eval threshold for adjudication |
 | `run --max-moves <N>` | `300` | Maximum plies before forced draw |
 | `run --search-noise <N>` | `50` | Noise amplitude for first 8 ply |
 | `run --params <SELECTOR>` | `all` | Parameter preset or comma-separated names |
-| `run --config <PATH>` | none | Optional JSON override for bounds/defaults/step/weight |
+| `run --config <PATH>` | none | Optional JSON override for bounds/defaults/`c_end`/`r_end` |
 | `run --results <PATH>` | `sprt/spsa_final.json` | Final result JSON output |
 | `run --games <PATH>` | off | Write latest iteration ICNs as JSON |
-| `run --a <F>` | `160.0` | SPSA learning-rate scale |
-| `run --big-a <F>` | `10.0` | SPSA stability constant |
+| `run --big-a <F>` | `iterations / 10` | SPSA stability constant `A` |
 | `run --alpha <F>` | `0.602` | SPSA learning-rate decay |
-| `run --c <F>` | `1.0` | SPSA perturbation scale |
 | `run --gamma <F>` | `0.101` | SPSA perturbation decay |
 | `run --verbose` | off | Inherit search subprocess stderr |
-| `list --params <SELECTOR>` | `all` | Print selected tunables with bounds and SPSA metadata |
+| `list --params <SELECTOR>` | `all` | Print selected tunables with bounds, `c_end`, and `R_end` |
 | `apply --input <PATH>` | latest checkpoint | Apply tuned constants back into Rust source |
 | `revert --params <SELECTOR>` | `all` | Revert selected constants back to defaults |
 
 ### Tuning Config Overrides
 
-`--config` accepts a JSON object keyed by parameter name. Each entry can override any subset of `default`, `min`, `max`, `step`, and `weight`.
+`--config` accepts a JSON object keyed by parameter name. Each entry can override any subset of `default`, `min`, `max`, `c_end`, and `r_end`.
 
 ```json
 {
-  "pawn": { "min": 80, "max": 130, "step": 2, "weight": 1.0 },
-  "knight": { "min": 180, "max": 340, "step": 4, "weight": 0.9 },
-  "razoring_linear": { "min": 300, "max": 650, "step": 16 }
+  "knight": { "min": 180, "max": 340, "c_end": 4.0, "r_end": 0.0020 },
+  "bishop": { "default": 430, "c_end": 4.0, "r_end": 0.0015 },
+  "razoring_linear": { "min": 300, "max": 650, "c_end": 16.0, "r_end": 0.0020 }
 }
 ```
 

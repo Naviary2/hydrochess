@@ -65,7 +65,7 @@ enum Commands {
         /// Variants to test (comma-separated list)
         #[arg(
             long,
-            default_value = "Classical,Confined_Classical,Classical_Plus,Core,CoaIP,CoaIP_HO,CoaIP_RO,CoaIP_NO,Palace,Pawndard,Standarch,Space_Classic,Space,Knightline"
+            default_value = "Classical,Confined_Classical,Classical_Plus,Core,CoaIP,CoaIP_HO,CoaIP_RO,CoaIP_NO,Palace,Pawndard,Standarch,Space_Classic,Space,Knightline,Scattered_Leapers"
         )]
         variants: String,
 
@@ -1167,5 +1167,3 @@ fn main() {
         }
     }
 }
-
-

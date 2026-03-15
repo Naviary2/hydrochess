@@ -154,6 +154,7 @@ impl Variant {
             "Knightline" => Variant::Knightline,
             "Obstocean" => Variant::Obstocean,
             "Chess" => Variant::Chess,
+            "Scattered_Leapers" | "Scattered Leapers" => Variant::ScatteredLeapers,
             _ => Variant::Classical, // Default fallback
         }
     }
