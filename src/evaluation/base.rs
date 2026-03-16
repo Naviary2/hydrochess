@@ -6,10 +6,10 @@ use std::cell::UnsafeCell;
 
 use crate::search::params::{
     archbishop, bishop, camel, centaur, chancellor_bonus, eg_bishop_pair_bonus,
-    eg_doubled_pawn_penalty, eg_outpost_bonus, giraffe, guard, hawk, huygen, knightrider,
-    knight, mg_bishop_pair_bonus, mg_doubled_pawn_penalty, mg_outpost_bonus, pawn,
-    queen_open_file_bonus, queen_semi_open_file_bonus, queen_value, rook, rook_open_file_bonus,
-    rook_semi_open_file_bonus, rose, zebra,
+    eg_doubled_pawn_penalty, eg_outpost_bonus, giraffe, guard, hawk, huygen, knight, knightrider,
+    mg_bishop_pair_bonus, mg_doubled_pawn_penalty, mg_outpost_bonus, pawn, queen_open_file_bonus,
+    queen_semi_open_file_bonus, queen_value, rook, rook_open_file_bonus, rook_semi_open_file_bonus,
+    rose, zebra,
 };
 
 // 2-Bucket LRU pawn structure cache
@@ -190,20 +190,20 @@ macro_rules! bump_feat {
 
 pub const DEFAULT_EVAL_PAWN: i32 = 100;
 pub const DEFAULT_EVAL_KNIGHT: i32 = 250;
-pub const DEFAULT_EVAL_BISHOP: i32 = 450;
-pub const DEFAULT_EVAL_ROOK: i32 = 650;
-pub const DEFAULT_EVAL_GUARD: i32 = 220;
-pub const DEFAULT_EVAL_CENTAUR: i32 = 550;
-pub const DEFAULT_EVAL_COMPOUND_BONUS: i32 = 50;
+pub const DEFAULT_EVAL_BISHOP: i32 = 434;
+pub const DEFAULT_EVAL_ROOK: i32 = 646;
+pub const DEFAULT_EVAL_GUARD: i32 = 224;
+pub const DEFAULT_EVAL_CENTAUR: i32 = 566;
+pub const DEFAULT_EVAL_COMPOUND_BONUS: i32 = 46;
 pub const DEFAULT_EVAL_CAMEL: i32 = 270;
-pub const DEFAULT_EVAL_GIRAFFE: i32 = 260;
-pub const DEFAULT_EVAL_ZEBRA: i32 = 260;
-pub const DEFAULT_EVAL_KNIGHTRIDER: i32 = 700;
-pub const DEFAULT_EVAL_HAWK: i32 = 600;
-pub const DEFAULT_EVAL_ARCHBISHOP: i32 = 900;
-pub const DEFAULT_EVAL_ROSE: i32 = 450;
-pub const DEFAULT_EVAL_HUYGEN: i32 = 355;
-pub const DEFAULT_EVAL_CHANCELLOR_BONUS: i32 = 100;
+pub const DEFAULT_EVAL_GIRAFFE: i32 = 268;
+pub const DEFAULT_EVAL_ZEBRA: i32 = 272;
+pub const DEFAULT_EVAL_KNIGHTRIDER: i32 = 720;
+pub const DEFAULT_EVAL_HAWK: i32 = 632;
+pub const DEFAULT_EVAL_ARCHBISHOP: i32 = 908;
+pub const DEFAULT_EVAL_ROSE: i32 = 700;
+pub const DEFAULT_EVAL_HUYGEN: i32 = 363;
+pub const DEFAULT_EVAL_CHANCELLOR_BONUS: i32 = 116;
 pub const DEFAULT_EVAL_MG_DOUBLED_PAWN_PENALTY: i32 = 8;
 pub const DEFAULT_EVAL_EG_DOUBLED_PAWN_PENALTY: i32 = 12;
 pub const DEFAULT_EVAL_MG_BISHOP_PAIR_BONUS: i32 = 60;
@@ -225,16 +225,16 @@ pub fn get_piece_value_base(piece_type: PieceType) -> i32 {
 
         // orthodox - adjusted for infinite chess where sliders dominate
         PieceType::Pawn => pawn(),
-        PieceType::Knight => knight(), // Weak in infinite chess
-        PieceType::Bishop => bishop(), // Strong slider
-        PieceType::Rook => rook(),     // Very strong in infinite chess
-        PieceType::Queen => queen_value(),   // > 2 rooks
+        PieceType::Knight => knight(),     // Weak in infinite chess
+        PieceType::Bishop => bishop(),     // Strong slider
+        PieceType::Rook => rook(),         // Very strong in infinite chess
+        PieceType::Queen => queen_value(), // > 2 rooks
         PieceType::Guard => guard(),
 
         // short / medium range
-        PieceType::Camel => camel(),   // (1,3) leaper
+        PieceType::Camel => camel(),     // (1,3) leaper
         PieceType::Giraffe => giraffe(), // (1,4) leaper
-        PieceType::Zebra => zebra(),   // (2,3) leaper
+        PieceType::Zebra => zebra(),     // (2,3) leaper
 
         // riders / compounds
         PieceType::Knightrider => knightrider(),
@@ -393,7 +393,6 @@ const EG_KING_OPEN_FILE_PENALTY: i32 = 10;
 // Structural
 const MG_CONNECTED_PAWN_BONUS: i32 = 8;
 const EG_CONNECTED_PAWN_BONUS: i32 = 15; // Chains critical in EG
-
 
 const MG_KING_DEFENDER_BONUS: i32 = 6;
 const EG_KING_DEFENDER_BONUS: i32 = 2; // Less need for defenders
