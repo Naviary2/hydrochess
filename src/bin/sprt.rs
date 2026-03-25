@@ -483,6 +483,10 @@ fn play_game(
     let mut game = GameState::new();
     game.setup_position_from_icn(variant.starting_icn());
     game.variant = Some(variant);
+    
+    // Explicitly set world bounds for this variant to ensure they're correct
+    let bounds = variant.get_default_bounds();
+    hydrochess_wasm::moves::set_world_bounds(bounds.0, bounds.1, bounds.2, bounds.3);
 
     let starting_board_setup = get_board_setup_icn(&game);
 
