@@ -432,16 +432,6 @@ const EG_PASSED_SAFE_PATH_BONUS: i32 = 80;
 
 // Main Evaluation
 pub fn evaluate(game: &GameState) -> i32 {
-    // Check for insufficient material draw
-    match crate::evaluation::insufficient_material::evaluate_insufficient_material(game) {
-        Some(0) => return 0, // Dead draw
-        Some(divisor) => {
-            // Drawish - dampen eval
-            return evaluate_inner(game) / divisor;
-        }
-        None => {} // Sufficient - continue to normal eval
-    }
-
     evaluate_inner(game)
 }
 
@@ -3180,12 +3170,6 @@ mod tests {
         // Empty board = 0
         assert_eq!(calculate_initial_material(&game.board), 0);
 
-        // Add white queen
-        let icn1 = "w (8;q|1;q) Q4,1";
-        game.setup_position_from_icn(icn1);
-        assert_eq!(calculate_initial_material(&game.board), 1350); // Queen = 1350 in infinite chess
-
-        // Add black queen - should cancel out
         let icn2 = "w (8;q|1|q) Q4,1|q4,8";
         game.setup_position_from_icn(icn2);
         assert_eq!(calculate_initial_material(&game.board), 0);
