@@ -85,7 +85,7 @@ Afterwards you can drop the games JSON into [the ICN validator](https://infinite
 
 ## Web UI
 
-For visual feedback and interactive configuration, use the browser-based SPRT.
+For visual feedback and interactive configuration, use the browser-based SPRT. You'll need Node for this.
 
 ### Step 1: Build the baseline
 

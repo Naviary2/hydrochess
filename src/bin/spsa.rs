@@ -1,4 +1,4 @@
-﻿use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -768,10 +768,7 @@ fn compute_coefficients(
             let ck = ck_for(spec, iteration, iterations, gamma);
             let ak = ak_for(spec, iteration, iterations, big_a, alpha);
             let rk = ak / (ck * ck);
-            (
-                spec.name.to_string(),
-                SpsaCoefficients { ck, rk },
-            )
+            (spec.name.to_string(), SpsaCoefficients { ck, rk })
         })
         .collect()
 }
@@ -790,10 +787,7 @@ fn perturb(
             let spec = map[name.as_str()];
             let ck = coeffs[name].ck;
             let offset = sign * ck * delta[name] as f64;
-            (
-                name.clone(),
-                spec.clamp(*value + offset),
-            )
+            (name.clone(), spec.clamp(*value + offset))
         })
         .collect()
 }
@@ -1060,9 +1054,11 @@ fn apply_selected_values(theta: &BTreeMap<String, f64>) {
                     search_const_name(spec.name),
                     quantized,
                 )),
-                Domain::Eval => {
-                    eval_updates.push((spec.name.to_string(), eval_const_name(spec.name), quantized))
-                }
+                Domain::Eval => eval_updates.push((
+                    spec.name.to_string(),
+                    eval_const_name(spec.name),
+                    quantized,
+                )),
             }
         }
     }

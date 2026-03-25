@@ -1046,7 +1046,10 @@ mod tests {
             Coordinate::new(4, 5),
             Piece::new(PieceType::Queen, PlayerColor::White),
         );
-        assert!(!StagedMoveGen::move_gives_check_fast(&no_enemy_royal, &queen));
+        assert!(!StagedMoveGen::move_gives_check_fast(
+            &no_enemy_royal,
+            &queen
+        ));
     }
 
     #[test]

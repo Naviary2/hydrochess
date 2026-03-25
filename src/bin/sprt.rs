@@ -5,7 +5,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use hydrochess_wasm::Engine;
 use hydrochess_wasm::Variant;
-use hydrochess_wasm::board::{Coordinate, PlayerColor, PieceType};
+use hydrochess_wasm::board::{Coordinate, PieceType, PlayerColor};
 use hydrochess_wasm::game::GameState;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -327,12 +327,17 @@ fn make_position_key(game: &GameState) -> String {
     let mut castling_rights = String::new();
 
     for color in [PlayerColor::White, PlayerColor::Black] {
-        let color_char = if color == PlayerColor::White { 'w' } else { 'b' };
+        let color_char = if color == PlayerColor::White {
+            'w'
+        } else {
+            'b'
+        };
 
         // Find king
-        let king_pos = game.board.iter().find(|(_, _, piece)| {
-            piece.color() == color && piece.piece_type() == PieceType::King
-        });
+        let king_pos = game
+            .board
+            .iter()
+            .find(|(_, _, piece)| piece.color() == color && piece.piece_type() == PieceType::King);
 
         if let Some((king_x, king_y, _)) = king_pos {
             let king_coord = Coordinate::new(king_x, king_y);
@@ -405,7 +410,11 @@ fn make_position_key(game: &GameState) -> String {
     };
 
     // Combine all components
-    let turn_char = if game.turn == PlayerColor::White { 'w' } else { 'b' };
+    let turn_char = if game.turn == PlayerColor::White {
+        'w'
+    } else {
+        'b'
+    };
     format!(
         "{}|{}|{}|{}|{}",
         turn_char,
@@ -437,7 +446,7 @@ fn detect_terminal_state(game: &GameState) -> Option<TerminalState> {
                 PlayerColor::Black => game.game_rules.white_win_condition,
                 PlayerColor::Neutral => return Some(TerminalState::Draw("stalemate")),
             };
-            
+
             return match opponent_win_condition {
                 hydrochess_wasm::game::WinCondition::RoyalCapture => {
                     Some(TerminalState::RoyalCapture {
@@ -483,7 +492,7 @@ fn play_game(
     let mut game = GameState::new();
     game.setup_position_from_icn(variant.starting_icn());
     game.variant = Some(variant);
-    
+
     // Explicitly set world bounds for this variant to ensure they're correct
     let bounds = variant.get_default_bounds();
     hydrochess_wasm::moves::set_world_bounds(bounds.0, bounds.1, bounds.2, bounds.3);
@@ -881,7 +890,7 @@ fn play_game(
                     }
                 }
             }
-            
+
             if USER_STOP.load(Ordering::SeqCst) {
                 return GameOutcome {
                     result: GameResult::Draw, // Dummy result
@@ -937,7 +946,11 @@ fn play_game(
                 } else {
                     GameResult::Loss
                 };
-                return game_outcome!(result, "allpiecescaptured", if white_won { "1-0" } else { "0-1" });
+                return game_outcome!(
+                    result,
+                    "allpiecescaptured",
+                    if white_won { "1-0" } else { "0-1" }
+                );
             }
             TerminalState::AllRoyalsCaptured { white_won } => {
                 let result = if white_won == new_plays_white {
@@ -945,7 +958,11 @@ fn play_game(
                 } else {
                     GameResult::Loss
                 };
-                return game_outcome!(result, "allroyalscaptured", if white_won { "1-0" } else { "0-1" });
+                return game_outcome!(
+                    result,
+                    "allroyalscaptured",
+                    if white_won { "1-0" } else { "0-1" }
+                );
             }
             TerminalState::RoyalCapture { white_won } => {
                 let result = if white_won == new_plays_white {
@@ -953,7 +970,11 @@ fn play_game(
                 } else {
                     GameResult::Loss
                 };
-                return game_outcome!(result, "royalcapture", if white_won { "1-0" } else { "0-1" });
+                return game_outcome!(
+                    result,
+                    "royalcapture",
+                    if white_won { "1-0" } else { "0-1" }
+                );
             }
             TerminalState::Draw(reason) => {
                 return game_outcome!(GameResult::Draw, reason, "1/2-1/2");
@@ -967,7 +988,7 @@ fn play_game(
     if final_repetition_count >= 3 {
         return game_outcome!(GameResult::Draw, "threefold repetition", "1/2-1/2");
     }
-    
+
     game_outcome!(GameResult::Draw, "max_moves", "1/2-1/2")
 }
 
@@ -1022,13 +1043,13 @@ fn get_board_setup_icn(game: &GameState) -> String {
     };
 
     // Include win conditions if they differ from standard checkmate
-    let win_cond_token = if game.game_rules.white_win_condition != hydrochess_wasm::game::WinCondition::Checkmate
+    let win_cond_token = if game.game_rules.white_win_condition
+        != hydrochess_wasm::game::WinCondition::Checkmate
         || game.game_rules.black_win_condition != hydrochess_wasm::game::WinCondition::Checkmate
     {
         format!(
             "{:?},{:?}",
-            game.game_rules.white_win_condition,
-            game.game_rules.black_win_condition
+            game.game_rules.white_win_condition, game.game_rules.black_win_condition
         )
         .to_lowercase()
     } else {
@@ -1043,7 +1064,13 @@ fn get_board_setup_icn(game: &GameState) -> String {
     } else {
         format!(
             "{}{} 0/{} 1 {} {} {} {}",
-            variant_tag, turn_str, move_limit, promo_token, bounds_token, win_cond_token, pieces_str
+            variant_tag,
+            turn_str,
+            move_limit,
+            promo_token,
+            bounds_token,
+            win_cond_token,
+            pieces_str
         )
     }
 }
@@ -1202,14 +1229,27 @@ fn main() {
                 let mut parsed = Vec::new();
                 for name in variants.split(',') {
                     let name_lower = name.to_lowercase().replace(' ', "_");
-                    let known = matches!(name_lower.as_str(),
-                        "classical" | "confined_classical" |
-                        "classical_plus" | "coaip" |
-                        "coaip_ho" | "coaip_ro" | "coaip_no" | "palace" | "pawndard" |
-                        "core" | "standarch" | "space_classic" |
-                        "space" | "abundance" | "pawn_horde" |
-                        "knightline" | "obstocean" | "chess" |
-                        "scattered_leapers"
+                    let known = matches!(
+                        name_lower.as_str(),
+                        "classical"
+                            | "confined_classical"
+                            | "classical_plus"
+                            | "coaip"
+                            | "coaip_ho"
+                            | "coaip_ro"
+                            | "coaip_no"
+                            | "palace"
+                            | "pawndard"
+                            | "core"
+                            | "standarch"
+                            | "space_classic"
+                            | "space"
+                            | "abundance"
+                            | "pawn_horde"
+                            | "knightline"
+                            | "obstocean"
+                            | "chess"
+                            | "scattered_leapers"
                     );
                     if !known {
                         eprintln!("Error: Unknown variant '{}'", name);

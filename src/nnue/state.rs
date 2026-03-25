@@ -205,7 +205,6 @@ impl NnueState {
                 }
             }
 
-
             if (m.to.x - m.from.x).abs() > 1
                 && let Some(rook_from) = m.rook_coord
                 && let Some(rook) = gs.board.get_piece(rook_from.x, rook_from.y)
@@ -262,7 +261,7 @@ impl NnueState {
                     }
                 }
             }
-            
+
             // Remove old king pos
             if let Some(idx) = super::features::relkp_feature_id(
                 them,

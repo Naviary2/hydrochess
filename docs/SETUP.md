@@ -13,7 +13,6 @@ The following tools are required to build and test the engine. If you don't have
 - **Git** - For version control
 - **Rust** - The programming language
 - **wasm-pack** - Tool for building Rust to WebAssembly
-- **Node.js** (optional) - For running SPRT and SPSA tests
 
 ---
 

@@ -838,7 +838,10 @@ mod tests {
 
     #[test]
     fn variant_aliases_and_default_bounds_are_stable() {
-        assert_eq!(Variant::parse("Confined Classical"), Variant::ConfinedClassical);
+        assert_eq!(
+            Variant::parse("Confined Classical"),
+            Variant::ConfinedClassical
+        );
         assert_eq!(
             Variant::parse("Chess on an Infinite Plane - Huygens Option"),
             Variant::CoaIPHO

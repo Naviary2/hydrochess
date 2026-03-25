@@ -1,4 +1,4 @@
-﻿use crate::board::{PieceType, PlayerColor};
+use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::evaluate;
 use crate::game::GameState;
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures};
@@ -4814,7 +4814,9 @@ fn quiescence(
         if must_escape {
             // Stand-pat was suppressed; return static eval as an approximation.
             #[cfg(feature = "nnue")]
-            { return evaluate(game, nnue); }
+            {
+                return evaluate(game, nnue);
+            }
             #[cfg(not(feature = "nnue"))]
             return evaluate(game);
         }
@@ -5685,7 +5687,16 @@ mod tests {
         let alpha = -10000;
         let beta = 10000;
         #[cfg(feature = "nnue")]
-        let score = quiescence(&mut searcher, &mut game, 0, 0, alpha, beta, NodeType::PV, None);
+        let score = quiescence(
+            &mut searcher,
+            &mut game,
+            0,
+            0,
+            alpha,
+            beta,
+            NodeType::PV,
+            None,
+        );
         #[cfg(not(feature = "nnue"))]
         let score = quiescence(&mut searcher, &mut game, 0, 0, alpha, beta, NodeType::PV);
         assert!(score.abs() < 500); // Should be near zero for balanced empty board
