@@ -189,7 +189,7 @@ macro_rules! bump_feat {
 }
 
 pub const DEFAULT_EVAL_PAWN: i32 = 100;
-pub const DEFAULT_EVAL_KNIGHT: i32 = 250;
+pub const DEFAULT_EVAL_KNIGHT: i32 = 255;
 pub const DEFAULT_EVAL_BISHOP: i32 = 434;
 pub const DEFAULT_EVAL_ROOK: i32 = 646;
 pub const DEFAULT_EVAL_GUARD: i32 = 224;
@@ -206,8 +206,8 @@ pub const DEFAULT_EVAL_HUYGEN: i32 = 363;
 pub const DEFAULT_EVAL_CHANCELLOR_BONUS: i32 = 116;
 pub const DEFAULT_EVAL_MG_DOUBLED_PAWN_PENALTY: i32 = 8;
 pub const DEFAULT_EVAL_EG_DOUBLED_PAWN_PENALTY: i32 = 12;
-pub const DEFAULT_EVAL_MG_BISHOP_PAIR_BONUS: i32 = 60;
-pub const DEFAULT_EVAL_EG_BISHOP_PAIR_BONUS: i32 = 80;
+pub const DEFAULT_EVAL_MG_BISHOP_PAIR_BONUS: i32 = 70;
+pub const DEFAULT_EVAL_EG_BISHOP_PAIR_BONUS: i32 = 110;
 pub const DEFAULT_EVAL_ROOK_OPEN_FILE_BONUS: i32 = 45;
 pub const DEFAULT_EVAL_ROOK_SEMI_OPEN_FILE_BONUS: i32 = 20;
 pub const DEFAULT_EVAL_QUEEN_OPEN_FILE_BONUS: i32 = 25;
@@ -280,9 +280,9 @@ const SLIDER_NET_BONUS: i32 = 20;
 // drift too far from either.
 const FAR_SLIDER_CHEB_RADIUS: i64 = 18;
 const FAR_SLIDER_CHEB_MAX_EXCESS: i64 = 40;
-const FAR_QUEEN_PENALTY: i32 = 3;
-const FAR_BISHOP_PENALTY: i32 = 2;
-const FAR_ROOK_PENALTY: i32 = 2;
+const FAR_QUEEN_PENALTY: i32 = 6;
+const FAR_BISHOP_PENALTY: i32 = 5;
+const FAR_ROOK_PENALTY: i32 = 5;
 const PIECE_CLOUD_CHEB_RADIUS: i64 = 16;
 const SLIDER_AXIS_WIGGLE: i64 = 5; // A slider is "active" if its ray passes within 5 sq of center
 const PIECE_CLOUD_CHEB_MAX_EXCESS: i64 = 64;

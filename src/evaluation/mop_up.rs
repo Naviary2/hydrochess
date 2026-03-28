@@ -9,7 +9,7 @@ use crate::game::GameState;
 use crate::moves::{SpatialIndices, is_square_attacked};
 
 /// Threshold for disabling mop-up evaluation if the opponent still has significant material.
-const MOP_UP_THRESHOLD_PERCENT: u32 = 20;
+const MOP_UP_THRESHOLD_PERCENT: u32 = 15;
 
 #[derive(Clone, Copy)]
 struct SliderInfo {
