@@ -2309,6 +2309,22 @@ fn evaluate_king_shelter(
         (total_danger + (total_danger * total_danger / 800)) * defense_urgency / 100;
     safety -= final_penalty.min(400);
 
+    let mut safe_escapes = 0;
+    for i in 0..8 {
+        let (dist, _val, c, _pt) = king_rays[i];
+        if dist > 0 && c == color {
+            safe_escapes += 1;
+        }
+    }
+
+    let escape_penalty = match safe_escapes {
+        0 => taper(120, 160),
+        1 => taper(53, 80),
+        2 => taper(13, 27),
+        _ => 0,
+    };
+
+    safety -= escape_penalty;
     safety
 }
 
