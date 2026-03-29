@@ -432,15 +432,15 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
         } else if (endReason === 'checkmate') {
             termination = 'Checkmate';
         } else if (endReason === 'stalemate') {
-            termination = 'Draw by stalemate';
+            termination = 'Stalemate';
         } else if (endReason === 'threefold') {
-            termination = 'Draw by threefold repetition';
+            termination = 'Threefold repetition';
         } else if (endReason === 'fifty_move') {
-            termination = 'Draw by fifty-move rule';
+            termination = '50-move rule';
         } else if (endReason === 'insufficient_material') {
-            termination = 'Draw by insufficient material';
+            termination = 'Insufficient material';
         } else if (endReason === 'max_moves') {
-            termination = 'Draw by maximum moves reached';
+            termination = 'Maximum moves reached';
         }
 
         if (termination) {

@@ -964,7 +964,7 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
                     for (const s of texelSamples) {
                         s.result_token = '1/2-1/2';
                     }
-                    moveLines.push('# Draw by insufficient material');
+                    moveLines.push('# Insufficient material');
                     return { result: 'draw', log: moveLines.join('\n'), reason: 'insufficient_material', samples: texelSamples };
                 }
             } catch (e) {

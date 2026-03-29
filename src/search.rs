@@ -112,9 +112,6 @@ fn get_noise(seed: u64, hash: u64, amp: i32) -> i32 {
 }
 
 pub const MAX_PLY: usize = 64;
-/// Maximum recursive depth within quiescence search.
-/// Bounds check/evasion chain blowup: without this, qsearch can expand exponentially
-/// on check-heavy positions (B^D nodes, B = evasion branching factor, D = chain depth).
 pub const MAX_QSEARCH_DEPTH: usize = 16;
 pub const INFINITY: i32 = 1_000_000;
 pub const MATE_VALUE: i32 = 900_000;
@@ -122,7 +119,7 @@ pub const MATE_SCORE: i32 = 800_000;
 pub const THINK_TIME_MS: u128 = 3000; // 3 seconds per move (default, may be overridden by caller)
 
 pub const MAX_SITE_SKILL: u32 = 3; // Current max skill level on the site
-pub const MAX_PV_COUNT: usize = 4; // MultiPV lines to use
+pub const MAX_PV_COUNT: usize = 4; // MultiPV lines to use when limiting strength
 
 #[inline(always)]
 pub const fn mate_in(ply: usize) -> i32 {
