@@ -1704,16 +1704,16 @@ fn compute_attack_bonus_optimized(
         }
     }
 
-    const ATTACK_BONUS_PER_OPEN_RAY: i32 = 12;
+    const ATTACK_BONUS_PER_OPEN_RAY: i32 = 16;
     let diag_bonus = if our_diag_count > 0 && open_diag_rays > 0 {
-        let mult = 100 + (our_diag_count - 1).max(0) * 25;
+        let mult = 100 + (our_diag_count - 1).max(0) * 35;
         open_diag_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
     } else {
         0
     };
 
     let ortho_bonus = if our_ortho_count > 0 && open_ortho_rays > 0 {
-        let mult = 100 + (our_ortho_count - 1).max(0) * 25;
+        let mult = 100 + (our_ortho_count - 1).max(0) * 35;
         open_ortho_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
     } else {
         0
