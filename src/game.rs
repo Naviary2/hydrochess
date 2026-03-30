@@ -1462,10 +1462,6 @@ impl GameState {
             return false;
         }
 
-        if crate::evaluation::insufficient_material::evaluate_insufficient_material(self) {
-            return true;
-        }
-
         // Draw by fifty-move rule: only if we aren't in checkmate
         if let Some(limit) = self.game_rules.move_rule_limit {
             // If not in check, rule50 draw is immediate.

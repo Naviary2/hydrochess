@@ -781,9 +781,9 @@ impl Engine {
         self.game.is_in_check()
     }
 
-    /// Returns true if either side has sufficient material to force checkmate.
+    /// Returns true if either side has sufficient material to checkmate (including helpmate)
     pub fn is_sufficient_material(&self) -> bool {
-        !evaluation::insufficient_material::evaluate_insufficient_material(&self.game)
+        !evaluation::insufficient_material::evaluate_insufficient_material_game_handler(&self.game)
     }
 }
 

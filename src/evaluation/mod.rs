@@ -69,6 +69,9 @@ fn compute_mop_up_term(game: &GameState) -> i32 {
 #[inline]
 #[cfg(feature = "nnue")]
 pub fn evaluate(game: &GameState, nnue_state: Option<&crate::nnue::NnueState>) -> i32 {
+    if insufficient_material::evaluate_insufficient_material(game) {
+        return 0;
+    }
     let raw_eval = match game.variant {
         Some(Variant::Chess) => variants::chess::evaluate(game),
         Some(Variant::Obstocean) => variants::obstocean::evaluate(game) + compute_mop_up_term(game),
@@ -104,6 +107,9 @@ pub fn evaluate(game: &GameState, nnue_state: Option<&crate::nnue::NnueState>) -
 #[inline]
 #[cfg(not(feature = "nnue"))]
 pub fn evaluate(game: &GameState) -> i32 {
+    if insufficient_material::evaluate_insufficient_material(game) {
+        return 0;
+    }
     let raw_eval = match game.variant {
         Some(Variant::Chess) => variants::chess::evaluate(game),
         Some(Variant::Obstocean) => variants::obstocean::evaluate(game) + compute_mop_up_term(game),

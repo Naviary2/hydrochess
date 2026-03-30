@@ -723,6 +723,233 @@ fn compute(game: &crate::game::GameState) -> bool {
     w_insuff && b_insuff
 }
 
+/// Returns true if the combination of (attacker, defender) material represents
+/// a helpmate-possible endgame that game handlers should NOT auto-declare as a draw.
+/// Both `a` and `b` are already "individually insufficient" at this point.
+/// Detects cross-board combinations where helpmate is theoretically possible
+/// despite both sides being individually insufficient.
+#[inline]
+fn is_helpmate_only_combo(a: &Mat, b: &Mat) -> bool {
+    // R+B vs Q (either direction)
+    let rb_vs_q = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && (x.bishops_maj + x.bishops_min) == 1
+            && x.queens == 0
+            && x.knights == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.queens == 1
+            && y.rooks == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rb_vs_q(a, b) || rb_vs_q(b, a) {
+        return true;
+    }
+
+    // R+N vs Q (either direction)
+    let rn_vs_q = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && x.knights == 1
+            && x.queens == 0
+            && (x.bishops_maj + x.bishops_min) == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.queens == 1
+            && y.rooks == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rn_vs_q(a, b) || rn_vs_q(b, a) {
+        return true;
+    }
+
+    // R+N vs R (either direction)
+    let rn_vs_r = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && x.knights == 1
+            && x.queens == 0
+            && (x.bishops_maj + x.bishops_min) == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.rooks == 1
+            && y.queens == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rn_vs_r(a, b) || rn_vs_r(b, a) {
+        return true;
+    }
+
+    // Two pieces vs pawn (pawn not yet promoted)
+    let rb_vs_p = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && (x.bishops_maj + x.bishops_min) == 1
+            && x.queens == 0
+            && x.knights == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.pawns >= 1
+            && y.queens == 0
+            && y.rooks == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == y.pawns as u8
+    };
+    if rb_vs_p(a, b) || rb_vs_p(b, a) {
+        return true;
+    }
+
+    // Two pieces vs pawn (pawn not yet promoted)
+    let rn_vs_p = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && x.knights == 1
+            && x.queens == 0
+            && (x.bishops_maj + x.bishops_min) == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.pawns >= 1
+            && y.queens == 0
+            && y.rooks == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == y.pawns as u8
+    };
+    if rn_vs_p(a, b) || rn_vs_p(b, a) {
+        return true;
+    }
+
+    false
+}
+
+/// Game-handler variant of `compute`.  Uses raw pawn counts (no pawn→promotion
+/// substitution) and excludes cross-board combinations where helpmate is possible
+/// despite both sides being individually insufficient.
+#[inline(always)]
+fn compute_game_handler(game: &crate::game::GameState) -> bool {
+    let bordered = crate::moves::get_world_size() <= 200;
+    // Do NOT substitute pawns with promoted pieces — use actual board material.
+    let (w, b) = count_both(&game.board, &game.game_rules, None);
+
+    let w_nr = w.non_royal();
+    let b_nr = b.non_royal();
+
+    // Special: only royals on both sides
+    if w_nr == 0 && b_nr == 0 {
+        if w.kings > 0 && b.kings > 0 && w.royal_centaurs == 0 && b.royal_centaurs == 0 {
+            return true;
+        }
+        if w.royal_centaurs > 0 && b.royal_centaurs > 0 && w.kings == 0 && b.kings == 0 {
+            return true;
+        }
+    }
+
+    // Special: royal centaur vs amazon (unbounded)
+    if !bordered {
+        if b.royal_centaurs == 1
+            && w.amazons == 1
+            && w_nr == 1
+            && b_nr == 0
+            && w.kings == 0
+            && w.royal_centaurs == 0
+            && b.kings == 0
+        {
+            return true;
+        }
+        if w.royal_centaurs == 1
+            && b.amazons == 1
+            && b_nr == 1
+            && w_nr == 0
+            && b.kings == 0
+            && b.royal_centaurs == 0
+            && w.kings == 0
+        {
+            return true;
+        }
+    }
+
+    // Cross-color: K+R vs K+R (unbounded)
+    if !bordered
+        && w.kings >= 1
+        && b.kings >= 1
+        && w.rooks == 1
+        && b.rooks == 1
+        && w_nr == 1
+        && b_nr == 1
+    {
+        return true;
+    }
+
+    // Special: 2K + R vs K
+    if w.kings >= 2 && w.rooks == 1 && w_nr == 1 && b.kings >= 1 && b_nr == 0 {
+        return false;
+    }
+    if b.kings >= 2 && b.rooks == 1 && b_nr == 1 && w.kings >= 1 && w_nr == 0 {
+        return false;
+    }
+
+    let w_insuff = if bordered {
+        is_insufficient_bordered(&w)
+    } else {
+        is_insufficient(&w)
+    };
+    if !w_insuff {
+        return false;
+    }
+    let b_insuff = if bordered {
+        is_insufficient_bordered(&b)
+    } else {
+        is_insufficient(&b)
+    };
+    if !b_insuff {
+        return false;
+    }
+
+    // Both sides are individually insufficient. Check for helpmate-only combos
+    // that game handlers must not auto-declare as draws.
+    if is_helpmate_only_combo(&w, &b) {
+        return false;
+    }
+
+    true
+}
+
+/// Returns true if the position is a draw by insufficient material for game
+/// handler purposes.  Unlike `evaluate_insufficient_material`, this function:
+///   - does NOT substitute pawns with their best promotion piece, and
+///   - does NOT classify helpmate-only endgames (R+B vs Q, R+N vs R,
+///     R+B vs unpromotable/non-queen-promotable P, R+N vs P) as draws.
+#[inline]
+pub fn evaluate_insufficient_material_game_handler(game: &crate::game::GameState) -> bool {
+    if (game.white_piece_count + game.black_piece_count) >= 6 {
+        return false;
+    }
+
+    if game.game_rules.white_win_condition != crate::game::WinCondition::Checkmate
+        || game.game_rules.black_win_condition != crate::game::WinCondition::Checkmate
+    {
+        return false;
+    }
+    
+    compute_game_handler(game)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
