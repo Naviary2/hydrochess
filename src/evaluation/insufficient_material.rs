@@ -793,6 +793,69 @@ fn is_helpmate_only_combo(a: &Mat, b: &Mat) -> bool {
         return true;
     }
 
+    // R+B vs R (either direction)
+    let rb_vs_r = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && (x.bishops_maj + x.bishops_min) == 1
+            && x.queens == 0
+            && x.knights == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && y.rooks == 1
+            && y.queens == 0
+            && y.knights == 0
+            && (y.bishops_maj + y.bishops_min) == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rb_vs_r(a, b) || rb_vs_r(b, a) {
+        return true;
+    }
+
+    // R+B vs B (either direction)
+    let rb_vs_b = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && (x.bishops_maj + x.bishops_min) == 1
+            && x.queens == 0
+            && x.knights == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && (y.bishops_maj + y.bishops_min) == 1
+            && y.queens == 0
+            && y.rooks == 0
+            && y.knights == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rb_vs_b(a, b) || rb_vs_b(b, a) {
+        return true;
+    }
+
+    // R+N vs B (either direction)
+    let rn_vs_b = |x: &Mat, y: &Mat| {
+        x.rooks == 1
+            && x.knights == 1
+            && x.queens == 0
+            && (x.bishops_maj + x.bishops_min) == 0
+            && x.pawns == 0
+            && no_exotic_pieces(x)
+            && x.non_royal() == 2
+            && (y.bishops_maj + y.bishops_min) == 1
+            && y.queens == 0
+            && y.rooks == 0
+            && y.knights == 0
+            && y.pawns == 0
+            && no_exotic_pieces(y)
+            && y.non_royal() == 1
+    };
+    if rn_vs_b(a, b) || rn_vs_b(b, a) {
+        return true;
+    }
+
     // Two pieces vs pawn (pawn not yet promoted)
     let rb_vs_p = |x: &Mat, y: &Mat| {
         x.rooks == 1

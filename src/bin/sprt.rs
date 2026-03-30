@@ -919,7 +919,7 @@ fn play_game(
             // Engine returned no move. Check if there are legal moves available.
             // If yes, this is a real engine failure. If no, treat as stalemate.
             let has_legal_moves = with_variant_bounds(variant, || {
-                game.get_legal_moves_count() > 0
+                !game.get_legal_moves().is_empty()
             });
 
             if !has_legal_moves {

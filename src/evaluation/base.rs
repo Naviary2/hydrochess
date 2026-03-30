@@ -1671,10 +1671,19 @@ pub fn evaluate_king_safety_traced<T: EvaluationTracer>(
         b_attack += compute_attack_bonus_optimized(w_king_rays, metrics.black_slider_counts);
     }
 
-    tracer.record("King: Shelter", w_safety, b_safety);
-    tracer.record("King: Attack", w_attack, b_attack);
+    let mut w_storm: i32 = 0;
+    let mut b_storm: i32 = 0;
+    for &bk in black_royals {
+        w_storm += compute_pawn_storm_bonus(white_pawns, &bk, true, phase);
+    }
+    for &wk in white_royals {
+        b_storm += compute_pawn_storm_bonus(black_pawns, &wk, false, phase);
+    }
 
-    (w_safety + w_attack) - (b_safety + b_attack)
+    tracer.record("King: Shelter", w_safety, b_safety);
+    tracer.record("King: Attack", w_attack + w_storm, b_attack + b_storm);
+
+    (w_safety + w_attack + w_storm) - (b_safety + b_attack + b_storm)
 }
 
 fn compute_attack_bonus_optimized(
@@ -1720,6 +1729,61 @@ fn compute_attack_bonus_optimized(
     };
 
     diag_bonus + ortho_bonus
+}
+
+fn compute_pawn_storm_bonus(
+    our_pawns: &[(i64, i64)],
+    enemy_king: &Coordinate,
+    is_white: bool,
+    phase: i32,
+) -> i32 {
+    let taper =
+        |mg: i32, eg: i32| -> i32 { ((mg * phase) + (eg * (MAX_PHASE - phase))) / MAX_PHASE };
+
+    let mut storm_total: i32 = 0;
+    let mut storm_count: i32 = 0;
+
+    for &(px, py) in our_pawns {
+        let file_dist = (px - enemy_king.x).abs();
+        if file_dist > 3 {
+            continue;
+        }
+
+        let rank_toward_king = if is_white {
+            enemy_king.y - py
+        } else {
+            py - enemy_king.y
+        };
+
+        if rank_toward_king < 1 || rank_toward_king > 6 {
+            continue;
+        }
+
+        let advance_bonus: i32 = match rank_toward_king {
+            1 => 30,
+            2 => 20,
+            3 => 12,
+            4 => 6,
+            5 => 3,
+            _ => 1,
+        };
+
+        let file_scale: i32 = match file_dist {
+            0 => 110,
+            1 => 100,
+            2 => 80,
+            _ => 60,
+        };
+
+        storm_total += advance_bonus * file_scale / 100;
+        storm_count += 1;
+    }
+
+    if storm_count >= 2 {
+        storm_total = storm_total * (100 + (storm_count - 1) * 12) / 100;
+    }
+
+    taper(storm_total, storm_total * 40 / 100)
 }
 
 #[allow(clippy::too_many_arguments)]
