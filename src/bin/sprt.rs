@@ -916,28 +916,6 @@ fn play_game(
                 };
             }
 
-            // Engine returned no move. Check if there are legal moves available.
-            // If yes, this is a real engine failure. If no, treat as stalemate.
-            let has_legal_moves = with_variant_bounds(variant, || {
-                !game.get_legal_moves().is_empty()
-            });
-
-            if !has_legal_moves {
-                // No legal moves and not in check = stalemate
-                let in_check = game.is_in_check();
-                if !in_check {
-                    return game_outcome!(GameResult::Draw, "stalemate", "1/2-1/2");
-                }
-                // No legal moves and in check = checkmate (should have been caught above)
-                let result = if game.turn == PlayerColor::White {
-                    GameResult::Loss
-                } else {
-                    GameResult::Win
-                };
-                let white_won = (result == GameResult::Win) == new_plays_white;
-                return game_outcome!(result, "checkmate", if white_won { "1-0" } else { "0-1" });
-            }
-
             termination_reason = Some("engine failure");
             let result = if is_new_turn {
                 GameResult::Loss
