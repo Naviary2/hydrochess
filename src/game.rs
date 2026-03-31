@@ -5095,25 +5095,25 @@ mod tests {
 
     #[test]
     fn test_is_draw_king_vs_king() {
-        let mut game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8");
+        let game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8");
 
-        assert!(game.is_draw(5, false));
+        assert!(crate::evaluation::insufficient_material::evaluate_insufficient_material(&game));
     }
 
     #[test]
     fn test_is_draw_with_non_pawn_material() {
-        let mut game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8|R4,1");
+        let game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8|R4,1");
 
         // With rook material, not a draw
-        let result = game.is_draw(5, false);
+        let result = crate::evaluation::insufficient_material::evaluate_insufficient_material(&game);
         // Just verify it returns a boolean without panicking
         let _ = result;
     }
 
     #[test]
     fn test_is_draw_returns_boolean() {
-        let mut game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8");
-        let is_draw = game.is_draw(5, false);
+        let game = create_test_game_from_icn("w (8;q|1;q) K5,1|k5,8");
+        let is_draw = crate::evaluation::insufficient_material::evaluate_insufficient_material(&game);
 
         // Should return true for K vs K
         assert_eq!(is_draw, true);
