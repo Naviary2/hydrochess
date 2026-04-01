@@ -282,6 +282,7 @@ jobs:
             lines.push(`Settings: SPRT[${elo0},${elo1}] \u03b1=${alpha} \u03b2=${beta} | TC=${s.tc ?? '?'} | ${varCount} variants | Adjudication: ${adjudication} cp | min/max games: ${minGames}/${maxG}`);
             lines.push('');
           }
+          // Heuristic verdict based on Elo confidence interval
           if (typeof data.elo === 'number' && games > 0) {
             const elo = data.elo;
             const err = typeof data.elo_error === 'number' ? data.elo_error : 0;

@@ -1462,8 +1462,7 @@ fn main() {
                 );
             }
 
-            println!();
-            println!("Starting SPRT with Configuration:");
+            println!("\nStarting SPRT with Configuration:");
             print_commit_context(&config.new_commit_info, &config.old_commit_info);
             print_settings_context(&config);
             println!();
