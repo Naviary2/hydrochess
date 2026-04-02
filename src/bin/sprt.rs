@@ -241,19 +241,10 @@ fn print_commit_context(new_info: &Option<CommitInfo>, old_info: &Option<CommitI
 /// Print the compact settings lines (shared by startup banner and final summary).
 fn print_settings_context(config: &Config) {
     println!(
-        "  Bounds: [{}, {}] Elo | \u{03b1}={}, \u{03b2}={}",
-        config.elo0, config.elo1, config.alpha, config.beta
-    );
-    println!(
-        "  TC: {} | Concurrency: {} | Variants: {} | Adjudication: {} cp | Min/Max games: {}/{}",
+        "  TC: {} | Variants: {} | Adjudication: {} cp",
         config.tc,
-        config.concurrency,
         config.variants.len(),
         config.adjudication_threshold,
-        config.min_games,
-        config
-            .max_games
-            .map_or_else(|| "\u{221e}".to_string(), |m| m.to_string()),
     );
 }
 
