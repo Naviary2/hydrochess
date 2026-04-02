@@ -515,6 +515,8 @@ fn play_game(
     let mut move_info_log = Vec::new();
     let mut move_history_clean: Vec<String> = Vec::new();
     let mut repetition_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_eval_new: Option<i32> = None;
+    let mut last_eval_old: Option<i32> = None;
     let termination_reason;
 
     let get_eval = |g: &GameState| {
@@ -632,18 +634,44 @@ fn play_game(
             return game_outcome!(GameResult::Draw, "threefold repetition", "1/2-1/2");
         }
 
-        // Material adjudication (after terminal checks)
-        if variant != Variant::PawnHorde {
-            let eval = get_eval(&game);
-            if eval.abs() >= config.adjudication_threshold {
-                let white_winning = eval > 0;
-                let result = if white_winning == new_plays_white {
-                    GameResult::Win
+        // Material adjudication (after terminal checks, only if both engines agree)
+        // Requires at least 20 plies and both engines to have provided evals
+        if variant != Variant::PawnHorde && move_history_clean.len() >= 20 && last_eval_new.is_some() && last_eval_old.is_some() {
+            let threshold = config.adjudication_threshold;
+            if threshold > 0 {
+                let eval_new = last_eval_new.unwrap();
+                let eval_old = last_eval_old.unwrap();
+                
+                // Determine winner from each engine's eval
+                let new_winner = if eval_new >= threshold {
+                    Some('w')
+                } else if eval_new <= -threshold {
+                    Some('b')
                 } else {
-                    GameResult::Loss
+                    None
                 };
-                let result_str = if white_winning { "1-0" } else { "0-1" };
-                return game_outcome!(result, "material adjudication", result_str);
+                
+                let old_winner = if eval_old >= threshold {
+                    Some('w')
+                } else if eval_old <= -threshold {
+                    Some('b')
+                } else {
+                    None
+                };
+                
+                // Only adjudicate if both engines agree on the same winner
+                if let (Some(new_w), Some(old_w)) = (new_winner, old_winner) {
+                    if new_w == old_w {
+                        let white_winning = new_w == 'w';
+                        let result = if white_winning == new_plays_white {
+                            GameResult::Win
+                        } else {
+                            GameResult::Loss
+                        };
+                        let result_str = if white_winning { "1-0" } else { "0-1" };
+                        return game_outcome!(result, "material adjudication", result_str);
+                    }
+                }
             }
         }
 
@@ -838,6 +866,16 @@ fn play_game(
             {
                 let key = make_position_key(&game);
                 *repetition_counts.entry(key).or_insert(0) += 1;
+            }
+
+            // Update evaluation tracking for the engine that just moved
+            if variant != Variant::PawnHorde {
+                let eval = get_eval(&game);
+                if is_new_turn {
+                    last_eval_new = Some(eval);
+                } else {
+                    last_eval_old = Some(eval);
+                }
             }
 
             // Update clocks (after the move, it's now the other side's turn)
