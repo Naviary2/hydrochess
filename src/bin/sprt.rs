@@ -241,8 +241,9 @@ fn print_commit_context(new_info: &Option<CommitInfo>, old_info: &Option<CommitI
 /// Print the compact settings lines (shared by startup banner and final summary).
 fn print_settings_context(config: &Config) {
     println!(
-        "  TC: {} | Variants: {} | Adjudication: {} cp",
+        "  TC: {} | Concurrency: {} | Variants: {} | Adjudication: {} cp",
         config.tc,
+        config.concurrency,
         config.variants.len(),
         config.adjudication_threshold,
     );
