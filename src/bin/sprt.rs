@@ -1643,7 +1643,13 @@ fn main() {
             print_settings_context(&config);
             let (elo, err) = estimate_elo(wins, losses, draws);
             println!("  Elo: {:.1} +/- {:.1}", elo, err);
-            println!("  Record: {}W - {}L - {}D", wins, losses, draws);
+            println!(
+                "  Record: {}W - {}L - {}D ({} total)",
+                wins,
+                losses,
+                draws,
+                wins + losses + draws
+            );
             if timeout_losses > 0 {
                 println!(
                     "  ALERT: {} games ended by timeout (NEW ENGINE ONLY)",
