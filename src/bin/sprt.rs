@@ -7,10 +7,15 @@ use hydrochess_wasm::Engine;
 use hydrochess_wasm::Variant;
 use hydrochess_wasm::board::{Coordinate, PieceType, PlayerColor};
 use hydrochess_wasm::game::GameState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Commit SHA and date baked in at compile time by build.rs.
+const BUILD_COMMIT: Option<&str> = option_env!("SPRT_GIT_COMMIT");
+const BUILD_DATE: Option<&str> = option_env!("SPRT_GIT_DATE");
+const BUILD_DIRTY: Option<&str> = option_env!("SPRT_GIT_DIRTY");
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -97,7 +102,19 @@ enum Commands {
         /// Print verbose engine info
         #[arg(long, default_value_t = false)]
         verbose: bool,
+
+        /// Git commit SHA for the new engine (overrides the build-time embedded value)
+        #[arg(long)]
+        new_commit: Option<String>,
+
+        /// Git commit SHA for the old engine (overrides the value embedded in the old binary)
+        #[arg(long)]
+        old_commit: Option<String>,
     },
+
+    /// Print the commit SHA and date baked into this binary at build time (JSON output).
+    /// Used internally by the run manager to identify which snapshot the old binary was built from.
+    CommitInfo,
 
     /// Internal interface for subprocess move generation
     Search {
@@ -147,6 +164,109 @@ enum Commands {
     },
 }
 
+/// Commit identity: short SHA plus an optional date string (YYYY-MM-DD) and dirty flag.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CommitInfo {
+    commit: String,
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    dirty: bool,
+}
+
+impl CommitInfo {
+    /// Format for display: "abc12345 (2024-01-15)" or "abc12345 (dirty)" or "abc12345 (2024-01-15, dirty)".
+    fn display_str(&self) -> String {
+        let mut result = self.commit.clone();
+        let mut suffix = String::new();
+        
+        if !self.date.is_empty() {
+            suffix.push_str(&self.date);
+        }
+        
+        if self.dirty {
+            if !suffix.is_empty() {
+                suffix.push_str(", dirty");
+            } else {
+                suffix.push_str("dirty");
+            }
+        }
+        
+        if !suffix.is_empty() {
+            result.push_str(&format!(" ({})", suffix));
+        }
+        
+        result
+    }
+}
+
+/// Best-effort: get the author-date (YYYY-MM-DD) for the given git revision.
+/// Returns an empty string when git is unavailable or the revision is unknown.
+fn get_commit_date_from_git(sha: &str) -> String {
+    Command::new("git")
+        .args(["log", "-1", "--format=%cs", sha])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Query `bin_path commit-info` to get the commit info embedded in that binary at build time.
+/// Returns `None` if the binary doesn't support the subcommand or its output can't be parsed.
+fn try_query_binary_commit_info(bin_path: &str) -> Option<CommitInfo> {
+    let output = Command::new(bin_path)
+        .arg("commit-info")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let json = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    serde_json::from_str::<CommitInfo>(&json)
+        .ok()
+        .filter(|c| !c.commit.is_empty())
+}
+
+/// Try to resolve a git commit SHA (short 8-char) and author-date for `rev`.
+/// Silently returns `None` if git is unavailable or `rev` cannot be resolved.
+fn try_get_commit_info_from_git(rev: &str) -> Option<CommitInfo> {
+    let sha_out = Command::new("git")
+        .args(["rev-parse", "--short=7", rev])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let commit = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
+    if commit.is_empty() {
+        return None;
+    }
+    let date = get_commit_date_from_git(rev);
+    Some(CommitInfo { commit, date, dirty: false })
+}
+
+/// Print the "NEW: … vs OLD: …" commit identity line (shared by startup banner and final summary).
+fn print_commit_context(new_info: &Option<CommitInfo>, old_info: &Option<CommitInfo>) {
+    match (new_info, old_info) {
+        (Some(nc), Some(oc)) => println!(
+            "  NEW: {}  vs  OLD: {}",
+            nc.display_str(),
+            oc.display_str()
+        ),
+        (Some(nc), None) => println!("  NEW: {}  vs  OLD: (unknown)", nc.display_str()),
+        (None, Some(oc)) => println!("  NEW: (unknown)  vs  OLD: {}", oc.display_str()),
+        (None, None) => {}
+    }
+}
+
+/// Print the compact settings lines (shared by startup banner and final summary).
+fn print_settings_context(config: &Config) {
+    println!(
+        "  TC: {} | Concurrency: {} | Variants: {} | Adjudication: {} cp",
+        config.tc,
+        config.concurrency,
+        config.variants.len(),
+        config.adjudication_threshold,
+    );
+}
+
 #[derive(Clone, Debug)]
 struct Config {
     elo0: f64,
@@ -169,6 +289,8 @@ struct Config {
     search_noise: i32,
     old_strength: u32,
     verbose: bool,
+    new_commit_info: Option<CommitInfo>,
+    old_commit_info: Option<CommitInfo>,
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -515,6 +637,8 @@ fn play_game(
     let mut move_info_log = Vec::new();
     let mut move_history_clean: Vec<String> = Vec::new();
     let mut repetition_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_eval_new: Option<i32> = None;
+    let mut last_eval_old: Option<i32> = None;
     let termination_reason;
 
     let get_eval = |g: &GameState| {
@@ -632,18 +756,44 @@ fn play_game(
             return game_outcome!(GameResult::Draw, "threefold repetition", "1/2-1/2");
         }
 
-        // Material adjudication (after terminal checks)
-        if variant != Variant::PawnHorde {
-            let eval = get_eval(&game);
-            if eval.abs() >= config.adjudication_threshold {
-                let white_winning = eval > 0;
-                let result = if white_winning == new_plays_white {
-                    GameResult::Win
+        // Material adjudication (after terminal checks, only if both engines agree)
+        // Requires at least 20 plies and both engines to have provided evals
+        if variant != Variant::PawnHorde && move_history_clean.len() >= 20 && last_eval_new.is_some() && last_eval_old.is_some() {
+            let threshold = config.adjudication_threshold;
+            if threshold > 0 {
+                let eval_new = last_eval_new.unwrap();
+                let eval_old = last_eval_old.unwrap();
+                
+                // Determine winner from each engine's eval
+                let new_winner = if eval_new >= threshold {
+                    Some('w')
+                } else if eval_new <= -threshold {
+                    Some('b')
                 } else {
-                    GameResult::Loss
+                    None
                 };
-                let result_str = if white_winning { "1-0" } else { "0-1" };
-                return game_outcome!(result, "material adjudication", result_str);
+                
+                let old_winner = if eval_old >= threshold {
+                    Some('w')
+                } else if eval_old <= -threshold {
+                    Some('b')
+                } else {
+                    None
+                };
+                
+                // Only adjudicate if both engines agree on the same winner
+                if let (Some(new_w), Some(old_w)) = (new_winner, old_winner) {
+                    if new_w == old_w {
+                        let white_winning = new_w == 'w';
+                        let result = if white_winning == new_plays_white {
+                            GameResult::Win
+                        } else {
+                            GameResult::Loss
+                        };
+                        let result_str = if white_winning { "1-0" } else { "0-1" };
+                        return game_outcome!(result, "material adjudication", result_str);
+                    }
+                }
             }
         }
 
@@ -838,6 +988,16 @@ fn play_game(
             {
                 let key = make_position_key(&game);
                 *repetition_counts.entry(key).or_insert(0) += 1;
+            }
+
+            // Update evaluation tracking for the engine that just moved
+            if variant != Variant::PawnHorde {
+                let eval = get_eval(&game);
+                if is_new_turn {
+                    last_eval_new = Some(eval);
+                } else {
+                    last_eval_old = Some(eval);
+                }
             }
 
             // Update clocks (after the move, it's now the other side's turn)
@@ -1181,6 +1341,8 @@ fn main() {
             search_noise,
             old_strength,
             verbose,
+            new_commit,
+            old_commit,
         }) => {
             let concurrency = concurrency.unwrap_or_else(|| {
                 std::thread::available_parallelism()
@@ -1295,7 +1457,33 @@ fn main() {
                 search_noise,
                 old_strength,
                 verbose,
+                new_commit_info: None,
+                old_commit_info: None,
             };
+
+            // Resolve old commit info: explicit CLI arg > query the old binary itself.
+            config.old_commit_info = if let Some(sha) = old_commit {
+                let date = get_commit_date_from_git(&sha);
+                Some(CommitInfo { commit: sha, date, dirty: false })
+            } else {
+                try_query_binary_commit_info(&config.old_bin)
+            };
+
+            // Resolve new commit info: explicit CLI arg > build-time embedded value > git HEAD.
+            config.new_commit_info = if let Some(sha) = new_commit {
+                let date = get_commit_date_from_git(&sha);
+                Some(CommitInfo { commit: sha, date, dirty: false })
+            } else if let Some(commit) = BUILD_COMMIT.filter(|s| !s.is_empty()) {
+                let is_dirty = BUILD_DIRTY.map(|d| d == "1").unwrap_or(false);
+                Some(CommitInfo {
+                    commit: commit.to_string(),
+                    date: BUILD_DATE.unwrap_or("").to_string(),
+                    dirty: is_dirty,
+                })
+            } else {
+                try_get_commit_info_from_git("HEAD")
+            };
+
             let games_path = games;
             let results_path = results;
 
@@ -1324,10 +1512,10 @@ fn main() {
                 );
             }
 
-            println!(
-                "Starting SPRT: elo0={}, elo1={}, tc={}, concurrency={}\n",
-                config.elo0, config.elo1, tc, config.concurrency
-            );
+            println!("\nStarting SPRT with Configuration:");
+            print_commit_context(&config.new_commit_info, &config.old_commit_info);
+            print_settings_context(&config);
+            println!();
 
             let (lower, upper) = (
                 (config.beta / (1.0 - config.alpha)).ln(),
@@ -1500,10 +1688,18 @@ fn main() {
                 println!("\nRun stopped by user.");
             }
 
-            println!("\nFinal Summary:");
+            println!("\n\nFinal Summary:");
+            print_commit_context(&config.new_commit_info, &config.old_commit_info);
+            print_settings_context(&config);
             let (elo, err) = estimate_elo(wins, losses, draws);
             println!("  Elo: {:.1} +/- {:.1}", elo, err);
-            println!("  Record: {}W - {}L - {}D", wins, losses, draws);
+            println!(
+                "  Record: {}W - {}L - {}D ({} total)",
+                wins,
+                losses,
+                draws,
+                wins + losses + draws
+            );
             if timeout_losses > 0 {
                 println!(
                     "  ALERT: {} games ended by timeout (NEW ENGINE ONLY)",
@@ -1528,7 +1724,29 @@ fn main() {
             }
             if let Some(path) = results_path {
                 #[derive(Serialize)]
+                struct ResultSettings {
+                    tc: String,
+                    elo0: f64,
+                    elo1: f64,
+                    alpha: f64,
+                    beta: f64,
+                    concurrency: usize,
+                    variant_count: usize,
+                    adjudication: i32,
+                    min_games: usize,
+                    max_games: Option<usize>,
+                }
+                #[derive(Serialize)]
                 struct FinalResults {
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    new_commit: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    new_commit_date: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    old_commit: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    old_commit_date: Option<String>,
+                    settings: ResultSettings,
                     wins: usize,
                     losses: usize,
                     draws: usize,
@@ -1542,6 +1760,36 @@ fn main() {
                 let final_llr = calculate_llr(wins, losses, draws, config.elo0, config.elo1);
                 let (final_elo, final_err) = estimate_elo(wins, losses, draws);
                 let res = FinalResults {
+                    new_commit: config
+                        .new_commit_info
+                        .as_ref()
+                        .map(|c| c.commit.clone()),
+                    new_commit_date: config
+                        .new_commit_info
+                        .as_ref()
+                        .filter(|c| !c.date.is_empty())
+                        .map(|c| c.date.clone()),
+                    old_commit: config
+                        .old_commit_info
+                        .as_ref()
+                        .map(|c| c.commit.clone()),
+                    old_commit_date: config
+                        .old_commit_info
+                        .as_ref()
+                        .filter(|c| !c.date.is_empty())
+                        .map(|c| c.date.clone()),
+                    settings: ResultSettings {
+                        tc: config.tc.clone(),
+                        elo0: config.elo0,
+                        elo1: config.elo1,
+                        alpha: config.alpha,
+                        beta: config.beta,
+                        concurrency: config.concurrency,
+                        variant_count: config.variants.len(),
+                        adjudication: config.adjudication_threshold,
+                        min_games: config.min_games,
+                        max_games: config.max_games,
+                    },
                     wins,
                     losses,
                     draws,
@@ -1636,6 +1884,15 @@ fn main() {
                 eprintln!("PANIC in search subprocess: {}", msg);
                 println!("bestmove none");
             }
+        }
+        Some(Commands::CommitInfo) => {
+            let is_dirty = BUILD_DIRTY.map(|d| d == "1").unwrap_or(false);
+            let info = CommitInfo {
+                commit: BUILD_COMMIT.unwrap_or("").to_string(),
+                date: BUILD_DATE.unwrap_or("").to_string(),
+                dirty: is_dirty,
+            };
+            println!("{}", serde_json::to_string(&info).unwrap());
         }
         None => {
             println!("Use --help for usage. SPRT CLI requires a subcommand.");
