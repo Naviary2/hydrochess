@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // Commit SHA and date baked in at compile time by build.rs.
 const BUILD_COMMIT: Option<&str> = option_env!("SPRT_GIT_COMMIT");
 const BUILD_DATE: Option<&str> = option_env!("SPRT_GIT_DATE");
+const BUILD_DIRTY: Option<&str> = option_env!("SPRT_GIT_DIRTY");
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -163,22 +164,39 @@ enum Commands {
     },
 }
 
-/// Commit identity: short SHA plus an optional date string (YYYY-MM-DD).
+/// Commit identity: short SHA plus an optional date string (YYYY-MM-DD) and dirty flag.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CommitInfo {
     commit: String,
     #[serde(default)]
     date: String,
+    #[serde(default)]
+    dirty: bool,
 }
 
 impl CommitInfo {
-    /// Format for display: "abc12345 (2024-01-15)" or just "abc12345" when date is absent.
+    /// Format for display: "abc12345 (2024-01-15)" or "abc12345 (dirty)" or "abc12345 (2024-01-15, dirty)".
     fn display_str(&self) -> String {
-        if self.date.is_empty() {
-            self.commit.clone()
-        } else {
-            format!("{} ({})", self.commit, self.date)
+        let mut result = self.commit.clone();
+        let mut suffix = String::new();
+        
+        if !self.date.is_empty() {
+            suffix.push_str(&self.date);
         }
+        
+        if self.dirty {
+            if !suffix.is_empty() {
+                suffix.push_str(", dirty");
+            } else {
+                suffix.push_str("dirty");
+            }
+        }
+        
+        if !suffix.is_empty() {
+            result.push_str(&format!(" ({})", suffix));
+        }
+        
+        result
     }
 }
 
@@ -221,7 +239,7 @@ fn try_get_commit_info_from_git(rev: &str) -> Option<CommitInfo> {
         return None;
     }
     let date = get_commit_date_from_git(rev);
-    Some(CommitInfo { commit, date })
+    Some(CommitInfo { commit, date, dirty: false })
 }
 
 /// Print the "NEW: … vs OLD: …" commit identity line (shared by startup banner and final summary).
@@ -1408,7 +1426,7 @@ fn main() {
             // Resolve old commit info: explicit CLI arg > query the old binary itself.
             config.old_commit_info = if let Some(sha) = old_commit {
                 let date = get_commit_date_from_git(&sha);
-                Some(CommitInfo { commit: sha, date })
+                Some(CommitInfo { commit: sha, date, dirty: false })
             } else {
                 try_query_binary_commit_info(&config.old_bin)
             };
@@ -1416,11 +1434,13 @@ fn main() {
             // Resolve new commit info: explicit CLI arg > build-time embedded value > git HEAD.
             config.new_commit_info = if let Some(sha) = new_commit {
                 let date = get_commit_date_from_git(&sha);
-                Some(CommitInfo { commit: sha, date })
+                Some(CommitInfo { commit: sha, date, dirty: false })
             } else if let Some(commit) = BUILD_COMMIT.filter(|s| !s.is_empty()) {
+                let is_dirty = BUILD_DIRTY.map(|d| d == "1").unwrap_or(false);
                 Some(CommitInfo {
                     commit: commit.to_string(),
                     date: BUILD_DATE.unwrap_or("").to_string(),
+                    dirty: is_dirty,
                 })
             } else {
                 try_get_commit_info_from_git("HEAD")
@@ -1828,9 +1848,11 @@ fn main() {
             }
         }
         Some(Commands::CommitInfo) => {
+            let is_dirty = BUILD_DIRTY.map(|d| d == "1").unwrap_or(false);
             let info = CommitInfo {
                 commit: BUILD_COMMIT.unwrap_or("").to_string(),
                 date: BUILD_DATE.unwrap_or("").to_string(),
+                dirty: is_dirty,
             };
             println!("{}", serde_json::to_string(&info).unwrap());
         }
