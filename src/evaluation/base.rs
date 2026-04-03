@@ -11,9 +11,6 @@ use crate::search::params::{
     mg_bishop_pair_bonus, mg_doubled_pawn_penalty, mg_outpost_bonus, pawn, queen_open_file_bonus,
     queen_semi_open_file_bonus, queen_value, rook, rook_open_file_bonus, rook_semi_open_file_bonus,
     rose, zebra,
-    // Attack units params
-    queen_attack_units, rook_attack_units, bishop_attack_units, knightrider_attack_units,
-    rose_attack_units, huygen_attack_units, leaper_attack_units, attack_weights,
 };
 
 // 2-Bucket LRU pawn structure cache
@@ -295,32 +292,6 @@ pub fn get_centrality_weight(piece_type: PieceType) -> i64 {
     }
 }
 
-// ==================== King Attack Units System ====================
-// Stockfish-style attack units: pieces attacking the enemy king zone accumulate units
-// Two attackers are more than twice as dangerous as one (non-linear scaling via lookup)
-const KING_ATTACK_ZONE_RADIUS: i64 = 5;
-
-// Attack unit values (tunable): how many units each piece type contributes when attacking the king zone
-pub const DEFAULT_EVAL_QUEEN_ATTACK_UNITS: i32 = 5;
-pub const DEFAULT_EVAL_ROOK_ATTACK_UNITS: i32 = 3;
-pub const DEFAULT_EVAL_BISHOP_ATTACK_UNITS: i32 = 2;
-pub const DEFAULT_EVAL_KNIGHTRIDER_ATTACK_UNITS: i32 = 2;
-pub const DEFAULT_EVAL_ROSE_ATTACK_UNITS: i32 = 4;      // Circular knight rider - very powerful on large boards (8 directions × multiple squares)
-pub const DEFAULT_EVAL_HUYGEN_ATTACK_UNITS: i32 = 2;    // Prime-distance orthogonal slider
-pub const DEFAULT_EVAL_LEAPER_ATTACK_UNITS: i32 = 1;    // Standard bounded-range leapers (Guard, Camel, Giraffe, Zebra, Hawk, Centaur, Knight)
-
-// Non-linear attack weight lookup: ~6*n^2 curve (exponential danger from coordinated attacks)
-pub const DEFAULT_EVAL_ATTACK_WEIGHTS: [i32; 8] = [
-    0,      // 0 units
-    6,      // 1 unit
-    24,     // 2 units
-    54,     // 3 units
-    96,     // 4 units
-    150,    // 5 units
-    216,    // 6 units
-    280,    // 7+ units
-];
-
 // King attack heuristics - back near original scale
 // These should be impactful but not dominate material.
 const SLIDER_NET_BONUS: i32 = 20;
@@ -582,10 +553,6 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
     let mut w_minor_threats = 0;
     let mut b_minor_threats = 0;
 
-    // Attack units accumulation (Stockfish-style king attack)
-    let mut w_attack_units = 0;
-    let mut b_attack_units = 0;
-
     // Readiness counts (Unified Loop)
     let mut w_sliders_in_zone = 0;
     let mut b_sliders_in_zone = 0;
@@ -765,12 +732,10 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 } else {
                                     0
                                 };
-                                let units = get_attack_units_for_piece(pt);
 
                                 if is_white {
-                                    // Unified pass through BLACK royals: slider zone, attack units, enemy tropism
+                                    // Unified pass through BLACK royals: slider zone, enemy tropism
                                     let mut slider_counted = false;
-                                    let mut units_counted = false;
                                     for &bk in black_royals {
                                         let dx = (x - bk.x).abs();
                                         let dy = (y - bk.y).abs();
@@ -779,11 +744,6 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                         if !slider_counted && is_slider && dx <= ATTACK_ZONE_RADIUS && dy <= ATTACK_ZONE_RADIUS {
                                             w_sliders_in_zone += 1;
                                             slider_counted = true;
-                                        }
-                                        // Count attack units once
-                                        if !units_counted && dx <= KING_ATTACK_ZONE_RADIUS && dy <= KING_ATTACK_ZONE_RADIUS {
-                                            w_attack_units = (w_attack_units + units).min(31);
-                                            units_counted = true;
                                         }
                                         // Tropism sums across all royals
                                         if piece_val > 0 {
@@ -800,9 +760,8 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                         }
                                     }
                                 } else {
-                                    // Unified pass through WHITE royals: slider zone, attack units, enemy tropism
+                                    // Unified pass through WHITE royals: slider zone, enemy tropism
                                     let mut slider_counted = false;
-                                    let mut units_counted = false;
                                     for &wk in white_royals {
                                         let dx = (x - wk.x).abs();
                                         let dy = (y - wk.y).abs();
@@ -811,11 +770,6 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                         if !slider_counted && is_slider && dx <= ATTACK_ZONE_RADIUS && dy <= ATTACK_ZONE_RADIUS {
                                             b_sliders_in_zone += 1;
                                             slider_counted = true;
-                                        }
-                                        // Count attack units once
-                                        if !units_counted && dx <= KING_ATTACK_ZONE_RADIUS && dy <= KING_ATTACK_ZONE_RADIUS {
-                                            b_attack_units = (b_attack_units + units).min(31);
-                                            units_counted = true;
                                         }
                                         // Tropism sums across all royals
                                         if piece_val > 0 {
@@ -1324,8 +1278,6 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                             black_slider_counts: (b_diag_count, b_ortho_count),
                             urgency: (w_urgency, b_urgency),
                             has_enemy_queen: (b_has_queen_threat, w_has_queen_threat),
-                            white_attack_units: w_attack_units,
-                            black_attack_units: b_attack_units,
                         };
                         score += evaluate_king_safety_traced(
                             game,
@@ -1777,8 +1729,6 @@ pub struct KingSafetyMetrics {
     pub black_slider_counts: (i32, i32),
     pub urgency: (i32, i32),           // (white_urgency, black_urgency)
     pub has_enemy_queen: (bool, bool), // (white_sees_queen, black_sees_queen)
-    pub white_attack_units: i32,       // Attack units from white pieces
-    pub black_attack_units: i32,       // Attack units from black pieces
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1829,43 +1779,20 @@ pub fn evaluate_king_safety_traced<T: EvaluationTracer>(
         );
     }
 
-    // Attack bonuses: synergistic combination of ray-based and units-based
-    // Rays detect open lines, units detect piece accumulation - together they're exponentially more dangerous
+    // Attack bonuses (using counts)
     if !black_royals.is_empty() {
         // White attacks Black
-        let ray_bonus = compute_attack_bonus_optimized(b_king_rays, metrics.white_slider_counts);
-        let units_bonus = compute_attack_bonus_from_units(metrics.white_attack_units);
-        let synergy = (ray_bonus * units_bonus) / 300; // Both present = amplification
-        w_attack += ray_bonus + units_bonus + synergy;
+        w_attack += compute_attack_bonus_optimized(b_king_rays, metrics.white_slider_counts);
     }
     if !white_royals.is_empty() {
         // Black attacks White
-        let ray_bonus = compute_attack_bonus_optimized(w_king_rays, metrics.black_slider_counts);
-        let units_bonus = compute_attack_bonus_from_units(metrics.black_attack_units);
-        let synergy = (ray_bonus * units_bonus) / 300; // Both present = amplification
-        b_attack += ray_bonus + units_bonus + synergy;
+        b_attack += compute_attack_bonus_optimized(w_king_rays, metrics.black_slider_counts);
     }
 
     tracer.record("King: Shelter", w_safety, b_safety);
     tracer.record("King: Attack", w_attack, b_attack);
 
     (w_safety + w_attack) - (b_safety + b_attack)
-}
-
-/// Get attack units contribution for a piece type attacking the enemy king zone.
-#[inline]
-fn get_attack_units_for_piece(piece_type: PieceType) -> i32 {
-    match piece_type {
-        PieceType::Queen | PieceType::RoyalQueen | PieceType::Amazon => queen_attack_units(),
-        PieceType::Rook | PieceType::Chancellor => rook_attack_units(),
-        PieceType::Bishop | PieceType::Archbishop => bishop_attack_units(),
-        PieceType::Knightrider => knightrider_attack_units(),
-        PieceType::Rose => rose_attack_units(),
-        PieceType::Huygen => huygen_attack_units(),
-        // Bounded-range leapers
-        PieceType::Knight | PieceType::Guard | PieceType::Camel | PieceType::Giraffe | PieceType::Zebra | PieceType::Hawk | PieceType::Centaur => leaper_attack_units(),
-        _ => 0,
-    }
 }
 
 /// Ray-based attack bonus: open rays toward enemy king with slider presence.
@@ -1913,13 +1840,6 @@ fn compute_attack_bonus_optimized(
 
     diag_bonus + ortho_bonus
 }
-
-/// Convert attack units to bonus via array lookup (non-linear scaling).
-#[inline]
-fn compute_attack_bonus_from_units(attack_units: i32) -> i32 {
-    attack_weights()[(attack_units as usize).min(7)]
-}
-
 
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_rook(
