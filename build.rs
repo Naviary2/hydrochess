@@ -28,9 +28,9 @@ fn main() {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
         
-        // Check if the worktree is dirty (has uncommitted changes).
+        // Check if the worktree is dirty (has uncommitted .rs files).
         let is_dirty = Command::new("git")
-            .args(["status", "--porcelain"])
+            .args(["status", "--porcelain", "--", "*.rs"])
             .output()
             .ok()
             .filter(|o| o.status.success())

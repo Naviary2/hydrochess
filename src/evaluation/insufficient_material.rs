@@ -178,7 +178,7 @@ fn is_insufficient(m: &Mat) -> bool {
     }
 
     // N with bishops
-    if m.knights == 1
+    if m.knights <= 2
         && m.bishops_maj >= 1
         && m.bishops_min <= 1
         && m.queens == 0
