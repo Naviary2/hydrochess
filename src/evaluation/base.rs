@@ -1,6 +1,5 @@
 ﻿use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
 use crate::game::GameState;
-use crate::attacks::{KNIGHT_OFFSETS, CAMEL_OFFSETS, GIRAFFE_OFFSETS, ZEBRA_OFFSETS, HAWK_OFFSETS, KING_OFFSETS};
 
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
@@ -216,26 +215,6 @@ pub const DEFAULT_EVAL_QUEEN_SEMI_OPEN_FILE_BONUS: i32 = 10;
 pub const DEFAULT_EVAL_MG_OUTPOST_BONUS: i32 = 20;
 pub const DEFAULT_EVAL_EG_OUTPOST_BONUS: i32 = 50;
 
-// ==================== Leaper Mobility Bonuses ====================
-// Mobility bonuses for bounded-range leapers (Knight, Guard, Camel, Giraffe, Zebra, Hawk)
-// Formula from Fairy-Stockfish: base * (count - 2) / (6 + count), saturating
-
-// Knight mobility bonus per square (max 8)
-const KNIGHT_MOBILITY_BONUS: [i32; 9] = [0, 2, 6, 12, 18, 24, 28, 30, 32];
-
-// Guard mobility bonus per square (max 8)
-const GUARD_MOBILITY_BONUS: [i32; 9] = [0, 1, 3, 6, 10, 14, 17, 19, 20];
-
-// Camel, Giraffe, Zebra (similar to knight, 8 moves max)
-const CAMEL_MOBILITY_BONUS: [i32; 9] = [0, 2, 5, 10, 14, 18, 21, 23, 25];
-const GIRAFFE_MOBILITY_BONUS: [i32; 9] = [0, 2, 5, 10, 14, 18, 21, 23, 25];
-const ZEBRA_MOBILITY_BONUS: [i32; 9] = [0, 2, 5, 10, 14, 18, 21, 23, 25];
-
-// Hawk (16 possible offsets)
-const HAWK_MOBILITY_BONUS: [i32; 17] = [
-    0, 1, 3, 6, 10, 14, 18, 22, 26, 29, 32, 34, 36, 37, 38, 39, 40
-];
-
 // Piece Values
 
 pub fn get_piece_value_base(piece_type: PieceType) -> i32 {
@@ -402,39 +381,14 @@ const EG_KING_TROPISM_BONUS: i32 = 6; // King centralized -> piece proximity mat
 const MG_KING_RING_MISSING_PENALTY: i32 = 45;
 const EG_KING_RING_MISSING_PENALTY: i32 = 20; // Less penalty in EG
 
-// Bonuses for having a pawn at distance 1, 2, 3 (distance = |rank_diff|)
-const MG_PAWN_SHELTER_DIST1_KING_FILE: i32 = 48;   // Pawn 1 rank from king on same file
-const MG_PAWN_SHELTER_DIST1_ADJACENT: i32 = 32;   // Pawn 1 rank from king on adjacent file
-const MG_PAWN_SHELTER_DIST1_OUTER: i32 = 16;      // Pawn 1 rank from king on outer file
+const MG_KING_PAWN_SHIELD_BONUS: i32 = 18;
+const EG_KING_PAWN_SHIELD_BONUS: i32 = 5; // Shield less critical
 
-const MG_PAWN_SHELTER_DIST2_KING_FILE: i32 = 28;
-const MG_PAWN_SHELTER_DIST2_ADJACENT: i32 = 18;
-const MG_PAWN_SHELTER_DIST2_OUTER: i32 = 8;
+const MG_KING_PAWN_AHEAD_PENALTY: i32 = 20;
+const EG_KING_PAWN_AHEAD_PENALTY: i32 = 5;
 
-const MG_PAWN_SHELTER_DIST3_KING_FILE: i32 = 12;
-const MG_PAWN_SHELTER_DIST3_ADJACENT: i32 = 6;
-const MG_PAWN_SHELTER_DIST3_OUTER: i32 = 0;
-
-const EG_PAWN_SHELTER_DIST1_KING_FILE: i32 = 8;
-const EG_PAWN_SHELTER_DIST1_ADJACENT: i32 = 4;
-const EG_PAWN_SHELTER_DIST1_OUTER: i32 = 0;
-
-const EG_PAWN_SHELTER_DIST2_KING_FILE: i32 = 4;
-const EG_PAWN_SHELTER_DIST2_ADJACENT: i32 = 2;
-const EG_PAWN_SHELTER_DIST2_OUTER: i32 = 0;
-
-const EG_PAWN_SHELTER_DIST3_KING_FILE: i32 = 2;
-const EG_PAWN_SHELTER_DIST3_ADJACENT: i32 = 1;
-const EG_PAWN_SHELTER_DIST3_OUTER: i32 = 0;
-
-// Penalties for MISSING pawns (no pawn at distance 1-3)
-const MG_PAWN_SHELTER_MISSING_KING_FILE: i32 = 52;   // Missing on king's file = severe
-const MG_PAWN_SHELTER_MISSING_ADJACENT: i32 = 32;    // Missing on adjacent = bad
-const MG_PAWN_SHELTER_MISSING_OUTER: i32 = 16;       // Missing on outer = moderate
-
-const EG_PAWN_SHELTER_MISSING_KING_FILE: i32 = 12;
-const EG_PAWN_SHELTER_MISSING_ADJACENT: i32 = 8;
-const EG_PAWN_SHELTER_MISSING_OUTER: i32 = 4;
+const MG_KING_OPEN_FILE_PENALTY: i32 = 25;
+const EG_KING_OPEN_FILE_PENALTY: i32 = 10;
 
 // Structural
 const MG_CONNECTED_PAWN_BONUS: i32 = 8;
@@ -1494,7 +1448,6 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
                 black_pawns,
             ),
             PieceType::Knight => evaluate_knight(
-                game,
                 x,
                 y,
                 piece.color(),
@@ -1508,42 +1461,34 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
             | PieceType::Camel
             | PieceType::Giraffe
             | PieceType::Zebra => evaluate_leaper_positioning(
-                game,
                 x,
                 y,
                 piece.color(),
                 cloud_center.as_ref(),
-                piece.piece_type(),
                 get_piece_value_base(piece.piece_type()),
             ),
             PieceType::Centaur | PieceType::RoyalCentaur => {
                 let leaper_eval = evaluate_leaper_positioning(
-                    game,
                     x,
                     y,
                     piece.color(),
                     cloud_center.as_ref(),
-                    piece.piece_type(),
                     get_piece_value_base(piece.piece_type()),
                 );
                 leaper_eval * CENTAUR_GUARD_SCALE / 100
             }
             PieceType::Huygen => evaluate_leaper_positioning(
-                game,
                 x,
                 y,
                 piece.color(),
                 cloud_center.as_ref(),
-                PieceType::Huygen,
                 get_piece_value_base(PieceType::Huygen),
             ),
             PieceType::Guard => evaluate_leaper_positioning(
-                game,
                 x,
                 y,
                 piece.color(),
                 cloud_center.as_ref(),
-                PieceType::Guard,
                 get_piece_value_base(PieceType::Guard),
             ),
             _ => 0,
@@ -1823,16 +1768,16 @@ fn compute_attack_bonus_optimized(
         }
     }
 
-    const ATTACK_BONUS_PER_OPEN_RAY: i32 = 16;
+    const ATTACK_BONUS_PER_OPEN_RAY: i32 = 12;
     let diag_bonus = if our_diag_count > 0 && open_diag_rays > 0 {
-        let mult = 80 + (our_diag_count - 1).max(0) * 28;
+        let mult = 100 + (our_diag_count - 1).max(0) * 25;
         open_diag_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
     } else {
         0
     };
 
     let ortho_bonus = if our_ortho_count > 0 && open_ortho_rays > 0 {
-        let mult = 120 + (our_ortho_count - 1).max(0) * 42;
+        let mult = 110 + (our_ortho_count - 1).max(0) * 30;
         open_ortho_rays * ATTACK_BONUS_PER_OPEN_RAY * mult / 100
     } else {
         0
@@ -2142,7 +2087,6 @@ pub fn evaluate_bishop(
 }
 
 fn evaluate_knight(
-    game: &GameState,
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -2154,12 +2098,10 @@ fn evaluate_knight(
     let taper =
         |mg: i32, eg: i32| -> i32 { ((mg * phase) + (eg * (MAX_PHASE - phase))) / MAX_PHASE };
     let mut bonus = evaluate_leaper_positioning(
-        game,
         x,
         y,
         color,
         cloud_center,
-        PieceType::Knight,
         get_piece_value_base(PieceType::Knight),
     );
 
@@ -2191,86 +2133,18 @@ fn evaluate_knight(
 
 // ==================== Fairy Piece Evaluation ====================
 
-/// Count the number of unblocked squares a leaper piece can move to.
-fn count_leaper_mobility(
-    game: &GameState,
-    x: i64,
-    y: i64,
-    piece_type: PieceType,
-    is_white: bool,
-) -> usize {
-    let offsets = match piece_type {
-        PieceType::Knight => &KNIGHT_OFFSETS[..],
-        PieceType::Guard => &KING_OFFSETS[..],
-        PieceType::Camel => &CAMEL_OFFSETS[..],
-        PieceType::Giraffe => &GIRAFFE_OFFSETS[..],
-        PieceType::Zebra => &ZEBRA_OFFSETS[..],
-        PieceType::Hawk => &HAWK_OFFSETS[..],
-        _ => return 0, // Not a standard leaper
-    };
-
-    let mut count = 0;
-    for &(dx, dy) in offsets {
-        let target_x = x + dx;
-        let target_y = y + dy;
-
-        // Check if the target square is occupied by an own piece
-        if game.board.is_occupied_by_color(target_x, target_y, if is_white { PlayerColor::White } else { PlayerColor::Black }) {
-            continue; // Skip this square
-        }
-
-        // The square is either empty or has an enemy piece (capturable)
-        count += 1;
-    }
-
-    count
-}
-
 /// Evaluate leaper pieces (Hawk, Rose, Camel, Giraffe, Zebra, etc.)
 /// Includes: (1) mobility bonus for counting unblocked squares, (2) cloud proximity
 fn evaluate_leaper_positioning(
-    game: &GameState,
     x: i64,
     y: i64,
-    color: PlayerColor,
+    _color: PlayerColor,
     cloud_center: Option<&Coordinate>,
-    piece_type: PieceType,
     piece_value: i32,
 ) -> i32 {
     let mut bonus: i32 = 0;
 
-    // 1. MOBILITY BONUS: count unblocked squares for standard leapers
-    let mobility = count_leaper_mobility(game, x, y, piece_type, color == PlayerColor::White);
-    let mobility_bonus = match piece_type {
-        PieceType::Knight => {
-            let idx = mobility.min(KNIGHT_MOBILITY_BONUS.len() - 1);
-            KNIGHT_MOBILITY_BONUS[idx]
-        }
-        PieceType::Guard => {
-            let idx = mobility.min(GUARD_MOBILITY_BONUS.len() - 1);
-            GUARD_MOBILITY_BONUS[idx]
-        }
-        PieceType::Camel => {
-            let idx = mobility.min(CAMEL_MOBILITY_BONUS.len() - 1);
-            CAMEL_MOBILITY_BONUS[idx]
-        }
-        PieceType::Giraffe => {
-            let idx = mobility.min(GIRAFFE_MOBILITY_BONUS.len() - 1);
-            GIRAFFE_MOBILITY_BONUS[idx]
-        }
-        PieceType::Zebra => {
-            let idx = mobility.min(ZEBRA_MOBILITY_BONUS.len() - 1);
-            ZEBRA_MOBILITY_BONUS[idx]
-        }
-        PieceType::Hawk => {
-            let idx = mobility.min(HAWK_MOBILITY_BONUS.len() - 1);
-            HAWK_MOBILITY_BONUS[idx]
-        }
-        _ => 0,
-    };
-    bonus += mobility_bonus;
-
-    // 2. CLOUD PROXIMITY: reward being near the piece cloud center
+    // CLOUD PROXIMITY: reward being near the piece cloud center
     let scale = (piece_value / LEAPER_TROPISM_DIVISOR).max(1);
     if let Some(center) = cloud_center {
         let dist = (x - center.x).abs().max((y - center.y).abs());
@@ -2304,68 +2178,44 @@ fn evaluate_king_shelter(
         bump_feat!(king_ring_missing_penalty, -1);
     }
 
-    // 1b. TIGHT PAWN SHELTER - Distance-based evaluation
-    // For each nearby file (king's file ±2), find the closest friendly pawn
-    // and evaluate based on distance. Missing pawns = penalty.
+    // 1b. King shield (pawn ahead/behind) - Unified: Use pre-sorted pawn list
+    let mut has_pawn_ahead = false;
+    let mut has_pawn_behind = false;
     let is_white = color == PlayerColor::White;
 
-    for file_offset in -2..=2_i64 {
-        let file_x = king.x + file_offset;
-
-        // Find closest friendly pawn on this file
-        let start = pawns.partition_point(|p| p.0 < file_x);
-        let mut closest_pawn_dist: Option<i64> = None;
+    for dx in -2..=2_i64 {
+        let x = king.x + dx;
+        // Find range of pawns on this file
+        let start = pawns.partition_point(|p| p.0 < x);
         let mut k = start;
-        while k < pawns.len() && pawns[k].0 == file_x {
-            let pawn_y = pawns[k].1;
-            // Pawn should be in the "forward" direction (for white: y > king.y)
-            let is_forward = if is_white {
-                pawn_y > king.y
-            } else {
-                pawn_y < king.y
-            };
-            if is_forward {
-                let dist = (pawn_y - king.y).abs();
-                closest_pawn_dist = Some(closest_pawn_dist.map(|d| d.min(dist)).unwrap_or(dist));
+        let mut on_file_count = 0;
+        while k < pawns.len() && pawns[k].0 == x {
+            on_file_count += 1;
+            let py = pawns[k].1;
+            if is_white {
+                if py > king.y {
+                    has_pawn_ahead = true;
+                } else if py < king.y {
+                    has_pawn_behind = true;
+                }
+            } else if py < king.y {
+                has_pawn_ahead = true;
+            } else if py > king.y {
+                has_pawn_behind = true;
             }
             k += 1;
         }
 
-        // Apply distance-based bonus or missing penalty
-        let file_type = match file_offset.abs() {
-            0 => "king_file",
-            1 => "adjacent",
-            _ => "outer",
-        };
-
-        if let Some(dist) = closest_pawn_dist {
-            // Have a pawn, apply distance-based bonus
-            let (mg_bonus, eg_bonus) = match (file_type, dist) {
-                ("king_file", 1) => (MG_PAWN_SHELTER_DIST1_KING_FILE, EG_PAWN_SHELTER_DIST1_KING_FILE),
-                ("king_file", 2) => (MG_PAWN_SHELTER_DIST2_KING_FILE, EG_PAWN_SHELTER_DIST2_KING_FILE),
-                ("king_file", 3) => (MG_PAWN_SHELTER_DIST3_KING_FILE, EG_PAWN_SHELTER_DIST3_KING_FILE),
-                ("adjacent", 1) => (MG_PAWN_SHELTER_DIST1_ADJACENT, EG_PAWN_SHELTER_DIST1_ADJACENT),
-                ("adjacent", 2) => (MG_PAWN_SHELTER_DIST2_ADJACENT, EG_PAWN_SHELTER_DIST2_ADJACENT),
-                ("adjacent", 3) => (MG_PAWN_SHELTER_DIST3_ADJACENT, EG_PAWN_SHELTER_DIST3_ADJACENT),
-                ("outer", 1) => (MG_PAWN_SHELTER_DIST1_OUTER, EG_PAWN_SHELTER_DIST1_OUTER),
-                ("outer", 2) => (MG_PAWN_SHELTER_DIST2_OUTER, EG_PAWN_SHELTER_DIST2_OUTER),
-                ("outer", 3) => (MG_PAWN_SHELTER_DIST3_OUTER, EG_PAWN_SHELTER_DIST3_OUTER),
-                _ => (0, 0), // Distance 4+ = no bonus
-            };
-            safety += taper(mg_bonus, eg_bonus);
-        } else {
-            // No forward-facing pawn on this file: apply penalty
-            let (mg_penalty, eg_penalty) = match file_type {
-                "king_file" => (MG_PAWN_SHELTER_MISSING_KING_FILE, EG_PAWN_SHELTER_MISSING_KING_FILE),
-                "adjacent" => (MG_PAWN_SHELTER_MISSING_ADJACENT, EG_PAWN_SHELTER_MISSING_ADJACENT),
-                _ => (MG_PAWN_SHELTER_MISSING_OUTER, EG_PAWN_SHELTER_MISSING_OUTER),
-            };
-            // Scale penalty by defense urgency: more danger = more important to have pawn shelter
-            // Scale from 50 (no urgency) to 130 (high urgency)
-            let urgency_scale = (50 + (defense_urgency * 80) / 100).min(130);
-            let penalty = taper(mg_penalty, eg_penalty);
-            safety -= (penalty * urgency_scale) / 100;
+        // King on Open File Penalty (No friendly pawns on file)
+        if dx == 0 && on_file_count == 0 {
+            safety -= taper(MG_KING_OPEN_FILE_PENALTY, EG_KING_OPEN_FILE_PENALTY);
         }
+    }
+
+    if has_pawn_ahead && !has_pawn_behind {
+        safety += taper(MG_KING_PAWN_SHIELD_BONUS, EG_KING_PAWN_SHIELD_BONUS);
+    } else if !has_pawn_ahead && has_pawn_behind {
+        safety -= taper(MG_KING_PAWN_AHEAD_PENALTY, EG_KING_PAWN_AHEAD_PENALTY);
     }
 
     if defense_urgency <= 10 {
@@ -2497,22 +2347,6 @@ fn evaluate_king_shelter(
         (total_danger + (total_danger * total_danger / 800)) * defense_urgency / 100;
     safety -= final_penalty.min(400);
 
-    let mut safe_escapes = 0;
-    for i in 0..8 {
-        let (dist, _val, c, _pt) = king_rays[i];
-        if dist > 0 && c == color {
-            safe_escapes += 1;
-        }
-    }
-
-    let escape_penalty = match safe_escapes {
-        0 => taper(120, 160),
-        1 => taper(53, 80),
-        2 => taper(13, 27),
-        _ => 0,
-    };
-
-    safety -= escape_penalty;
     safety
 }
 
@@ -3509,7 +3343,7 @@ mod tests {
         let icn_no_support = "w (8;q|1;q) K0,0|k0,10|N4,4";
         game.setup_position_from_icn(icn_no_support);
 
-        let score_no_support = evaluate_knight(&game, 4, 4, PlayerColor::White, None, 0, &[], &[]);
+        let score_no_support = evaluate_knight(4, 4, PlayerColor::White, None, 0, &[], &[]);
 
         // Case 2: Support from pawn at (3,3) (White pawn at y-1 supports y)
         let icn_supported = "w (8;q|1;q) K0,0|k0,10|N4,4|P3,3";
@@ -3517,7 +3351,7 @@ mod tests {
         // Mock pawn list
         let white_pawns = vec![(3, 3)];
 
-        let score_supported = evaluate_knight(&game, 4, 4, PlayerColor::White, None, 0, &white_pawns, &[]);
+        let score_supported = evaluate_knight(4, 4, PlayerColor::White, None, 0, &white_pawns, &[]);
 
         println!(
             "No Support: {}, Supported: {}",

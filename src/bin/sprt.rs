@@ -76,7 +76,7 @@ enum Commands {
         variants: String,
 
         /// Material threshold for draws
-        #[arg(long, default_value_t = 2000)]
+        #[arg(long, default_value_t = 0)]
         adjudication: i32,
 
         /// Path to output game ICNs
@@ -258,12 +258,17 @@ fn print_commit_context(new_info: &Option<CommitInfo>, old_info: &Option<CommitI
 
 /// Print the compact settings lines (shared by startup banner and final summary).
 fn print_settings_context(config: &Config) {
+    let adjudication_str = if config.adjudication_threshold <= 0 {
+        "Disabled".to_string()
+    } else {
+        format!("{} cp", config.adjudication_threshold)
+    };
     println!(
-        "  TC: {} | Concurrency: {} | Variants: {} | Adjudication: {} cp",
+        "  TC: {} | Concurrency: {} | Variants: {} | Adjudication: {}",
         config.tc,
         config.concurrency,
         config.variants.len(),
-        config.adjudication_threshold,
+        adjudication_str,
     );
 }
 
@@ -1353,6 +1358,21 @@ fn main() {
                 path
             } else {
                 println!("No --new-bin provided. Building current source...");
+                let ext = std::env::consts::EXE_EXTENSION;
+                let binary_name = if ext.is_empty() {
+                    "target/release/sprt".to_string()
+                } else {
+                    format!("target/release/sprt.{}", ext)
+                };
+                let backup_name = if ext.is_empty() {
+                    "target/release/sprt_backup".to_string()
+                } else {
+                    format!("target/release/sprt_backup.{}", ext)
+                };
+
+                // Move old binary out of the way so linker can write freely
+                let _ = std::fs::rename(&binary_name, &backup_name);
+
                 let status = Command::new("cargo")
                     .args(["build", "--release", "--features=sprt", "--bin", "sprt"])
                     .status()
@@ -1360,22 +1380,21 @@ fn main() {
                 if !status.success() {
                     panic!("Failed to build new binary automatically.");
                 }
-                // Copy to a unique name to avoid file-locking when the manager
-                let ext = std::env::consts::EXE_EXTENSION;
-                let src = if ext.is_empty() {
-                    "target/release/sprt".to_string()
-                } else {
-                    format!("target/release/sprt.{}", ext)
-                };
+
+                // Copy newly built binary to sprt_new
                 let dst = if ext.is_empty() {
                     "target/release/sprt_new".to_string()
                 } else {
                     format!("target/release/sprt_new.{}", ext)
                 };
 
-                std::fs::copy(&src, &dst).unwrap_or_else(|e| {
-                    panic!("Failed to copy {} to {}: {}", src, dst, e);
+                std::fs::copy(&binary_name, &dst).unwrap_or_else(|e| {
+                    panic!("Failed to copy {} to {}: {}", binary_name, dst, e);
                 });
+
+                // Clean up backup
+                let _ = std::fs::remove_file(&backup_name);
+
                 dst
             };
 
