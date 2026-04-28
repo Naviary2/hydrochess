@@ -7,6 +7,7 @@
 use crate::board::{Board, Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
 use crate::moves::{SpatialIndices, is_square_attacked};
+use crate::utils::is_prime_fast;
 
 /// Threshold for disabling mop-up evaluation if the opponent still has significant material.
 const MOP_UP_THRESHOLD_PERCENT: u32 = 15;
@@ -15,6 +16,137 @@ const MOP_UP_THRESHOLD_PERCENT: u32 = 15;
 struct SliderInfo {
     x: i64,
     y: i64,
+    pt: PieceType,
+}
+
+/// 8 compass directions around a square (4 ortho + 4 diagonal).
+const RING_DIRS: [(i64, i64); 8] = [
+    (1, 0), (-1, 0), (0, 1), (0, -1),
+    (1, 1), (-1, -1), (1, -1), (-1, 1),
+];
+
+/// Geometric attack pattern check (ignores blockers).
+/// Returns true if a piece of type `pt` and color `color` at offset (dx, dy)=0 could
+/// in principle attack a square at offset (dx, dy). Used for fast ring-coverage scoring.
+#[inline]
+fn piece_attacks_geom(pt: PieceType, color: PlayerColor, dx: i64, dy: i64) -> bool {
+    let adx = dx.abs();
+    let ady = dy.abs();
+    if adx == 0 && ady == 0 {
+        return false;
+    }
+    match pt {
+        PieceType::Rook => dx == 0 || dy == 0,
+        PieceType::Bishop => adx == ady,
+        PieceType::Queen | PieceType::RoyalQueen => dx == 0 || dy == 0 || adx == ady,
+        PieceType::Chancellor => {
+            dx == 0 || dy == 0 || (adx == 1 && ady == 2) || (adx == 2 && ady == 1)
+        }
+        PieceType::Archbishop => {
+            adx == ady || (adx == 1 && ady == 2) || (adx == 2 && ady == 1)
+        }
+        PieceType::Amazon => {
+            dx == 0
+                || dy == 0
+                || adx == ady
+                || (adx == 1 && ady == 2)
+                || (adx == 2 && ady == 1)
+        }
+        PieceType::Knight => (adx == 1 && ady == 2) || (adx == 2 && ady == 1),
+        PieceType::Camel => (adx == 1 && ady == 3) || (adx == 3 && ady == 1),
+        PieceType::Giraffe => (adx == 1 && ady == 4) || (adx == 4 && ady == 1),
+        PieceType::Zebra => (adx == 2 && ady == 3) || (adx == 3 && ady == 2),
+        PieceType::King | PieceType::Guard => adx <= 1 && ady <= 1,
+        PieceType::Centaur | PieceType::RoyalCentaur => {
+            (adx <= 1 && ady <= 1) || (adx == 1 && ady == 2) || (adx == 2 && ady == 1)
+        }
+        PieceType::Hawk => {
+            // Hawk leaps to compass squares at distance 2 or 3 (ortho or diag).
+            let d = adx.max(ady);
+            (d == 2 || d == 3) && (dx == 0 || dy == 0 || adx == ady)
+        }
+        PieceType::Knightrider => {
+            // Slides along knight rays: any (k, 2k) or (2k, k).
+            if adx == 0 || ady == 0 || adx == ady {
+                false
+            } else {
+                let g = gcd_i64(adx, ady);
+                let nx = adx / g;
+                let ny = ady / g;
+                (nx == 1 && ny == 2) || (nx == 2 && ny == 1)
+            }
+        }
+        PieceType::Pawn => {
+            let dir = if color == PlayerColor::White { 1 } else { -1 };
+            adx == 1 && dy == dir
+        }
+        PieceType::Huygen => {
+            // Orthogonal slider, only at prime distances.
+            (dx == 0 || dy == 0) && is_prime_fast(adx.max(ady))
+        }
+        PieceType::Rose => {
+            // Approximate Rose coverage via knight-leaper pattern; the full curving
+            // pattern is complex but a knight check is a reasonable lower bound.
+            (adx == 1 && ady == 2) || (adx == 2 && ady == 1)
+        }
+        PieceType::Void | PieceType::Obstacle => false,
+    }
+}
+
+#[inline]
+fn gcd_i64(a: i64, b: i64) -> i64 {
+    let mut a = a.abs();
+    let mut b = b.abs();
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a.max(1)
+}
+
+/// Returns true if the piece is a leaper-style short-range piece that
+/// must engage at close quarters to influence the mating net.
+#[inline]
+fn is_short_range_piece(pt: PieceType) -> bool {
+    matches!(
+        pt,
+        PieceType::Knight
+            | PieceType::Camel
+            | PieceType::Giraffe
+            | PieceType::Zebra
+            | PieceType::Guard
+            | PieceType::Centaur
+            | PieceType::RoyalCentaur
+            | PieceType::Hawk
+            | PieceType::Pawn
+            | PieceType::Rose
+    )
+}
+
+/// Ideal Chebyshev distance for a piece around the enemy king.
+/// Sliders prefer to stand on rays at moderate range (cut and aim);
+/// short-range pieces must close in.
+#[inline]
+fn ideal_distance(pt: PieceType) -> (i64, i64) {
+    match pt {
+        PieceType::Knight => (2, 4),
+        PieceType::Camel => (3, 5),
+        PieceType::Giraffe => (4, 6),
+        PieceType::Zebra => (3, 5),
+        PieceType::Guard | PieceType::King => (1, 2),
+        PieceType::Centaur | PieceType::RoyalCentaur => (1, 3),
+        PieceType::Hawk => (2, 4),
+        PieceType::Pawn => (1, 2),
+        PieceType::Rose => (2, 4),
+        // Sliders: ideal stays a few squares back to keep the cut intact.
+        PieceType::Rook | PieceType::Queen | PieceType::RoyalQueen | PieceType::Chancellor => (2, 8),
+        PieceType::Bishop | PieceType::Archbishop => (2, 8),
+        PieceType::Amazon => (2, 6),
+        PieceType::Knightrider => (2, 6),
+        PieceType::Huygen => (2, 11),
+        PieceType::Obstacle | PieceType::Void => (0, 0),
+    }
 }
 
 /// Detects if the enemy king is trapped within a localized "cage" of attacked squares.
@@ -527,7 +659,7 @@ impl PieceList {
     #[inline(always)]
     fn new() -> Self {
         Self {
-            pieces: [SliderInfo { x: 0, y: 0 }; 24],
+            pieces: [SliderInfo { x: 0, y: 0, pt: PieceType::Void }; 24],
             len: 0,
         }
     }
@@ -600,51 +732,203 @@ fn select_mop_up_strategy(material: &MaterialSummary) -> MopUpStrategy {
     }
 }
 
-#[inline(always)]
+/// Generic, piece-aware mop-up evaluator.
+///
+/// Strategy (board-edge-agnostic, works on bounded and unbounded boards):
+///   1. Cage / macro-box compactness — directly rewards small reachable area.
+///   2. King approach — push our king to within 2-4 squares of the enemy king.
+///   3. Ring coverage — for each of the 8 escape squares around the enemy king,
+///      reward whether any of our pieces (or our king) geometrically attacks it,
+///      with extra weight on the escape side (opposite our king).
+///   4. Axis sandwich — reward our pieces controlling both sides of the enemy king
+///      along the four cardinal axes (creates an opposition cage).
+///   5. Opposition — pieces opposite our king cut off escape; our king pushes from
+///      the other side, so reward both halves of the mating net.
+///   6. Per-piece ideal-distance shaping — sliders aim from a couple squares back,
+///      short-range leapers must close in. Bonus for sliders standing on rays.
+#[inline]
 fn evaluate_generic_overwhelming_mop_up(
     king_relation: KingRelation,
     our_king: Option<&Coordinate>,
     pieces: &[SliderInfo],
     enemy_king: &Coordinate,
     cage: CageInfo,
+    winning_color: PlayerColor,
 ) -> i32 {
-    let enemy_x = enemy_king.x;
-    let enemy_y = enemy_king.y;
-    let mut bonus = 0;
+    let ex = enemy_king.x;
+    let ey = enemy_king.y;
+    let mut bonus: i32 = 0;
 
+    // 1. Cage / macro-box compactness.
     if cage.bitboard_caged {
-        bonus += (2500 / (cage.reached_area + 4).max(1) as i32).clamp(40, 500);
+        bonus += (3000 / (cage.reached_area + 4).max(1) as i32).clamp(50, 600);
     }
     if cage.macro_box {
-        bonus += if cage.macro_area <= 100 { 70 } else { 30 };
+        bonus += if cage.macro_area <= 64 {
+            150
+        } else if cage.macro_area <= 256 {
+            70
+        } else if cage.macro_area <= 1024 {
+            30
+        } else {
+            10
+        };
     }
 
-    bonus += (100 - king_relation.king_dist.min(100) as i32) * 16;
+    // 2. King approach.
+    bonus += (60 - king_relation.king_dist.min(60) as i32) * 22;
     if king_relation.king_dist <= 2 {
-        bonus += 160;
+        bonus += 220;
     } else if king_relation.king_dist <= 4 {
+        bonus += 110;
+    }
+
+    // 3. Ring coverage. For each of 8 escape squares adjacent to the enemy king,
+    // mark whether at least one of our pieces (or our king) controls it.
+    let escape_x = if king_relation.king_dist < i64::MAX {
+        -king_relation.our_dx.signum()
+    } else {
+        0
+    };
+    let escape_y = if king_relation.king_dist < i64::MAX {
+        -king_relation.our_dy.signum()
+    } else {
+        0
+    };
+
+    let mut covered: u8 = 0;
+    let mut total_attacks: i32 = 0;
+    for (i, &(rdx, rdy)) in RING_DIRS.iter().enumerate() {
+        let rx = ex + rdx;
+        let ry = ey + rdy;
+        let mut attacked = false;
+
+        for s in pieces {
+            if piece_attacks_geom(s.pt, winning_color, rx - s.x, ry - s.y) {
+                attacked = true;
+                total_attacks += 1;
+            }
+        }
+        if let Some(ok) = our_king {
+            let kdx = (rx - ok.x).abs();
+            let kdy = (ry - ok.y).abs();
+            if kdx <= 1 && kdy <= 1 {
+                attacked = true;
+            }
+        }
+
+        if attacked {
+            covered |= 1 << i;
+            bonus += 28;
+            // Squares on the escape side (away from our king) matter most.
+            let on_esc_x = escape_x != 0 && rdx.signum() == escape_x;
+            let on_esc_y = escape_y != 0 && rdy.signum() == escape_y;
+            if on_esc_x && on_esc_y {
+                bonus += 55;
+            } else if on_esc_x || on_esc_y {
+                bonus += 28;
+            }
+        }
+    }
+    let n_covered = covered.count_ones() as i32;
+    bonus += n_covered * 18;
+    if n_covered >= 7 {
+        bonus += 220;
+    } else if n_covered >= 6 {
+        bonus += 130;
+    } else if n_covered >= 5 {
+        bonus += 65;
+    }
+    bonus += total_attacks * 3;
+
+    // 4. Axis sandwich (using ring bits): paired-coverage on opposite sides.
+    let bit = |i: usize| (covered >> i) & 1 != 0;
+    let sand_h = bit(0) && bit(1);
+    let sand_v = bit(2) && bit(3);
+    let sand_dp = bit(4) && bit(5);
+    let sand_dn = bit(6) && bit(7);
+    let n_sand = sand_h as i32 + sand_v as i32 + sand_dp as i32 + sand_dn as i32;
+    bonus += n_sand * 55;
+    if sand_h && sand_v {
+        bonus += 130;
+    }
+    if sand_dp && sand_dn {
         bonus += 80;
     }
 
+    // 5. Opposition + per-piece ideal-distance shaping in one pass.
     for s in pieces {
-        let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
-        let approach_weight = if cage.bitboard_caged && cage.reached_area <= 16 {
-            24
-        } else if cage.bitboard_caged {
-            16
-        } else if cage.macro_box {
-            10
+        let dx = s.x - ex;
+        let dy = s.y - ey;
+        let dist = dx.abs().max(dy.abs());
+
+        // Place pieces opposite our king to cut escape from the far side.
+        if our_king.is_some() {
+            let opposite_x = dx != 0
+                && king_relation.our_dx != 0
+                && dx.signum() != king_relation.our_dx.signum();
+            let opposite_y = dy != 0
+                && king_relation.our_dy != 0
+                && dy.signum() != king_relation.our_dy.signum();
+            if opposite_x {
+                bonus += 18;
+            }
+            if opposite_y {
+                bonus += 18;
+            }
+        }
+
+        // Ideal-distance shaping by piece type.
+        let (ideal_min, ideal_max) = ideal_distance(s.pt);
+        bonus += if dist < ideal_min {
+            -((ideal_min - dist) as i32) * 6
+        } else if dist <= ideal_max {
+            let mid = (ideal_min + ideal_max) / 2;
+            45 - ((dist - mid).abs() as i32) * 4
         } else {
-            8
+            let over = (dist - ideal_max).min(80) as i32;
+            -(over * 4) - 8
         };
 
-        const LONG_RANGE: i64 = 100;
-        bonus += ((LONG_RANGE - dist.min(LONG_RANGE)) as i32) * approach_weight;
+        // Sliders standing on a ray from the enemy king already have a cut.
+        let is_ortho_slider = matches!(
+            s.pt,
+            PieceType::Rook
+                | PieceType::Queen
+                | PieceType::RoyalQueen
+                | PieceType::Chancellor
+                | PieceType::Amazon
+                | PieceType::Huygen
+        );
+        let is_diag_slider = matches!(
+            s.pt,
+            PieceType::Bishop
+                | PieceType::Queen
+                | PieceType::RoyalQueen
+                | PieceType::Archbishop
+                | PieceType::Amazon
+        );
+        if is_ortho_slider && (dx == 0 || dy == 0) {
+            bonus += 32;
+        }
+        if is_diag_slider && dx != 0 && dx.abs() == dy.abs() {
+            bonus += 22;
+        }
 
+        // Coordination with our king (short pieces need it; sliders less so).
         if let Some(ok) = our_king {
             let king_piece_dist = (s.x - ok.x).abs().max((s.y - ok.y).abs());
-            bonus += (60 - king_piece_dist.min(60) as i32) * 3;
+            if is_short_range_piece(s.pt) {
+                bonus += (8 - king_piece_dist.min(8) as i32) * 6;
+            } else {
+                bonus += (24 - king_piece_dist.min(24) as i32) * 1;
+            }
         }
+    }
+
+    // Encourage tight cage when one is detected.
+    if cage.bitboard_caged && cage.reached_area <= 16 {
+        bonus += (16 - cage.reached_area as i32) * 12;
     }
 
     bonus
@@ -658,9 +942,16 @@ fn evaluate_king_amazon_vs_king(
     pieces: &[SliderInfo],
     material: &MaterialSummary,
     cage: CageInfo,
+    winning_color: PlayerColor,
 ) -> i32 {
-    let mut bonus =
-        evaluate_generic_overwhelming_mop_up(king_relation, our_king, pieces, enemy_king, cage);
+    let mut bonus = evaluate_generic_overwhelming_mop_up(
+        king_relation,
+        our_king,
+        pieces,
+        enemy_king,
+        cage,
+        winning_color,
+    );
 
     if let (Some(ok), Some(amazon)) = (our_king, material.amazon_square.as_ref()) {
         bonus += amazon_mate_drive_bonus(enemy_king, ok, amazon);
@@ -800,6 +1091,7 @@ fn evaluate_custom_mop_up_case(
     pieces: &[SliderInfo],
     material: &MaterialSummary,
     cage: CageInfo,
+    winning_color: PlayerColor,
 ) -> i32 {
     match case_ {
         CustomMopUpCase::KingAmazonVsKing => evaluate_king_amazon_vs_king(
@@ -809,6 +1101,7 @@ fn evaluate_custom_mop_up_case(
             pieces,
             material,
             cage,
+            winning_color,
         ),
         CustomMopUpCase::KingDoubleRookVsKing => {
             evaluate_king_double_rook_vs_king(king_relation, enemy_king, our_king, pieces)
@@ -829,7 +1122,15 @@ fn evaluate_technical_mop_up(
 ) -> i32 {
     let enemy_x = enemy_king.x;
     let enemy_y = enemy_king.y;
-    let mut bonus = 0;
+    // Smart generic evaluation provides ring coverage, opposition, per-piece distance shaping.
+    let mut bonus = evaluate_generic_overwhelming_mop_up(
+        king_relation,
+        our_king,
+        pieces,
+        enemy_king,
+        cage,
+        winning_color,
+    );
     let mut protected_count = 0;
 
     for s in pieces {
@@ -978,28 +1279,15 @@ fn evaluate_technical_mop_up(
         || (sand_dp && sand_dn)
         || (cage.bitboard_caged && cage.reached_area <= 12);
 
-    bonus += (100 - king_relation.king_dist.min(100) as i32) * 8;
-
-    for s in pieces {
-        let dist = (s.x - enemy_x).abs().max((s.y - enemy_y).abs());
-        bonus += (80 - dist.min(80) as i32) * 4;
-        if let Some(ok) = our_king {
-            let king_piece_dist = (s.x - ok.x).abs().max((s.y - ok.y).abs());
-            bonus += (50 - king_piece_dist.min(50) as i32) * 2;
-        }
-    }
-
     if is_contained {
         let prox = (30 - king_relation.king_dist.min(30)) as i32;
         bonus += prox * 16;
         if king_relation.king_dist <= 2 {
             bonus += 80;
         }
-    } else {
-        let prox = (20 - king_relation.king_dist.min(20)) as i32;
-        bonus += prox;
     }
 
+    let _ = (enemy_x, enemy_y); // values are used implicitly via fences/king_relation
     bonus
 }
 
@@ -1057,7 +1345,7 @@ fn evaluate_mop_up_core(
         );
 
         if pt != PieceType::King && pt != PieceType::Pawn {
-            our_pieces.push(SliderInfo { x, y });
+            our_pieces.push(SliderInfo { x, y, pt });
         }
 
         if has_ortho {
@@ -1127,7 +1415,7 @@ fn evaluate_mop_up_core(
             material.queen_count += 1;
         } else if pt == PieceType::Amazon {
             material.amazon_count += 1;
-            material.amazon_square = Some(SliderInfo { x, y });
+            material.amazon_square = Some(SliderInfo { x, y, pt });
         }
 
         if pt == PieceType::Rook {
@@ -1305,6 +1593,7 @@ fn evaluate_mop_up_core(
                 our_pieces,
                 &material,
                 cage,
+                winning_color,
             ),
             MopUpStrategy::GenericOverwhelming => evaluate_generic_overwhelming_mop_up(
                 king_relation,
@@ -1312,6 +1601,7 @@ fn evaluate_mop_up_core(
                 our_pieces,
                 enemy_king,
                 cage,
+                winning_color,
             ),
             MopUpStrategy::Technical => evaluate_technical_mop_up(
                 game,
@@ -1598,10 +1888,10 @@ mod tests {
     fn test_amazon_prefers_cutoff_over_drifting() {
         let enemy_king = Coordinate::new(5, 5);
         let good_king = Coordinate::new(3, 5);
-        let good_amazon = SliderInfo { x: 7, y: 5 };
+        let good_amazon = SliderInfo { x: 7, y: 5, pt: PieceType::Amazon };
         let good_score = amazon_mate_drive_bonus(&enemy_king, &good_king, &good_amazon);
 
-        let bad_amazon = SliderInfo { x: 1, y: 5 };
+        let bad_amazon = SliderInfo { x: 1, y: 5, pt: PieceType::Amazon };
         let bad_score = amazon_mate_drive_bonus(&enemy_king, &good_king, &bad_amazon);
 
         assert!(
@@ -1632,6 +1922,120 @@ mod tests {
             close_score,
             far_score
         );
+    }
+
+    #[test]
+    fn test_smart_mop_up_prefers_pieces_opposite_our_king() {
+        // White king on the left of black king (5,5). A second piece (chancellor)
+        // far away to the right cuts off escape — should score higher than placing
+        // it on the same side as our king.
+        // Two chancellors — `is_bounded_only_winnable` doesn't fire so the test
+        // isolates the smart opposition logic instead of the corner-drive bonus.
+        let opposite = create_test_game_from_icn(
+            "w (50;q|1;q) k5,5|K3,5|CH20,5|CH18,3",
+        );
+        let same_side = create_test_game_from_icn(
+            "w (50;q|1;q) k5,5|K3,5|CH-20,5|CH-18,3",
+        );
+        let ek = Coordinate::new(5, 5);
+        let s_opp = evaluate_lone_king_endgame(
+            &opposite,
+            Some(&Coordinate::new(3, 5)),
+            &ek,
+            PlayerColor::White,
+        );
+        let s_same = evaluate_lone_king_endgame(
+            &same_side,
+            Some(&Coordinate::new(3, 5)),
+            &ek,
+            PlayerColor::White,
+        );
+        assert!(
+            s_opp > s_same,
+            "Piece opposite our king should score better: opp={} same={}",
+            s_opp,
+            s_same
+        );
+    }
+
+    #[test]
+    fn test_smart_mop_up_rewards_ring_coverage_with_exotic_pieces() {
+        // Knight + Camel + Giraffe surround a king with our king nearby.
+        // Compared to all those pieces clustered far away, ring coverage
+        // and sandwich logic should give a clearly higher score.
+        let near = create_test_game_from_icn(
+            "w (50;q|1;q) k10,10|K12,10|N8,9|CA7,10|GI10,14",
+        );
+        let far = create_test_game_from_icn(
+            "w (50;q|1;q) k10,10|K-30,-30|N-32,-31|CA-33,-30|GI-30,-26",
+        );
+        let ek = Coordinate::new(10, 10);
+        let s_near = evaluate_lone_king_endgame(
+            &near,
+            Some(&Coordinate::new(12, 10)),
+            &ek,
+            PlayerColor::White,
+        );
+        let s_far = evaluate_lone_king_endgame(
+            &far,
+            Some(&Coordinate::new(-30, -30)),
+            &ek,
+            PlayerColor::White,
+        );
+        assert!(
+            s_near > s_far,
+            "Pieces engaged around enemy king should score way higher: near={} far={}",
+            s_near,
+            s_far
+        );
+    }
+
+    #[test]
+    fn test_smart_mop_up_axis_sandwich_bonus() {
+        // Two rooks above and below the enemy king (vertical sandwich) should
+        // score higher than two rooks both above (no sandwich).
+        let sandwich =
+            create_test_game_from_icn("w (50;q|1;q) k10,10|K10,7|R10,2|R10,18");
+        let no_sandwich =
+            create_test_game_from_icn("w (50;q|1;q) k10,10|K10,7|R10,18|R10,19");
+        let ek = Coordinate::new(10, 10);
+        let s_sand = evaluate_lone_king_endgame(
+            &sandwich,
+            Some(&Coordinate::new(10, 7)),
+            &ek,
+            PlayerColor::White,
+        );
+        let s_no = evaluate_lone_king_endgame(
+            &no_sandwich,
+            Some(&Coordinate::new(10, 7)),
+            &ek,
+            PlayerColor::White,
+        );
+        assert!(
+            s_sand > s_no,
+            "Vertical sandwich should outscore stacked rooks: sand={} no={}",
+            s_sand,
+            s_no
+        );
+    }
+
+    #[test]
+    fn test_piece_attacks_geom_basic_pieces() {
+        // Sanity-check the geometric attack table for representative pieces.
+        assert!(piece_attacks_geom(PieceType::Rook, PlayerColor::White, 7, 0));
+        assert!(!piece_attacks_geom(PieceType::Rook, PlayerColor::White, 3, 4));
+        assert!(piece_attacks_geom(PieceType::Bishop, PlayerColor::White, 4, 4));
+        assert!(piece_attacks_geom(PieceType::Knight, PlayerColor::White, 1, 2));
+        assert!(piece_attacks_geom(PieceType::Camel, PlayerColor::White, 1, 3));
+        assert!(piece_attacks_geom(PieceType::Giraffe, PlayerColor::White, 4, 1));
+        assert!(piece_attacks_geom(PieceType::Zebra, PlayerColor::White, 3, 2));
+        assert!(piece_attacks_geom(PieceType::Hawk, PlayerColor::White, 3, 3));
+        assert!(!piece_attacks_geom(PieceType::Hawk, PlayerColor::White, 1, 1));
+        assert!(piece_attacks_geom(PieceType::Knightrider, PlayerColor::White, 2, 4));
+        assert!(piece_attacks_geom(PieceType::Knightrider, PlayerColor::White, 6, 3));
+        assert!(!piece_attacks_geom(PieceType::Knightrider, PlayerColor::White, 5, 5));
+        assert!(piece_attacks_geom(PieceType::Huygen, PlayerColor::White, 7, 0));
+        assert!(!piece_attacks_geom(PieceType::Huygen, PlayerColor::White, 4, 0));
     }
 
     #[test]
