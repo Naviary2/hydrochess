@@ -119,6 +119,9 @@ pub struct GameRules {
     /// E.g., "allpiecescaptured" means Black must capture all of White's pieces to win.
     #[serde(skip)]
     pub black_win_condition: WinCondition,
+    /// Game variant used for move generation in specific variants.
+    #[serde(skip)]
+    pub variant: Option<crate::Variant>,
 }
 
 impl GameRules {
@@ -4015,6 +4018,7 @@ impl GameState {
                 {
                     let v_name = &tag[9..9 + v_end];
                     self.variant = Some(Variant::parse(v_name));
+                    self.game_rules.variant = self.variant;
                 }
                 content = content[end + 1..].trim();
             } else {

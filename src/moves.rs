@@ -723,7 +723,7 @@ impl Move {
 }
 
 #[inline]
-fn is_enemy_piece(piece: &Piece, our_color: PlayerColor) -> bool {
+pub fn is_enemy_piece(piece: &Piece, our_color: PlayerColor) -> bool {
     piece.color() != our_color && piece.piece_type() != PieceType::Void
 }
 
@@ -792,6 +792,11 @@ pub fn get_quiescence_captures(
     out: &mut MoveList,
 ) {
     use crate::tiles::TILE_SIZE;
+
+    // Use get_quiescence_captures from evaluation/obstocean_search.rs when the variant is Obstocean.
+    if ctx.game_rules.variant == Some(crate::Variant::Obstocean) {
+        return crate::evaluation::variants::obstocean_search::get_quiescence_captures(board, turn, ctx, out);
+    }
 
     out.clear();
 
@@ -1434,7 +1439,7 @@ pub fn is_square_attacked(
 }
 
 /// Generate only quiet (non-capture) pawn promotions for quiescence search.
-fn generate_pawn_quiet_promotions(
+pub fn generate_pawn_quiet_promotions(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -1685,7 +1690,7 @@ fn generate_castling_moves(
 
 /// Generate only sliding captures for quiescence search.
 /// Uses O(log n) SpatialIndices for infinite-range blocker detection.
-fn generate_sliding_capture_moves(
+pub fn generate_sliding_capture_moves(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -2080,7 +2085,7 @@ fn generate_pawn_quiet_moves(
 /// Generate leaper moves directly into an output buffer
 /// gen_type controls which move types to generate: All, Quiets only, or Captures only
 #[inline]
-fn generate_leaper_moves_into(
+pub fn generate_leaper_moves_into(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -2127,7 +2132,7 @@ fn generate_leaper_moves_into(
 /// Generate compass moves directly into an output buffer
 /// gen_type controls which move types to generate: All, Quiets only, or Captures only
 #[inline]
-fn generate_compass_moves_into(
+pub fn generate_compass_moves_into(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -2984,7 +2989,7 @@ fn find_blocker_via_indices(
 }
 
 /// Huygen move generation using precomputed primes and spatial indices.
-fn generate_huygen_moves_into(
+pub fn generate_huygen_moves_into(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -3209,7 +3214,7 @@ pub static ROSE_SPIRALS: [[[(i64, i64); 7]; 2]; 8] = {
 /// Generate rose moves directly into an output buffer.
 /// gen_type controls which move types to generate: All, Quiets only, or Captures only
 #[inline(always)]
-fn generate_rose_moves_into(
+pub fn generate_rose_moves_into(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,
@@ -3479,7 +3484,7 @@ pub fn generate_sliding_quiets_into(ctx: &SlidingMoveContext, out: &mut MoveList
 /// Generate knightrider moves directly into an output buffer
 /// gen_type controls which move types to generate: All, Quiets only, or Captures only
 #[inline]
-fn generate_knightrider_moves_into(
+pub fn generate_knightrider_moves_into(
     board: &Board,
     from: &Coordinate,
     piece: &Piece,

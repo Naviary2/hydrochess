@@ -1300,6 +1300,7 @@ mod tests {
             move_rule_limit: None,
             white_win_condition: crate::game::WinCondition::Checkmate,
             black_win_condition: crate::game::WinCondition::Checkmate,
+            variant: None,
         };
 
         assert!(can_pawn_promote(5, PlayerColor::White, &rules));
