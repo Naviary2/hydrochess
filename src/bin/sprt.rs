@@ -1387,6 +1387,9 @@ fn main() {
                     Variant::Obstocean,
                     Variant::Chess,
                     Variant::ScatteredLeapers,
+                    Variant::DoubleKingClassical,
+                    Variant::DoubleKingChess,
+                    Variant::TripleKingMaze,
                 ]
             } else {
                 let mut parsed = Vec::new();
@@ -1413,6 +1416,9 @@ fn main() {
                             | "obstocean"
                             | "chess"
                             | "scattered_leapers"
+                            | "double_king_classical"
+                            | "double_king_chess"
+                            | "triple_king_maze"
                     );
                     if !known {
                         eprintln!("Error: Unknown variant '{}'", name);
