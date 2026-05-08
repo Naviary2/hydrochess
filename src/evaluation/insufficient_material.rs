@@ -503,6 +503,11 @@ fn compute(game: &crate::game::GameState) -> bool {
         }
     }
 
+    // Special: multiple royals on either side
+    if game.white_royals.len() >= 2 || game.black_royals.len() >= 2 {
+        return false;
+    }
+
     // Special: royal centaur vs amazon (unbounded)
     if !bordered {
         if b.royal_centaurs == 1
@@ -937,6 +942,11 @@ fn compute_game_handler(game: &crate::game::GameState) -> bool {
         if w.royal_centaurs > 0 && b.royal_centaurs > 0 && w.kings == 0 && b.kings == 0 {
             return true;
         }
+    }
+
+    // Special: multiple royals on either side
+    if game.white_royals.len() >= 2 || game.black_royals.len() >= 2 {
+        return false;
     }
 
     // Special: royal centaur vs amazon (unbounded)

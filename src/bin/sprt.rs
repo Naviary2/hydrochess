@@ -554,40 +554,38 @@ fn make_position_key(game: &GameState) -> String {
 }
 
 fn detect_terminal_state(game: &GameState) -> Option<TerminalState> {
+    if game.has_lost_by_royal_capture() {
+        let opponent_win_condition = match game.turn {
+            PlayerColor::White => game.game_rules.black_win_condition,
+            PlayerColor::Black => game.game_rules.white_win_condition,
+            PlayerColor::Neutral => return None,
+        };
+
+        return match opponent_win_condition {
+            hydrochess_wasm::game::WinCondition::RoyalCapture => {
+                Some(TerminalState::RoyalCapture {
+                    white_won: game.turn == PlayerColor::Black,
+                })
+            }
+            hydrochess_wasm::game::WinCondition::AllRoyalsCaptured => {
+                Some(TerminalState::AllRoyalsCaptured {
+                    white_won: game.turn == PlayerColor::Black,
+                })
+            }
+            _ => None,
+        };
+    }
+
     let in_check = game.is_in_check();
     let has_legal_move = has_any_fully_legal_move(game);
     if !has_legal_move {
         let lost_by_mate = in_check && game.must_escape_check();
         let lost_by_piece_capture = !game.has_pieces(game.turn);
-        let lost_by_royal_capture = game.has_lost_by_royal_capture();
 
         if lost_by_mate {
             return Some(TerminalState::Checkmate {
                 white_won: game.turn == PlayerColor::Black,
             });
-        }
-
-        if lost_by_royal_capture {
-            // Determine if it's RoyalCapture (one royal) or AllRoyalsCaptured (all royals)
-            let opponent_win_condition = match game.turn {
-                PlayerColor::White => game.game_rules.black_win_condition,
-                PlayerColor::Black => game.game_rules.white_win_condition,
-                PlayerColor::Neutral => return Some(TerminalState::Draw("stalemate")),
-            };
-
-            return match opponent_win_condition {
-                hydrochess_wasm::game::WinCondition::RoyalCapture => {
-                    Some(TerminalState::RoyalCapture {
-                        white_won: game.turn == PlayerColor::Black,
-                    })
-                }
-                hydrochess_wasm::game::WinCondition::AllRoyalsCaptured => {
-                    Some(TerminalState::AllRoyalsCaptured {
-                        white_won: game.turn == PlayerColor::Black,
-                    })
-                }
-                _ => Some(TerminalState::Draw("stalemate")),
-            };
         }
 
         if lost_by_piece_capture {

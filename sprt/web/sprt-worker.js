@@ -520,6 +520,45 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
     let lastEvalNew = null;
     let lastEvalOld = null;
 
+    const isRoyalPiece = (piece) => piece && ['k', 'y', 'd'].includes(piece.piece_type);
+    const startingRoyalCounts = {
+        w: startPosition.board.pieces.filter((p) => p.player === 'w' && isRoyalPiece(p)).length,
+        b: startPosition.board.pieces.filter((p) => p.player === 'b' && isRoyalPiece(p)).length,
+    };
+
+    function getWinConditionFor(color) {
+        const variantData = getVariantData(variantName);
+        const side = color === 'w' ? 'white' : 'black';
+        const conditions = variantData.game_rules && variantData.game_rules.win_conditions && variantData.game_rules.win_conditions[side];
+        return Array.isArray(conditions) && conditions.length > 0 ? conditions[0] : 'checkmate';
+    }
+
+    function getRoyalCaptureTerminal() {
+        const sideToMove = position.turn;
+        if (sideToMove !== 'w' && sideToMove !== 'b') return null;
+
+        const currentRoyalCount = position.board.pieces.filter((p) => p.player === sideToMove && isRoyalPiece(p)).length;
+        const startingRoyalCount = startingRoyalCounts[sideToMove] || 0;
+        if (startingRoyalCount === 0) return null;
+
+        const winningColor = sideToMove === 'w' ? 'b' : 'w';
+        const opponentWinCondition = getWinConditionFor(winningColor);
+        let reason = null;
+
+        if (opponentWinCondition === 'royalcapture' && currentRoyalCount < startingRoyalCount) {
+            reason = 'royalcapture';
+        } else if (opponentWinCondition === 'allroyalscaptured' && currentRoyalCount === 0) {
+            reason = 'allroyalscaptured';
+        }
+
+        if (!reason) return null;
+
+        const result = winningColor === newColor ? 'win' : 'loss';
+        const result_token = winningColor === 'w' ? '1-0' : '0-1';
+        for (const s of texelSamples) s.result_token = result_token;
+        return { result, reason, winningColor };
+    }
+
     function recordRepetition() {
         const key = makePositionKey(position);
         const prev = repetitionCounts.get(key) || 0;
@@ -530,6 +569,20 @@ async function playSingleGame(timePerMove, maxMoves, newPlaysWhite, materialThre
 
     // Helper for definitive terminal check (mate/stalemate) to prioritize over adjudication
     const getTerminalResult = (context = "") => {
+        const royalTerminal = getRoyalCaptureTerminal();
+        if (royalTerminal) {
+            const label = royalTerminal.reason === 'allroyalscaptured'
+                ? 'All royals captured'
+                : 'Royal capture';
+            moveLines.push('# ' + label + context);
+            return {
+                result: royalTerminal.result,
+                log: moveLines.join('\n'),
+                reason: royalTerminal.reason,
+                samples: texelSamples
+            };
+        }
+
         try {
             const icnString = generateSetupICN(
                 variantName,

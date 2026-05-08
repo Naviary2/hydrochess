@@ -429,6 +429,10 @@ function generateICNFromWorkerLog(workerLog, gameIndex, result, newPlaysWhite, e
             termination = 'Loss on engine failure (no move returned)';
         } else if (endReason === 'horde_elimination') {
             termination = `Win by capturing all White pieces in ${displayVariantName}`;
+        } else if (endReason === 'allroyalscaptured') {
+            termination = 'All royals captured';
+        } else if (endReason === 'royalcapture') {
+            termination = 'Royal capture';
         } else if (endReason === 'checkmate') {
             termination = 'Checkmate';
         } else if (endReason === 'stalemate') {
