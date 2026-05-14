@@ -1,6 +1,6 @@
 use crate::board::{PieceType, PlayerColor};
 use crate::evaluation::evaluate;
-use crate::game::GameState;
+use crate::game::{GameState, WinCondition};
 use crate::moves::{Move, MoveGenContext, MoveList, get_quiescence_captures};
 use crate::search::params::{
     aspiration_fail_mult, aspiration_max_window, aspiration_window, delta_margin,
@@ -127,6 +127,24 @@ pub const fn mate_in(ply: usize) -> i32 {
 #[inline(always)]
 pub const fn mated_in(ply: usize) -> i32 {
     -MATE_VALUE + ply as i32
+}
+
+#[inline(always)]
+fn win_condition_for_side(game: &GameState, color: PlayerColor) -> WinCondition {
+    match color {
+        PlayerColor::White => game.game_rules.white_win_condition,
+        PlayerColor::Black => game.game_rules.black_win_condition,
+        PlayerColor::Neutral => WinCondition::Checkmate,
+    }
+}
+
+#[inline(always)]
+fn opponent_win_condition_for_side(game: &GameState, color: PlayerColor) -> WinCondition {
+    match color {
+        PlayerColor::White => game.game_rules.black_win_condition,
+        PlayerColor::Black => game.game_rules.white_win_condition,
+        PlayerColor::Neutral => WinCondition::Checkmate,
+    }
 }
 
 #[inline(always)]
@@ -3839,6 +3857,9 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         let captured_type = captured_piece.map(|p| p.piece_type());
         let is_promotion = m.promotion.is_some();
         let p_type = m.piece.piece_type();
+        let is_royal_capture_win =
+            captured_type.is_some_and(|pt| pt.is_royal())
+                && win_condition_for_side(game, game.turn) == WinCondition::RoyalCapture;
 
         // Check if this move gives check to enemy king (O(1) for knights/pawns)
         let gives_check = StagedMoveGen::move_gives_check_fast(game, &m);
@@ -3859,7 +3880,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
             if is_capture || gives_check {
                 // Capture/check pruning
-                if let Some(cap_type) = captured_type {
+                if let Some(cap_type) = captured_type.filter(|_| !is_royal_capture_win) {
                     let capt_hist = searcher.capture_history[p_type as usize][cap_type as usize];
 
                     // SEE pruning for captures: skip losing captures
@@ -4697,6 +4718,11 @@ fn quiescence(
         return VALUE_DRAW;
     }
 
+    // Royal capture loss must be resolved before TT probes.
+    if game.has_lost_by_royal_capture() {
+        return -MATE_VALUE + ply as i32;
+    }
+
     if searcher.check_time() {
         return 0;
     }
@@ -4754,19 +4780,20 @@ fn quiescence(
         }
     }
 
-    // Royal capture loss: if our king was just captured (RoyalCapture/AllRoyalsCaptured variants)
-    if game.has_lost_by_royal_capture() {
-        return -MATE_VALUE + ply as i32;
-    }
-    // Only treat check specially if we must escape (checkmate-based win condition)
+    // Checkmate checks are legal constraints. RoyalCapture checks are not
+    // terminal, but qsearch must resolve them with evasion moves; otherwise a
+    // side can stand-pat while its royal is captured on the next ply.
     let must_escape = in_check && game.must_escape_check();
+    let must_resolve_royal_capture =
+        in_check && opponent_win_condition_for_side(game, game.turn) == WinCondition::RoyalCapture;
+    let tactical_check = must_escape || must_resolve_royal_capture;
 
     // Step 4. Static evaluation
     let mut unadjusted_static_eval = INFINITY + 1;
     let mut best_value;
     let mut best_move: Option<Move> = None;
 
-    if must_escape {
+    if tactical_check {
         best_value = -INFINITY;
     } else {
         // Calculate previous move index for correction history
@@ -4851,9 +4878,9 @@ fn quiescence(
     }
 
     // Qsearch depth limit: prevents exponential blowup from check/evasion chains.
-    // When must_escape, stand-pat is disabled and ALL evasions recurse.
+    // When tactical_check is true, stand-pat is disabled and evasions recurse.
     if qs_ply >= MAX_QSEARCH_DEPTH {
-        if must_escape {
+        if tactical_check {
             // Stand-pat was suppressed; return static eval as an approximation.
             #[cfg(feature = "nnue")]
             {
@@ -4869,8 +4896,9 @@ fn quiescence(
     std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
     tactical_moves.clear();
 
-    if must_escape {
-        // In check and must escape - only generate evasion moves
+    if tactical_check {
+        // In check: checkmate variants require evasions; RoyalCapture qsearch
+        // uses the same narrow evasion set to resolve whether capture is forced.
         game.get_evasion_moves_into(&mut tactical_moves);
     } else {
         // Normal quiescence: generate captures only
@@ -4921,11 +4949,14 @@ fn quiescence(
         // Exception: Recaptures of the square where the opponent just moved
         let is_recapture = prev_sq.is_some_and(|sq| sq == m.to);
 
+        let captures_royal_for_win = captured.is_some_and(|p| p.piece_type().is_royal())
+            && win_condition_for_side(game, game.turn) == WinCondition::RoyalCapture;
+
         if !in_check && legal_moves > 2 && !is_capture && !gives_check && !is_recapture {
             continue;
         }
 
-        if !in_check && !is_loss(best_value) && !is_recapture {
+        if !captures_royal_for_win && !in_check && !is_loss(best_value) && !is_recapture {
             let see_gain = static_exchange_eval(game, m);
             if see_gain < 0 {
                 continue;
@@ -4986,7 +5017,7 @@ fn quiescence(
     }
 
     if legal_moves == 0 {
-        let checkmate = in_check && game.must_escape_check();
+        let checkmate = tactical_check;
         let no_pieces = !game.has_pieces(game.turn);
         if checkmate || no_pieces {
             std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
@@ -5256,7 +5287,7 @@ mod tests {
         // Check stats are populated
         assert!(stats.tt_capacity > 0);
     }
-
+    
     // ======================== Evaluation with Search Tests ========================
 
     #[test]
