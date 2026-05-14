@@ -3181,23 +3181,20 @@ fn negamax_root(
         if score > best_score {
             best_score = score;
             best_move = Some(*m);
+        }
+
+        if legal_moves == 1 || score > alpha {
+            searcher.best_move_root = Some(*m);
+            searcher.pv_table[0] = Some(*m);
+            let child_len = searcher.pv_length[1];
+            let child_base = MAX_PLY;
+            for j in 0..child_len {
+                searcher.pv_table[1 + j] = searcher.pv_table[child_base + j];
+            }
+            searcher.pv_length[0] = child_len + 1;
 
             if score > alpha {
                 alpha = score;
-
-                // if legal_moves > 1 {
-                //     searcher.hot.best_move_changes += 1.0;
-                // }
-
-                // Update PV using triangular indexing
-                // Root (ply 0) stores PV at pv_table[0..], child (ply 1) at pv_table[MAX_PLY..]
-                searcher.pv_table[0] = Some(*m); // Head of PV is this move
-                let child_len = searcher.pv_length[1];
-                let child_base = MAX_PLY;
-                for j in 0..child_len {
-                    searcher.pv_table[1 + j] = searcher.pv_table[child_base + j];
-                }
-                searcher.pv_length[0] = child_len + 1;
             }
         }
 
@@ -3235,6 +3232,7 @@ fn negamax_root(
     } else {
         TTFlag::Exact
     };
+    let tt_best_move = searcher.pv_table[0].or(best_move);
     store_tt_with_shared(
         searcher,
         &StoreContext {
@@ -3244,7 +3242,7 @@ fn negamax_root(
             score: best_score,
             static_eval: INFINITY + 1, // Not computed at root normally, or already stored
             is_pv: true,
-            best_move,
+            best_move: tt_best_move,
             ply: 0,
         },
     );
