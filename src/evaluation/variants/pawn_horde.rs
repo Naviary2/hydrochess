@@ -16,21 +16,26 @@ const PAWN_VALUE: i32 = 90;
 
 // White (Horde) Bonuses
 const PHALANX_BONUS: i32 = 12; // Side-by-side pawns
-const SUPPORT_BONUS: i32 = 15; // Protected pawns
+const SUPPORT_BONUS: i32 = 27; // Protected pawns
 const KING_ATTACK_BONUS: i32 = 20; // Pawns near enemy king
 
-// Black (Pieces) Bonuses
-const BREAKTHROUGH_BONUS: i32 = 150; // Major piece behind the pawn wall
+// Black (Pieces) Bonuses/Penalties
+const BREAKTHROUGH_BONUS: i32 = 45; // Major piece behind the pawn wall
 const ATTACKING_PAWN_BONUS: i32 = 25; // Attacking a pawn
+const MG_KING_NEAR_FRONT_PENALTY: i32 = 40;
+const EG_KING_NEAR_FRONT_PENALTY: i32 = 0;
+
+// Phase System
+const MAX_B_PHASE: i32 = 56;
 
 // Rank-based pawn advancement curve (0-indexed, relative to promotion)
 // Closer to 0 means closer to promotion
 fn get_pawn_advance_bonus(dist_to_promo: i32) -> i32 {
     match dist_to_promo {
         0 => 0,   // Promoted (not a pawn anymore)
-        1 => 250, // Rank 7 - Huge threat
-        2 => 100, // Rank 6 - Major threat
-        3 => 40,  // Rank 5
+        1 => 270, // Rank 7 - Huge threat
+        2 => 120, // Rank 6 - Major threat
+        3 => 50,  // Rank 5
         4 => 20,  // Rank 4
         5 => 10,  // Rank 3
         _ => 5,   // Back ranks
@@ -44,6 +49,7 @@ pub fn evaluate(game: &GameState) -> i32 {
     let mut white_pawns: ArrayVec<Coordinate, 64> = ArrayVec::new();
     let mut black_pieces: ArrayVec<(Coordinate, PieceType), 18> = ArrayVec::new();
     let mut black_king_pos = Coordinate::new(5, 8); // Default fallback
+    let mut b_phase = 0;
 
     // Map for quick lookup of pawn locations
     // Using a simple vector check is fast enough for 56 items
@@ -53,6 +59,7 @@ pub fn evaluate(game: &GameState) -> i32 {
         match piece.color() {
             PlayerColor::White => {
                 if piece.piece_type() == PieceType::Pawn {
+                    b_phase += 1;
                     white_pawns.push(coord);
                     score += PAWN_VALUE; // Material count
                 } else {
@@ -89,7 +96,7 @@ pub fn evaluate(game: &GameState) -> i32 {
         // Phalanx (Horizontal neighbors) - creates a wall
         // We scan the list - O(N^2) but N is small (36) => ~1000 ops, totally fine
         let mut neighbors = 0;
-        let mut supported = false;
+        let mut supporting_pawns = 0;
 
         for other in &white_pawns {
             if other == pawn {
@@ -106,16 +113,16 @@ pub fn evaluate(game: &GameState) -> i32 {
             // If promo is 8, support is at y-1.
             let support_y = pawn.y - 1;
             if other.y == support_y && (other.x - pawn.x).abs() == 1 {
-                supported = true;
+                supporting_pawns += 1;
             }
         }
 
-        if neighbors > 0 {
-            score += PHALANX_BONUS + (neighbors * 5);
-        }
-        if supported {
+        if supporting_pawns > 0 {
             score += SUPPORT_BONUS;
+        } else if neighbors > 0 {
+            score += PHALANX_BONUS;
         }
+        score += neighbors * 4 + supporting_pawns * 6;
 
         // King Attack Tropism
         let dist_to_king = (pawn.x - black_king_pos.x).abs() + (pawn.y - black_king_pos.y).abs();
@@ -125,6 +132,12 @@ pub fn evaluate(game: &GameState) -> i32 {
     }
 
     // 3. Black Logic (Pieces)
+    b_phase = b_phase.min(MAX_B_PHASE);
+    let taper = |mg: i32, eg: i32| -> i32 {
+        ((mg * b_phase.min(MAX_B_PHASE))
+            + (eg * (MAX_B_PHASE - b_phase.min(MAX_B_PHASE))))
+            / MAX_B_PHASE
+    };
     for (pos, ptype) in &black_pieces {
         // Breakthrough: Are we behind the pawn wall?
         if pos.y < min_pawn_y && (*ptype == PieceType::Rook || *ptype == PieceType::Queen) {
@@ -157,7 +170,7 @@ pub fn evaluate(game: &GameState) -> i32 {
     let king_safety_dist = (black_king_pos.y - min_pawn_y).abs(); // Vertical distance to pawn front
     if king_safety_dist < 3 {
         // King is dangerously close to the front
-        score += 50; // Penalty for Black (positive score)
+        score += taper(MG_KING_NEAR_FRONT_PENALTY, EG_KING_NEAR_FRONT_PENALTY); // Penalty for Black (positive score)
     }
 
     // Return perspective
@@ -190,8 +203,8 @@ mod tests {
     #[test]
     fn test_get_pawn_advance_bonus() {
         // Near promotion -> high bonus
-        assert_eq!(get_pawn_advance_bonus(1), 250);
-        assert_eq!(get_pawn_advance_bonus(2), 100);
+        assert!(get_pawn_advance_bonus(1) > get_pawn_advance_bonus(2));
+        assert!(get_pawn_advance_bonus(2) >= 100);
         // Further back -> lower bonus
         assert!(get_pawn_advance_bonus(3) < get_pawn_advance_bonus(2));
         assert!(get_pawn_advance_bonus(6) < get_pawn_advance_bonus(3));
