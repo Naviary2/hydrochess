@@ -1,5 +1,5 @@
 ﻿use crate::board::{Board, Coordinate, Piece, PieceType, PlayerColor};
-use crate::game::GameState;
+use crate::game::{GameState, WinCondition};
 
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
@@ -1465,17 +1465,28 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                         let gt_att_mult = taper(180, 360);
                         let gt_def_mult = taper(120, 60);
 
+                        let w_att_scale = match game.game_rules.white_win_condition {
+                            WinCondition::AllRoyalsCaptured => 80,
+                            _ => 100,
+                        };
+                        let b_att_scale = match game.game_rules.black_win_condition {
+                            WinCondition::AllRoyalsCaptured => 80,
+                            _ => 100,
+                        };
+                        let w_def_scale = 100;
+                        let b_def_scale = 100;
+
                         // Normalize by 1000 since piece values are high and we want roughly 10-100 pts
-                        let w_gt = (w_attacking_tropism * gt_att_mult / 100)
-                            + (w_defensive_tropism * gt_def_mult / 100);
-                        let b_gt = (b_attacking_tropism * gt_att_mult / 100)
-                            + (b_defensive_tropism * gt_def_mult / 100);
+                        let w_gt = (w_attacking_tropism * gt_att_mult * w_att_scale / 10000)
+                            + (w_defensive_tropism * gt_def_mult * w_def_scale / 10000);
+                        let b_gt = (b_attacking_tropism * gt_att_mult * b_att_scale / 10000)
+                            + (b_defensive_tropism * gt_def_mult * b_def_scale / 10000);
 
                         tracer.record("Global Tropism", w_gt, b_gt);
                         score += w_gt - b_gt;
 
                         // Finalize unified pawn storm metrics (collected during main loop)
-                        // Apply synergy multiplier when 2+ pawns threaten, then taper by phase
+                        // Apply synergy multiplier when 2+ pawns threaten, then taper by phase.
                         let mut w_storm = w_pawn_storm_total;
                         let mut b_storm = b_pawn_storm_total;
                         if w_storm_count >= 2 {
@@ -1484,8 +1495,16 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                         if b_storm_count >= 2 {
                             b_storm = b_storm * (100 + (b_storm_count - 1) * 12) / 100;
                         }
-                        let w_storm = taper(w_storm, w_storm * 40 / 100);
-                        let b_storm = taper(b_storm, b_storm * 40 / 100);
+                        let w_storm_scale = match game.game_rules.white_win_condition {
+                            WinCondition::AllRoyalsCaptured => 55,
+                            _ => 100,
+                        };
+                        let b_storm_scale = match game.game_rules.black_win_condition {
+                            WinCondition::AllRoyalsCaptured => 55,
+                            _ => 100,
+                        };
+                        let w_storm = taper(w_storm, w_storm * 40 / 100) * w_storm_scale / 100;
+                        let b_storm = taper(b_storm, b_storm * 40 / 100) * b_storm_scale / 100;
 
                         tracer.record("King: Pawn Storm", w_storm, b_storm);
                         score += w_storm - b_storm;
@@ -1956,10 +1975,25 @@ pub fn evaluate_king_safety_traced<T: EvaluationTracer>(
         b_attack += compute_attack_bonus_optimized(w_king_rays, metrics.black_slider_counts);
     }
 
-    tracer.record("King: Shelter", w_safety, b_safety);
-    tracer.record("King: Attack", w_attack, b_attack);
+    // AllRoyalsCaptured: losing one royal isn't immediately fatal — moderate reduction.
+    // white_mult gates white's attack aggressiveness and black's safety concern (same condition).
+    // black_mult gates black's attack aggressiveness and white's safety concern (same condition).
+    let white_rc_mult = match game.game_rules.white_win_condition {
+        WinCondition::AllRoyalsCaptured => 65,
+        _ => 100,
+    };
+    let black_rc_mult = match game.game_rules.black_win_condition {
+        WinCondition::AllRoyalsCaptured => 65,
+        _ => 100,
+    };
 
-    (w_safety + w_attack) - (b_safety + b_attack)
+    let w_total = w_safety * black_rc_mult / 100 + w_attack * white_rc_mult / 100;
+    let b_total = b_safety * white_rc_mult / 100 + b_attack * black_rc_mult / 100;
+
+    tracer.record("King: Shelter", w_safety * black_rc_mult / 100, b_safety * white_rc_mult / 100);
+    tracer.record("King: Attack", w_attack * white_rc_mult / 100, b_attack * black_rc_mult / 100);
+
+    w_total - b_total
 }
 
 /// Ray-based attack bonus: open rays toward enemy king with slider presence.
@@ -2010,7 +2044,7 @@ fn compute_attack_bonus_optimized(
 
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_rook(
-    _game: &GameState,
+    game: &GameState,
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -2024,16 +2058,30 @@ pub fn evaluate_rook(
         |mg: i32, eg: i32| -> i32 { ((mg * phase) + (eg * (MAX_PHASE - phase))) / MAX_PHASE };
     let mut bonus: i32 = 0;
 
-    // Behind enemy king bonus and rook tropism.
+    // Scale king-targeting bonuses based on own win condition.
+    // AllRoyalsCaptured: partial focus on enemy king.
+    let own_win_cond = if color == PlayerColor::White {
+        game.game_rules.white_win_condition
+    } else {
+        game.game_rules.black_win_condition
+    };
+    let king_mult = match own_win_cond {
+        WinCondition::AllRoyalsCaptured => 70,
+        _ => 100,
+    };
+
     let enemy_royals = if color == PlayerColor::White {
         black_royals
     } else {
         white_royals
     };
+
+    let mut king_bonus: i32 = 0;
+
     for &ek in enemy_royals {
         // Behind enemy king along the rank direction.
         if (color == PlayerColor::White && y > ek.y) || (color == PlayerColor::Black && y < ek.y) {
-            bonus += taper(MG_BEHIND_KING_BONUS, EG_BEHIND_KING_BONUS);
+            king_bonus += taper(MG_BEHIND_KING_BONUS, EG_BEHIND_KING_BONUS);
             break;
         }
     }
@@ -2041,7 +2089,7 @@ pub fn evaluate_rook(
     for &ek in enemy_royals {
         // On same or adjacent file to enemy king: strong attacking potential.
         if (x - ek.x).abs() <= 1 {
-            bonus += 50;
+            king_bonus += 50;
             break;
         }
     }
@@ -2064,7 +2112,7 @@ pub fn evaluate_rook(
             confinement_bonus += 40;
         }
 
-        bonus += confinement_bonus;
+        king_bonus += confinement_bonus;
         if confinement_bonus > 0 {
             break;
         }
@@ -2074,10 +2122,12 @@ pub fn evaluate_rook(
         // Simplified slider coordination - just count nearby sliders without iteration
         if (x - ek.x).abs() <= 4 && (y - ek.y).abs() <= 4 {
             // This rook is close to king, assume some coordination exists
-            bonus += SLIDER_NET_BONUS / 2;
+            king_bonus += SLIDER_NET_BONUS / 2;
             break;
         }
     }
+
+    bonus += king_bonus * king_mult / 100;
 
     // Penalize rooks that have drifted very far from the king zone
     let mut min_cheb = i64::MAX;
@@ -2143,6 +2193,17 @@ pub fn evaluate_queen(
         |mg: i32, eg: i32| -> i32 { ((mg * phase) + (eg * (MAX_PHASE - phase))) / MAX_PHASE };
     let mut bonus: i32 = 0;
 
+    // Scale king-targeting bonuses based on own win condition.
+    let own_win_cond = if color == PlayerColor::White {
+        game.game_rules.white_win_condition
+    } else {
+        game.game_rules.black_win_condition
+    };
+    let king_mult = match own_win_cond {
+        WinCondition::AllRoyalsCaptured => 70,
+        _ => 100,
+    };
+
     // Queen should aggressively aim at the enemy king from a safe distance.
     let enemy_royals = if color == PlayerColor::White {
         black_royals
@@ -2168,12 +2229,15 @@ pub fn evaluate_queen(
                 let base = (max_lin - diff * 2).max(0);
                 line_bonus +=
                     base * (taper(MG_KING_TROPISM_BONUS, EG_KING_TROPISM_BONUS) / 2).max(1);
-                bonus += line_bonus;
-                if (color == PlayerColor::White && y > ek.y)
-                    || (color == PlayerColor::Black && y < ek.y)
-                {
-                    bonus += 10;
-                }
+                let line_bonus = line_bonus
+                    + if (color == PlayerColor::White && y > ek.y)
+                        || (color == PlayerColor::Black && y < ek.y)
+                    {
+                        10
+                    } else {
+                        0
+                    };
+                bonus += line_bonus * king_mult / 100;
                 break;
             }
         }
@@ -2228,7 +2292,7 @@ pub fn evaluate_queen(
 
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_bishop(
-    _game: &GameState,
+    game: &GameState,
     x: i64,
     y: i64,
     color: PlayerColor,
@@ -2242,6 +2306,17 @@ pub fn evaluate_bishop(
         |mg: i32, eg: i32| -> i32 { ((mg * phase) + (eg * (MAX_PHASE - phase))) / MAX_PHASE };
     let mut bonus: i32 = 0;
 
+    // Scale king-targeting bonuses based on own win condition.
+    let own_win_cond = if color == PlayerColor::White {
+        game.game_rules.white_win_condition
+    } else {
+        game.game_rules.black_win_condition
+    };
+    let king_mult = match own_win_cond {
+        WinCondition::AllRoyalsCaptured => 70,
+        _ => 100,
+    };
+
     // Long diagonal control bonus: bishops near "main" diagonals get a small bonus.
     if (x - y).abs() <= 1 || (x + y - 8).abs() <= 1 {
         bonus += 8;
@@ -2253,10 +2328,11 @@ pub fn evaluate_bishop(
     } else {
         white_royals
     };
+
     for &ek in enemy_royals {
         // Bishop behind enemy king along the rank direction (less direct than rook/queen).
         if (color == PlayerColor::White && y > ek.y) || (color == PlayerColor::Black && y < ek.y) {
-            bonus += taper(MG_BEHIND_KING_BONUS, EG_BEHIND_KING_BONUS) / 2;
+            bonus += taper(MG_BEHIND_KING_BONUS, EG_BEHIND_KING_BONUS) / 2 * king_mult / 100;
             break;
         }
     }

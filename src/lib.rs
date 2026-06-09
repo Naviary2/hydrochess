@@ -48,6 +48,7 @@ pub enum Variant {
     DoubleKingClassical,
     DoubleKingChess,
     TripleKingMaze, // variant created by Nikita
+    AllPiecesClassical, // Classical setup, allpiecescaptured win condition (tests base eval)
 }
 
 impl Variant {
@@ -117,6 +118,9 @@ impl Variant {
             Variant::DoubleKingChess => {
                 "w 0/100 1 (8|1) 1,8,1,8 k5,8+|k4,8+|n2,8|n7,8|r1,8+|r8,8+|b3,8|b6,8|p1,7+|p2,7+|p3,7+|p4,7+|p5,7+|p6,7+|p7,7+|p8,7+|K5,1+|K4,1+|N2,1|N7,1|R1,1+|R8,1+|B3,1|B6,1|P1,2+|P2,2+|P3,2+|P4,2+|P5,2+|P6,2+|P7,2+|P8,2+"
             }
+            Variant::AllPiecesClassical => {
+                "w 0/100 1 (8|1) allpiecescaptured,allpiecescaptured P1,2+|P2,2+|P3,2+|P4,2+|P5,2+|P6,2+|P7,2+|P8,2+|p1,7+|p2,7+|p3,7+|p4,7+|p5,7+|p6,7+|p7,7+|p8,7+|R1,1+|R8,1+|r1,8+|r8,8+|N2,1|N7,1|n2,8|n7,8|B3,1|B6,1|b3,8|b6,8|Q4,1|q4,8|K5,1+|k5,8+"
+            }
             Variant::TripleKingMaze => {
                 "w 0/200 1 (8|1) -8,18,-8,17 checkmate,allroyalscaptured vo0,0|vo1,0|vo2,0|vo3,0|vo4,0|vo5,0|vo10,0|vo0,9|vo10,1|vo10,2|vo10,9|vo9,9|vo6,9|vo8,9|vo7,9|vo0,8|vo0,7|vo0,4|vo0,3|vo10,6|vo10,5|vo3,9|vo3,6|vo3,5|vo3,4|vo3,3|vo7,5|vo7,4|vo7,3|vo4,9|vo5,9|vo6,0|vo7,0|vo-2,7|vo-1,7|vo11,2|vo12,2|vo-6,12|vo-6,11|vo-6,6|vo-6,5|vo-6,2|vo-6,-1|vo-6,-2|vo-6,-3|vo16,-3|vo16,-2|vo16,-1|vo16,2|vo16,4|vo16,7|vo16,10|vo16,11|vo16,12|vo-3,4|vo-3,3|vo-3,2|vo-3,1|vo-3,-3|vo-3,0|vo-3,7|vo-3,9|vo-3,8|vo13,2|vo13,1|vo13,0|vo13,5|vo13,6|vo13,7|vo13,8|vo13,9|vo0,-3|vo1,-3|vo2,-3|vo5,-3|vo8,12|vo9,12|vo10,12|vo-3,12|vo0,12|vo10,-3|vo13,-3|vo13,12|vo0,14|vo0,13|vo10,-4|vo10,-5|vo15,7|vo-5,2|vo-4,2|vo-3,-4|vo-3,-5|vo13,14|vo13,13|vo-6,10|vo16,3|vo-6,7|vo6,-3|vo7,-3|vo3,12|vo4,12|vo5,12|vo-8,-6|vo-7,-6|vo-6,-6|vo-3,-6|vo13,15|vo16,15|vo17,15|vo18,15|vo-2,-6|vo-1,-6|vo0,-6|vo1,-6|vo2,-6|vo3,-6|vo7,-6|vo8,-6|vo9,-6|vo10,-6|vo0,15|vo1,15|vo2,15|vo3,15|vo7,15|vo8,15|vo9,15|vo10,15|vo11,15|vo12,15|vo11,-6|vo12,-6|vo13,-6|vo16,-6|vo17,-6|vo18,-6|vo-3,15|vo-2,15|vo-1,15|vo-8,15|vo-7,15|vo-6,15|vo7,6|vo14,7|k5,7|k-8,17|k18,17|q5,17|n14,14|n-4,14|n14,8|n0,11|n0,10|n10,11|n10,10|r-8,14|r-7,13|r-2,8|r-1,8|r17,13|r18,14|r5,16|b5,6|b4,13|b6,13|b-7,17|b-7,16|b17,17|b17,16|b7,7|b3,7|p4,8+|p5,8+|p6,8+|p15,6+|p-5,8+|p1,9+|p2,9+|p8,8+|p9,8+|p-8,8+|p-7,8+|p17,4+|p18,4+|K5,2|K-8,-8|K18,-8|Q5,-8|N14,-5|N-4,-5|N-4,1|N10,-1|N10,-2|N0,-1|N0,-2|R17,-4|R11,1|R12,1|R18,-5|R-8,-5|R-7,-4|R5,-7|B5,3|B4,-4|B6,-4|B5,-2|B-7,-7|B-7,-8|B17,-7|B17,-8|B7,2|B3,2|P4,1+|P5,1+|P6,1+|P15,1+|P-5,3+|P8,0+|P9,0+|P1,1+|P2,1+|P17,1+|P18,1+|P-8,5+|P-7,5+|b5,11"
             }
@@ -147,6 +151,7 @@ impl Variant {
             Variant::DoubleKingClassical => "Double_King_Classical",
             Variant::DoubleKingChess => "Double_King_Chess",
             Variant::TripleKingMaze => "Triple_King_Maze",
+            Variant::AllPiecesClassical => "All_Pieces_Classical",
         }
     }
 
@@ -175,6 +180,7 @@ impl Variant {
             "double_king_classical" => Variant::DoubleKingClassical,
             "double_king_chess" => Variant::DoubleKingChess,
             "triple_king_maze" => Variant::TripleKingMaze,
+            "all_pieces_classical" => Variant::AllPiecesClassical,
             _ => Variant::Classical, // Default fallback
         }
     }
