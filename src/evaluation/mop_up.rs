@@ -12,6 +12,24 @@ use crate::utils::is_prime_fast;
 /// Threshold for disabling mop-up evaluation if the opponent still has significant material.
 const MOP_UP_THRESHOLD_PERCENT: u32 = 15;
 
+/// Boards whose larger dimension is at most this use the bounded lone-king
+/// driving model (the edge confines the king); larger boards use the
+/// piece-coordination model that works without an edge.
+const MOP_UP_BOUNDED_MAX: i64 = 200;
+
+// Bounded lone-king driving (small Stockfish-style tiebreaker on the pawn=100
+// scale). push_to_edge drives the bare king to an edge/corner; push_close keeps
+// the kings together; the KBN term forces the bishop-colored corner. Magnitudes
+// are deliberately small so they guide conversion without overriding material or
+// chasing stalemate.
+const EDGE_DIST_CAP: i64 = 3;
+const EDGE_CORNER_BONUS: i32 = 48;
+const EDGE_FALLOFF: i32 = 2;
+const KING_CLOSE_BONUS: i32 = 60;
+const KING_CLOSE_STEP: i32 = 10;
+const KBN_CORNER_BONUS: i32 = 160;
+const KBN_CORNER_STEP: i32 = 20;
+
 #[derive(Clone, Copy)]
 struct SliderInfo {
     x: i64,
@@ -149,8 +167,54 @@ fn ideal_distance(pt: PieceType) -> (i64, i64) {
     }
 }
 
+/// Evaluates the "wall" bit for each not-yet-evaluated `x` set in `need` on row
+/// `local_y` of the cage window, recording results in `forbidden`/`computed`.
+/// A wall is an out-of-bounds, our-attacked, or our-occupied square.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn cage_eval_walls(
+    board: &Board,
+    indices: &SpatialIndices,
+    our_color: PlayerColor,
+    origin_x: i64,
+    origin_y: i64,
+    bounds: (i64, i64, i64, i64),
+    local_y: usize,
+    need: u32,
+    forbidden: &mut [u32; 32],
+    computed: &mut [u32; 32],
+) {
+    let todo = need & !computed[local_y];
+    if todo == 0 {
+        return;
+    }
+    computed[local_y] |= need;
+    let (min_x, max_x, min_y, max_y) = bounds;
+    let abs_y = origin_y + local_y as i64;
+    let mut bits = todo;
+    while bits != 0 {
+        let local_x = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        let abs_x = origin_x + local_x as i64;
+        let wall = abs_x < min_x
+            || abs_x > max_x
+            || abs_y < min_y
+            || abs_y > max_y
+            || is_square_attacked(board, &Coordinate::new(abs_x, abs_y), our_color, indices)
+            || board.is_occupied_by_color(abs_x, abs_y, our_color);
+        if wall {
+            forbidden[local_y] |= 1 << local_x;
+        }
+    }
+}
+
 /// Detects if the enemy king is trapped within a localized "cage" of attacked squares.
 /// Returns whether a cage exists and the total reachable area for the king.
+///
+/// Floods an enemy-king-centered 32x32 window away from the king, treating
+/// out-of-bounds / our-attacked / our-occupied squares as walls. Wall squares
+/// are evaluated lazily — only for cells the flood actually reaches — so a small
+/// contained cage costs a handful of `is_square_attacked` calls rather than 1024.
 #[inline]
 fn find_bitboard_cage(
     board: &Board,
@@ -158,56 +222,27 @@ fn find_bitboard_cage(
     enemy_king: &Coordinate,
     our_color: PlayerColor,
 ) -> (bool, u32) {
-    // 32x32 local window centered on king
-    // Indices 0..31 map to king_coord - 16 .. king_coord + 15
-    let mut forbidden = [0u32; 32];
+    // 32x32 local window: indices 0..31 map to king_coord - 16 .. king_coord + 15.
     let origin_x = enemy_king.x - 16;
     let origin_y = enemy_king.y - 16;
+    let bounds = crate::moves::get_coord_bounds();
 
-    // 1. Identify forbidden squares (attacked, occupied, or out of bounds)
-    let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+    let mut forbidden = [0u32; 32];
+    let mut computed = [0u32; 32];
 
-    for (local_y, forbidden_row) in forbidden.iter_mut().enumerate() {
-        let abs_y = origin_y + local_y as i64;
-        for local_x in 0..32 {
-            let abs_x = origin_x + local_x as i64;
-
-            // If out of bounds, it's a "wall"
-            if abs_x < min_x || abs_x > max_x || abs_y < min_y || abs_y > max_y {
-                *forbidden_row |= 1 << local_x;
-                continue;
-            }
-
-            let target = Coordinate::new(abs_x, abs_y);
-
-            // If square is attacked or occupied by our piece, it's a "wall"
-            if is_square_attacked(board, &target, our_color, indices)
-                || board.is_occupied_by_color(abs_x, abs_y, our_color)
-            {
-                *forbidden_row |= 1 << local_x;
-            }
-        }
-    }
-
-    // 2. Flood fill from center (16, 16)
+    // Flood fill from the center (16, 16) via iterative 8-way dilation.
     let mut reachable = [0u32; 32];
     reachable[16] = 1 << 16;
 
-    // Iterative 8-way dilation
     for _ in 0..32 {
-        let mut changed = false;
         let mut next_reachable = reachable;
 
         for y in 0..32 {
             if reachable[y] == 0 {
                 continue;
             }
-
-            // Current row dilation (left/right)
             let row = reachable[y];
             let dilated_row = row | (row << 1) | (row >> 1);
-
-            // Propagate to current row and neighbors
             next_reachable[y] |= dilated_row;
             if y > 0 {
                 next_reachable[y - 1] |= dilated_row;
@@ -217,8 +252,13 @@ fn find_bitboard_cage(
             }
         }
 
-        // Mask out forbidden squares
+        // Evaluate walls for the newly-reached candidate cells, then mask them out.
+        let mut changed = false;
         for y in 0..32 {
+            cage_eval_walls(
+                board, indices, our_color, origin_x, origin_y, bounds, y,
+                next_reachable[y], &mut forbidden, &mut computed,
+            );
             let prev = reachable[y];
             next_reachable[y] &= !forbidden[y];
             if next_reachable[y] != prev {
@@ -242,7 +282,7 @@ fn find_bitboard_cage(
         }
     }
 
-    // 3. Successful fill without hitting the perimeter indicates a contained cage
+    // Successful fill without hitting the perimeter indicates a contained cage.
     let mut area = 0u32;
     for row in reachable.iter() {
         area += row.count_ones();
@@ -341,165 +381,67 @@ pub fn evaluate_mop_up_scaled(
 
 // --- Core Evaluation ---
 
-/// Returns true if this endgame (with our king helping) can only be won by using the world border
-/// as part of the mating net — i.e., the material is insufficient on an unbounded board but
-/// sufficient on a bounded one.
-fn is_bounded_only_winnable(
-    queen_count: u8,
-    rook_count: u8,
-    ortho_count: u8,
-    diag_count: u8,
-    leaper_count: u8,
-    amazon_count: u8,
-    total_non_pawn_pieces: u8,
-    has_king: bool,
-) -> bool {
-    // Amazons can mate without borders; and without our king we have no mating king aid
-    if !has_king || amazon_count >= 1 {
-        return false;
-    }
-
-    // K+Q vs K  (queen alone is insufficient on unbounded)
-    if queen_count == 1 && total_non_pawn_pieces == 1 {
-        return true;
-    }
-    // K+R vs K  (single rook insufficient on unbounded)
-    if rook_count == 1 && queen_count == 0 && total_non_pawn_pieces == 1 {
-        return true;
-    }
-    // K+Chancellor vs K  (ortho slider but not a rook, no diag, no leaper)
-    if ortho_count == 1
-        && rook_count == 0
-        && queen_count == 0
-        && diag_count == 0
-        && leaper_count == 0
-        && total_non_pawn_pieces == 1
-    {
-        return true;
-    }
-    // K+Archbishop vs K  (diag + knight-component but no ortho)
-    if diag_count == 1
-        && ortho_count == 0
-        && queen_count == 0
-        && leaper_count == 0
-        && total_non_pawn_pieces == 1
-    {
-        return true;
-    }
-    // K+R+minor vs K  (R+N or R+same-color-B — insufficient on unbounded)
-    if rook_count == 1 && queen_count == 0 && total_non_pawn_pieces == 2 {
-        return true;
-    }
-
-    false
-}
-
-/// Bonus for driving the enemy king toward world-border corners/edges.
-/// Used when the mating pattern requires the board edge as a fence.
-fn corner_drive_bonus(
-    enemy_king: &Coordinate,
+/// Bounded-board KX-vs-K mating guidance. On a bounded board the edge does the
+/// confining work that pieces must do on an unbounded board, so a small
+/// Stockfish-style tiebreaker is enough: drive the bare king toward the
+/// edge/corner (`push_to_edge`), keep our king close (`push_close`), and for
+/// KBN drive toward a bishop-colored corner. Magnitudes are small so they guide
+/// conversion without overriding material or chasing stalemate.
+fn bounded_lone_king_mop_up(
+    game: &GameState,
     our_king: Option<&Coordinate>,
-    our_pieces: &[SliderInfo],
+    enemy_king: &Coordinate,
+    winning_color: PlayerColor,
 ) -> i32 {
     let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
     let ex = enemy_king.x;
     let ey = enemy_king.y;
 
-    let dist_h = ((ex - min_x) as i32).min((max_x - ex) as i32); // dist to nearest x-wall
-    let dist_v = ((ey - min_y) as i32).min((max_y - ey) as i32); // dist to nearest y-wall
+    // push_to_edge: the closer the bare king is to an edge/corner, the better.
+    let ed_x = (ex - min_x).min(max_x - ex).clamp(0, EDGE_DIST_CAP);
+    let ed_y = (ey - min_y).min(max_y - ey).clamp(0, EDGE_DIST_CAP);
+    let mut bonus = EDGE_CORNER_BONUS - ((ed_x * ed_x + ed_y * ed_y) as i32) * EDGE_FALLOFF;
 
-    let world_w = ((max_x - min_x) as i32).max(1);
-    let world_h = ((max_y - min_y) as i32).max(1);
-    let half_w = (world_w / 2).max(1);
-    let half_h = (world_h / 2).max(1);
-
-    // Strong linear gradient: max at wall (dist=0), zero at board center
-    let edge_h = (half_w - dist_h.min(half_w)) * 16;
-    let edge_v = (half_h - dist_v.min(half_h)) * 16;
-
-    // Smooth proximity bonus using quadratic formula
-    // Rewards continuous progress toward corners/edges
-    // At edge (dist=0): max bonus
-    // At center (dist=half): zero bonus
-    // Formula: (1 - (dist/half)^2) * max_bonus, clamped to [0, max_bonus]
-    let max_proximity = 500i32;
-    let proximity_h = if dist_h < half_w {
-        let ratio = (dist_h as i32) as f32 / (half_w as f32);
-        ((1.0 - ratio * ratio) * max_proximity as f32) as i32
-    } else {
-        0
-    };
-    let proximity_v = if dist_v < half_h {
-        let ratio = (dist_v as i32) as f32 / (half_h as f32);
-        ((1.0 - ratio * ratio) * max_proximity as f32) as i32
-    } else {
-        0
-    };
-    // Corner bonus: both dimensions close to edge get extra reward
-    let corner_bonus = if dist_h == 0 && dist_v == 0 {
-        200 // extra bonus for exact corner
-    } else if dist_h <= 1 && dist_v <= 1 {
-        100 // extra bonus for near corner
-    } else {
-        0
-    };
-    let proximity = proximity_h + proximity_v + corner_bonus;
-
-    // Direction from enemy king toward board center (= its escape direction away from the walls)
-    let cx = (min_x + max_x) / 2;
-    let cy = (min_y + max_y) / 2;
-    let to_center_x = cx - ex; // positive = center is to the right
-    let to_center_y = cy - ey; // positive = center is above
-
-    let mut cut = 0i32;
-    for p in our_pieces {
-        let pdx = p.x - ex;
-        let pdy = p.y - ey;
-
-        // FENCE BONUS: slider aligned on same rank/file AND on the center-side of the enemy king.
-        // A piece on the same rank cuts off all horizontal escape; same file cuts all vertical —
-        // the core technique of K+Q vs K and K+R vs K mating patterns.
-        if pdy == 0 && pdx != 0 {
-            if (to_center_x > 0 && pdx > 0) || (to_center_x < 0 && pdx < 0) {
-                cut += 50;
-            }
-        }
-        if pdx == 0 && pdy != 0 {
-            if (to_center_y > 0 && pdy > 0) || (to_center_y < 0 && pdy < 0) {
-                cut += 50;
-            }
-        }
-
-        // General center-side bonus (piece on the escape side of the enemy king)
-        if to_center_x > 0 && pdx > 0 {
-            cut += 14;
-        } else if to_center_x < 0 && pdx < 0 {
-            cut += 14;
-        }
-        if to_center_y > 0 && pdy > 0 {
-            cut += 14;
-        } else if to_center_y < 0 && pdy < 0 {
-            cut += 14;
-        }
-    }
-
-    // Our king on the center-side helps box in the enemy king from the inside
+    // push_close: bring our king toward the bare king.
     if let Some(ok) = our_king {
-        let kdx = ok.x - ex;
-        let kdy = ok.y - ey;
-        if to_center_x > 0 && kdx > 0 {
-            cut += 10;
-        } else if to_center_x < 0 && kdx < 0 {
-            cut += 10;
+        let d = (ok.x - ex).abs().max((ok.y - ey).abs()) as i32;
+        bonus += (KING_CLOSE_BONUS - d * KING_CLOSE_STEP).max(0);
+    }
+
+    // K+B+N vs K: the bare king can only be mated in a corner the bishop attacks.
+    // For exactly one bishop + one knight (no other helping piece), pull the king
+    // toward the nearest bishop-colored corner.
+    let is_white = winning_color == PlayerColor::White;
+    let (mut bishops, mut knights, mut others) = (0u8, 0u8, 0u8);
+    let mut bishop_sq = (0i64, 0i64);
+    for (x, y, piece) in game.board.iter_pieces_by_color(is_white) {
+        let pt = piece.piece_type();
+        if pt.is_royal() || pt == PieceType::Pawn {
+            continue;
         }
-        if to_center_y > 0 && kdy > 0 {
-            cut += 10;
-        } else if to_center_y < 0 && kdy < 0 {
-            cut += 10;
+        match pt {
+            PieceType::Bishop => {
+                bishops += 1;
+                bishop_sq = (x, y);
+            }
+            PieceType::Knight => knights += 1,
+            _ => others += 1,
+        }
+    }
+    if bishops == 1 && knights == 1 && others == 0 {
+        let bishop_dark = ((bishop_sq.0 + bishop_sq.1) & 1) != 0;
+        let mut best = i64::MAX;
+        for (cx, cy) in [(min_x, min_y), (min_x, max_y), (max_x, min_y), (max_x, max_y)] {
+            if (((cx + cy) & 1) != 0) == bishop_dark {
+                best = best.min((cx - ex).abs().max((cy - ey).abs()));
+            }
+        }
+        if best != i64::MAX {
+            bonus += (KBN_CORNER_BONUS - (best as i32) * KBN_CORNER_STEP).max(0);
         }
     }
 
-    edge_h + edge_v + proximity + cut
+    bonus
 }
 
 /// Specialized technique for K+Amazon vs K:
@@ -1299,6 +1241,15 @@ fn evaluate_mop_up_core(
     enemy_king: &Coordinate,
     winning_color: PlayerColor,
 ) -> i32 {
+    // On a bounded board the edge confines the bare king, so a lone king is
+    // driven with a small edge + proximity tiebreaker. The unbounded
+    // piece-coordination model below is oversized for a small board.
+    if crate::moves::get_world_size() <= MOP_UP_BOUNDED_MAX
+        && is_lone_king(game, winning_color.opponent())
+    {
+        return bounded_lone_king_mop_up(game, our_king, enemy_king, winning_color);
+    }
+
     let mut bonus: i32 = 0;
     let king_relation = if let Some(ok) = our_king {
         let dx = ok.x - enemy_king.x;
@@ -1614,21 +1565,6 @@ fn evaluate_mop_up_core(
                 cage,
             ),
         };
-
-        if crate::moves::get_world_size() <= 200
-            && is_bounded_only_winnable(
-                material.queen_count,
-                material.rook_count,
-                material.ortho_count,
-                material.diag_count,
-                material.leaper_count,
-                material.amazon_count,
-                material.total_non_pawn_pieces,
-                our_king.is_some(),
-            )
-        {
-            bonus += corner_drive_bonus(enemy_king, our_king, our_pieces) * 5;
-        }
     }
 
     if total_sliders >= 2 {
@@ -1929,8 +1865,8 @@ mod tests {
         // White king on the left of black king (5,5). A second piece (chancellor)
         // far away to the right cuts off escape — should score higher than placing
         // it on the same side as our king.
-        // Two chancellors — `is_bounded_only_winnable` doesn't fire so the test
-        // isolates the smart opposition logic instead of the corner-drive bonus.
+        // Unbounded position with two chancellors, so the piece-coordination
+        // model runs and the test isolates the smart opposition logic.
         let opposite = create_test_game_from_icn(
             "w (50;q|1;q) k5,5|K3,5|CH20,5|CH18,3",
         );
@@ -2055,5 +1991,97 @@ mod tests {
             "King should be in a small area, found: {}",
             area
         );
+    }
+
+    /// Straightforward full-window cage computation: evaluates every cell's wall
+    /// bit up front. Used only to verify the lazy `find_bitboard_cage` matches it.
+    fn cage_eager_reference(
+        board: &Board,
+        indices: &SpatialIndices,
+        enemy_king: &Coordinate,
+        our_color: PlayerColor,
+    ) -> (bool, u32) {
+        let mut forbidden = [0u32; 32];
+        let origin_x = enemy_king.x - 16;
+        let origin_y = enemy_king.y - 16;
+        let (min_x, max_x, min_y, max_y) = crate::moves::get_coord_bounds();
+        for (local_y, fr) in forbidden.iter_mut().enumerate() {
+            let abs_y = origin_y + local_y as i64;
+            for local_x in 0..32 {
+                let abs_x = origin_x + local_x as i64;
+                if abs_x < min_x || abs_x > max_x || abs_y < min_y || abs_y > max_y {
+                    *fr |= 1 << local_x;
+                    continue;
+                }
+                if is_square_attacked(board, &Coordinate::new(abs_x, abs_y), our_color, indices)
+                    || board.is_occupied_by_color(abs_x, abs_y, our_color)
+                {
+                    *fr |= 1 << local_x;
+                }
+            }
+        }
+        let mut reachable = [0u32; 32];
+        reachable[16] = 1 << 16;
+        for _ in 0..32 {
+            let mut changed = false;
+            let mut next = reachable;
+            for y in 0..32 {
+                if reachable[y] == 0 {
+                    continue;
+                }
+                let row = reachable[y];
+                let d = row | (row << 1) | (row >> 1);
+                next[y] |= d;
+                if y > 0 {
+                    next[y - 1] |= d;
+                }
+                if y < 31 {
+                    next[y + 1] |= d;
+                }
+            }
+            for y in 0..32 {
+                let prev = reachable[y];
+                next[y] &= !forbidden[y];
+                if next[y] != prev {
+                    changed = true;
+                }
+                reachable[y] = next[y];
+            }
+            if !changed {
+                break;
+            }
+            if (reachable[0] | reachable[31]) != 0 {
+                return (false, 1024);
+            }
+            for r in reachable.iter().take(31).skip(1) {
+                if (r & 0x80000001) != 0 {
+                    return (false, 1024);
+                }
+            }
+        }
+        let mut area = 0u32;
+        for row in reachable.iter() {
+            area += row.count_ones();
+        }
+        (area > 0 && area < 1000, area)
+    }
+
+    #[test]
+    fn test_find_bitboard_cage_matches_eager() {
+        let cases: [(&str, i64, i64); 6] = [
+            ("w (8;q|1;q) k4,4|R4,0|R4,8|R0,4|R8,4|K1,1", 4, 4), // boxed
+            ("w (8;q|1;q) k4,4|K6,6", 4, 4),                     // open
+            ("w (8;q|1;q) k5,5|Q7,7|K3,3", 5, 5),                // queen + king
+            ("w (8;q|1;q) k0,0|R2,0|R0,2|K2,2", 0, 0),           // near corner
+            ("w (8;q|1;q) k10,10|R10,2|R2,10|R18,10|R10,18|K9,9", 10, 10), // boxed off-origin
+            ("w (8;q|1;q) k4,4|B2,2|B6,6|R4,10|R4,-2|K1,1", 4, 4), // diag + ortho walls
+        ];
+        for (icn, kx, ky) in cases {
+            let game = create_test_game_from_icn(icn);
+            let ek = Coordinate::new(kx, ky);
+            let got = find_bitboard_cage(&game.board, &game.spatial_indices, &ek, PlayerColor::White);
+            let want = cage_eager_reference(&game.board, &game.spatial_indices, &ek, PlayerColor::White);
+            assert_eq!(got, want, "cage mismatch for icn: {}", icn);
+        }
     }
 }
