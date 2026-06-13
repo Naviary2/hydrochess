@@ -6,22 +6,36 @@ use crate::moves::Move;
 /// Uses early cutoffs to avoid full SEE calculation when possible.
 #[inline(always)]
 pub(crate) fn see_ge(game: &GameState, m: &Move, threshold: i32) -> bool {
-    // BITBOARD: Fast piece check
-    let captured = match game.board.get_piece(m.to.x, m.to.y) {
-        Some(p) => p,
-        None => return 0 >= threshold, // No capture: SEE = 0
+    let mover_color = m.piece.color();
+
+    // Material won by the move before any recapture: the captured piece (0 for a
+    // quiet, non-capturing move) plus the promotion gain if the move promotes.
+    // For a promotion the piece left standing on the square is the promoted
+    // piece, so that is what is at risk of recapture.
+    let captured_val = match game.board.get_piece(m.to.x, m.to.y) {
+        Some(p) => game.get_piece_value(p.piece_type(), p.color()),
+        None => 0,
     };
+    let (promo_gain, mover_val) = match m.promotion {
+        Some(promo) => {
+            let pv = game.get_piece_value(promo, mover_color);
+            (pv - game.get_piece_value(m.piece.piece_type(), mover_color), pv)
+        }
+        None => (0, game.get_piece_value(m.piece.piece_type(), mover_color)),
+    };
+    let victim_val = captured_val + promo_gain;
+    let attacker_val = mover_val;
 
-    let victim_val = game.get_piece_value(captured.piece_type(), captured.color());
-    let attacker_val = game.get_piece_value(m.piece.piece_type(), m.piece.color());
-
-    // Early cutoff 1: if capturing loses material even if undefended, fail
+    // Early cutoff 1: if the move cannot reach the threshold even when the moved
+    // piece is never recaptured, fail. For a quiet move victim_val == 0, so any
+    // positive threshold fails here without touching the board.
     let swap = victim_val - threshold;
     if swap < 0 {
         return false;
     }
 
-    // Early cutoff 2: if capturing wins material even if we lose attacker, pass
+    // Early cutoff 2: if we still meet the threshold even after losing the moved
+    // piece, pass.
     let swap = attacker_val - swap;
     if swap <= 0 {
         return true;
@@ -36,13 +50,28 @@ pub(crate) fn see_ge(game: &GameState, m: &Move, threshold: i32) -> bool {
 /// Returns the net material gain (in centipawns) for the side to move if both
 /// sides optimally capture/recapture on the destination square of `m`.
 pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
-    let captured = match game.board.get_piece(m.to.x, m.to.y) {
-        Some(p) => p,
-        None => return 0,
-    };
-
     let target_x = m.to.x;
     let target_y = m.to.y;
+
+    // Material captured by the move itself. 0 for a quiet (non-capturing) move:
+    // SEE then measures whether the moved piece can be safely placed on the
+    // target square (the opponent may try to win it via the recapture sequence).
+    let captured_val = match game.board.get_piece(m.to.x, m.to.y) {
+        Some(p) => game.get_piece_value(p.piece_type(), p.color()),
+        None => 0,
+    };
+
+    // The piece that ends up standing on the target square (and is thus exposed
+    // to recapture). For a promotion this is the promoted piece, not the pawn,
+    // and the promotion is itself an immediate material gain.
+    let mover_color = m.piece.color();
+    let (promo_gain, mover_val) = match m.promotion {
+        Some(promo) => {
+            let pv = game.get_piece_value(promo, mover_color);
+            (pv - game.get_piece_value(m.piece.piece_type(), mover_color), pv)
+        }
+        None => (0, game.get_piece_value(m.piece.piece_type(), mover_color)),
+    };
 
     #[derive(Clone, Copy, Debug)]
     struct Attacker {
@@ -55,10 +84,10 @@ pub(crate) fn static_exchange_eval_impl(game: &GameState, m: &Move) -> i32 {
     // 1. Initial State
     let mut gain: [i32; 32] = [0; 32];
     let mut depth = 1;
-    gain[0] = game.get_piece_value(captured.piece_type(), captured.color());
+    gain[0] = captured_val + promo_gain;
 
     let mut side = game.turn;
-    let mut occ_val = game.get_piece_value(m.piece.piece_type(), m.piece.color());
+    let mut occ_val = mover_val;
 
     // 2. Active Attacker Collection
     // We use a SmallVec for the active attackers (those we've already found)
@@ -401,5 +430,90 @@ mod tests {
 
         let see_val = static_exchange_eval_impl(&game, &m);
         assert_eq!(see_val, 0, "Non-capture should return 0");
+    }
+
+    #[test]
+    fn test_see_quiet_safe_thresholds() {
+        // Rook to an empty, unattacked square: SEE == 0, and see_ge reflects that
+        // a quiet move can never *gain* material.
+        let mut game = create_test_game_from_icn("w (8;q|1;q) R5,1");
+        game.turn = PlayerColor::White;
+        let m = Move::new(
+            Coordinate::new(5, 1),
+            Coordinate::new(5, 5),
+            Piece::new(PieceType::Rook, PlayerColor::White),
+        );
+        assert_eq!(static_exchange_eval_impl(&game, &m), 0);
+        assert!(see_ge(&game, &m, 0), "Safe quiet move meets threshold 0");
+        assert!(!see_ge(&game, &m, 1), "Quiet move can never gain material");
+    }
+
+    #[test]
+    fn test_see_quiet_hanging_piece() {
+        // White rook moves to an empty square attacked by a black pawn with no
+        // white defender: the rook is lost for nothing. Previously SEE returned
+        // 0 here (the bug), disabling quiet SEE pruning entirely.
+        let mut game = create_test_game_from_icn("w (8;q|1;q) R5,1|p6,6");
+        game.turn = PlayerColor::White;
+        let m = Move::new(
+            Coordinate::new(5, 1),
+            Coordinate::new(5, 5), // empty, attacked by p6,6
+            Piece::new(PieceType::Rook, PlayerColor::White),
+        );
+
+        let rook = game.get_piece_value(PieceType::Rook, PlayerColor::White);
+        assert_eq!(
+            static_exchange_eval_impl(&game, &m),
+            -rook,
+            "Quiet move hanging the rook to a pawn should be -rook"
+        );
+        assert!(!see_ge(&game, &m, 0), "Hanging quiet move must fail see_ge(>= 0)");
+        assert!(
+            see_ge(&game, &m, -rook),
+            "Hanging quiet move still meets a threshold equal to the loss"
+        );
+    }
+
+    #[test]
+    fn test_see_promotion_safe() {
+        // Pawn promotes to a queen on a safe empty square: net gain ~ queen - pawn.
+        let mut game = create_test_game_from_icn("w (8;q|1;q) P5,7");
+        game.turn = PlayerColor::White;
+        let mut m = Move::new(
+            Coordinate::new(5, 7),
+            Coordinate::new(5, 8),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+        m.promotion = Some(PieceType::Queen);
+
+        let q = game.get_piece_value(PieceType::Queen, PlayerColor::White);
+        let p = game.get_piece_value(PieceType::Pawn, PlayerColor::White);
+        assert_eq!(
+            static_exchange_eval_impl(&game, &m),
+            q - p,
+            "Safe promotion should net queen minus pawn"
+        );
+        assert!(see_ge(&game, &m, 0), "Safe promotion is winning");
+    }
+
+    #[test]
+    fn test_see_promotion_hanging() {
+        // Pawn promotes on a square attacked by a black pawn, undefended: we
+        // promote (+queen-pawn) then lose the queen (-queen) => net -pawn.
+        let mut game = create_test_game_from_icn("w (8;q|1;q) P5,7|p6,9");
+        game.turn = PlayerColor::White;
+        let mut m = Move::new(
+            Coordinate::new(5, 7),
+            Coordinate::new(5, 8),
+            Piece::new(PieceType::Pawn, PlayerColor::White),
+        );
+        m.promotion = Some(PieceType::Queen);
+
+        let p = game.get_piece_value(PieceType::Pawn, PlayerColor::White);
+        assert_eq!(
+            static_exchange_eval_impl(&game, &m),
+            -p,
+            "Promotion hanging the new queen to a pawn nets -pawn"
+        );
     }
 }
