@@ -1285,6 +1285,16 @@ impl Searcher {
         *entry += clamped - ((*entry * clamped.abs()) >> 14);
     }
 
+    /// Gravity-style capture-history update (mirrors `update_history`), clamped to
+    /// [-history_max_gravity, history_max_gravity]. Indexed by mover and victim type.
+    #[inline]
+    pub fn update_capture_history(&mut self, piece: PieceType, victim: PieceType, bonus: i32) {
+        let max_h = params::history_max_gravity();
+        let clamped = bonus.clamp(-max_h, max_h);
+        let entry = &mut self.capture_history[piece as usize][victim as usize];
+        *entry += clamped - ((*entry * clamped.abs()) >> 14);
+    }
+
     /// Update pawn history for moves that caused beta cutoff.
     #[inline]
     pub fn update_pawn_history(
@@ -4481,18 +4491,18 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     }
                 }
             } else if let Some(cap_type) = captured_type {
-                // Update capture history on beta cutoff
-                let bonus = 8 * (depth * depth) as i32;
-                let e =
-                    &mut searcher.capture_history[m.piece.piece_type() as usize][cap_type as usize];
-                *e += bonus - ((*e * bonus) >> 14);
+                // Reward the capture that produced the cutoff.
+                let bonus = (history_bonus_base() * depth as i32 - history_bonus_sub())
+                    .min(history_bonus_cap());
+                searcher.update_capture_history(m.piece.piece_type(), cap_type, bonus);
             }
             break;
         } else if let Some(cap_type) = captured_type {
-            // Penalize captures that didn't cause a cutoff
-            let malus = 2 * depth as i32;
-            let e = &mut searcher.capture_history[m.piece.piece_type() as usize][cap_type as usize];
-            *e += -malus - ((*e * malus) >> 14);
+            // Penalize a capture searched before the cutoff that didn't produce one
+            // (symmetric magnitude with the cutoff bonus).
+            let malus = (history_bonus_base() * depth as i32 - history_bonus_sub())
+                .min(history_bonus_cap());
+            searcher.update_capture_history(m.piece.piece_type(), cap_type, -malus);
         }
     }
 
