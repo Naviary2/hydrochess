@@ -121,9 +121,9 @@ pub fn score_move(
                 }
             }
 
-            // Low-ply history bonus:
+            // Low-ply history bonus (same index as the writer and the staged picker).
             if ply < LOW_PLY_HISTORY_SIZE {
-                let move_hash = hash_move_for_lowply(m);
+                let move_hash = hash_move_dest(m) & LOW_PLY_HISTORY_MASK;
                 score += 8 * searcher.low_ply_history[ply][move_hash] / (1 + ply as i32);
             }
         }
@@ -278,15 +278,6 @@ pub fn hash_coord_32(x: i64, y: i64) -> usize {
     ((h ^ (h >> 32)) & 0x1F) as usize
 }
 
-/// Hash move for low-ply history table (1024 entries)
-#[inline]
-pub fn hash_move_for_lowply(m: &Move) -> usize {
-    let piece = m.piece.piece_type() as u64;
-    let from_hash =
-        (m.from.x.wrapping_abs() as u64) ^ (m.from.y.wrapping_abs() as u64).rotate_left(8);
-    let to_hash = (m.to.x.wrapping_abs() as u64) ^ (m.to.y.wrapping_abs() as u64).rotate_left(16);
-    ((piece ^ from_hash ^ to_hash) & LOW_PLY_HISTORY_MASK as u64) as usize
-}
 
 #[cfg(test)]
 mod tests {
