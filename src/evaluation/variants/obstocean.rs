@@ -361,15 +361,19 @@ fn psqt_value(pt: PieceType, x: i64, y: i64, color: PlayerColor, phase: i32) -> 
     (mg * phase + eg * (base::MAX_PHASE - phase)) / base::MAX_PHASE
 }
 
-/// Count available knight moves on full Obstocean board (no 8×8 core boundary restriction).
+/// Count available knight moves on full Obstocean board.
 #[inline]
 fn count_knight_mobility(board: &crate::board::Board, x: i64, y: i64, piece: crate::board::Piece) -> i32 {
     let our_color = piece.color();
     let mut count = 0i32;
-    for (dx, dy) in [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)] {
-        match board.get_piece(x + dx, y + dy) {
+    for (dx, dy) in [(2, 1), (2, -1), (-2, 1), (-2, -1), (1, 2), (1, -2), (-1, 2), (-1, -2)] {
+        let (tx, ty) = (x + dx, y + dy);
+        if !crate::moves::in_bounds(tx, ty) {
+            continue;
+        }
+        match board.get_piece(tx, ty) {
             None => count += 1,
-            Some(p) if p.color() != our_color && p.color() != PlayerColor::Neutral => count += 1,
+            Some(target) if crate::moves::is_enemy_piece(&target, our_color) => count += 1,
             _ => {}
         }
     }
