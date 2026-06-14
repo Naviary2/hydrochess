@@ -78,15 +78,20 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
     }
 
-    // 2. White Logic (Horde)
-    // Find the "front line" (minimum Y of pawns) to detect breakthroughs
+    // 2. White Logic (Horde). The horde advances toward higher Y (the promo
+    // rank), so min_pawn_y is the rearmost rank (breakthrough check) and
+    // max_pawn_y is the leading front line (king-safety proximity).
     let mut min_pawn_y = 1000;
+    let mut max_pawn_y = i64::MIN;
 
     let promo_rank = game.white_promo_rank;
 
     for pawn in &white_pawns {
         if pawn.y < min_pawn_y {
             min_pawn_y = pawn.y;
+        }
+        if pawn.y > max_pawn_y {
+            max_pawn_y = pawn.y;
         }
 
         // Advancement
@@ -165,10 +170,9 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
     }
 
-    // King Safety (Black)
-    // King should be far from the horde front line
-    let king_safety_dist = (black_king_pos.y - min_pawn_y).abs(); // Vertical distance to pawn front
-    if king_safety_dist < 3 {
+    // King Safety (Black): the king should stay away from the horde's leading
+    // front line (the most-advanced white pawn).
+    if max_pawn_y != i64::MIN && (black_king_pos.y - max_pawn_y).abs() < 3 {
         // King is dangerously close to the front
         score += taper(MG_KING_NEAR_FRONT_PENALTY, EG_KING_NEAR_FRONT_PENALTY); // Penalty for Black (positive score)
     }
