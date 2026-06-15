@@ -4891,6 +4891,22 @@ fn quiescence(
         }
     }
 
+    if !tactical_check && !tt_hit {
+        store_tt_with_shared(
+            searcher,
+            &StoreContext {
+                hash,
+                depth: 0,
+                flag: TTFlag::None,
+                score: 0,
+                static_eval: unadjusted_static_eval,
+                is_pv: false,
+                best_move: None,
+                ply,
+            },
+        );
+    }
+
     if ply >= MAX_PLY - 1 {
         return best_value;
     }
