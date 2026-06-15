@@ -1771,7 +1771,7 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
                 | PieceType::Archbishop
                 | PieceType::Amazon
         );
-        if is_attacking_piece && piece_score > 0 {
+        if is_attacking_piece {
             let scale = if piece.color() == PlayerColor::White {
                 white_attack_ready
             } else {
