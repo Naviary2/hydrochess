@@ -215,13 +215,28 @@ impl LocalTranspositionTable {
         self.used
     }
 
+    /// Approximate fill level in permille (0-1000), sampling current-generation
+    /// occupancy like the shared TT. A running counter would pin at 1000 once
+    /// every slot has been touched and never reflect generation turnover.
     #[inline(always)]
     pub fn fill_permille(&self) -> u32 {
-        if self.capacity == 0 {
-            0
-        } else {
-            ((self.used as u64 * 1000) / self.capacity as u64) as u32
+        let num_buckets = self.mask + 1;
+        let sample = num_buckets.min(1000);
+        if sample == 0 {
+            return 0;
         }
+        let mut occ = 0u64;
+        unsafe {
+            for i in 0..sample {
+                let entries = &(*self.buckets.add(i)).entries;
+                for e in entries {
+                    if !e.is_empty() && e.relative_age(self.generation) == 0 {
+                        occ += 1;
+                    }
+                }
+            }
+        }
+        ((occ * 1000) / (sample as u64 * ENTRIES_PER_BUCKET as u64)) as u32
     }
 
     #[inline(always)]

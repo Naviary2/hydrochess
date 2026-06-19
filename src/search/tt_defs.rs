@@ -103,6 +103,26 @@ mod score_pack_tests {
     }
 
     #[test]
+    fn value_from_tt_downgrades_unreachable_mate() {
+        // A mate in 5 stored at ply 0. With a finite move rule that the mate
+        // would overrun (rule50 already high), it must downgrade to the largest
+        // non-mate score; with no/ample rule it stays a true mate.
+        let mate_in_5 = MATE_VALUE - 5;
+
+        // Unreachable: 5 plies to mate + 98 half-moves already > 100 limit.
+        assert_eq!(value_from_tt(mate_in_5, 0, 98, 100), MATE_SCORE - 1);
+        let mated_in_5 = -(MATE_VALUE - 5);
+        assert_eq!(value_from_tt(mated_in_5, 0, 98, 100), -MATE_SCORE + 1);
+
+        // Reachable under the limit: passes through as a true mate.
+        assert!(value_from_tt(mate_in_5, 0, 10, 100) > MATE_SCORE);
+
+        // No move rule (rule_limit = i32::MAX): a realistic (even large)
+        // halfmove clock never downgrades, and the i64 compare does not overflow.
+        assert!(value_from_tt(mate_in_5, 0, 1_000_000, i32::MAX) > MATE_SCORE);
+    }
+
+    #[test]
     fn mate_and_normal_bands_are_disjoint() {
         // A near-mate value survives as a recognizable mate (> MATE_SCORE)...
         let stored = score_to_i16(MATE_VALUE - 3);
@@ -132,16 +152,15 @@ pub fn unpack_coord(v: u64) -> i64 {
 /// Downgrades mate scores that are unreachable due to the 50-move rule.
 #[inline]
 pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32, rule_limit: i32) -> i32 {
-    // Handle winning mate scores (we are giving mate)
+    // Handle winning mate scores (we are giving mate).
     if value > MATE_SCORE {
-        // mate_distance = how many plies until mate from the stored position
+        // Plies until mate from the stored position.
         let mate_distance = MATE_VALUE - value;
 
-        // Downgrade a potentially false mate score:
-        // If mate_distance + rule50_count > rule_limit, the game would be drawn
-        // by the 50-move rule before we can deliver checkmate.
-        if mate_distance + rule50_count as i32 > rule_limit {
-            // Downgrade to non-mate winning score (just below mate threshold)
+        // If the 50-move rule forces a draw before mate is delivered, the mate
+        // is unproven: report the largest non-mate winning score. i64 avoids
+        // overflow when rule_limit is i32::MAX (variants with no move rule).
+        if mate_distance as i64 + rule50_count as i64 > rule_limit as i64 {
             return MATE_SCORE - 1;
         }
 
@@ -149,13 +168,11 @@ pub fn value_from_tt(value: i32, ply: usize, rule50_count: u32, rule_limit: i32)
         return value - ply as i32;
     }
 
-    // Handle losing mate scores (we are being mated)
+    // Handle losing mate scores (we are being mated).
     if value < -MATE_SCORE {
         let mate_distance = MATE_VALUE + value;
 
-        // Downgrade a potentially false mate score
-        if mate_distance + rule50_count as i32 > rule_limit {
-            // Downgrade to non-mate losing score
+        if mate_distance as i64 + rule50_count as i64 > rule_limit as i64 {
             return -MATE_SCORE + 1;
         }
 
