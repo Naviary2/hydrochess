@@ -324,7 +324,9 @@ const PAWN_FAR_FROM_PROMO_PENALTY: i32 = 50; // Flat penalty for back pawns (no 
 // ==================== Development ====================
 
 // Minimum starting square penalty for minors
-const MIN_DEVELOPMENT_PENALTY: i32 = 6; // Moderate - not too aggressive
+const MINOR_DEVELOPMENT_PENALTY_THRESHOLD: i32 = 400; // Pieces below this value get a stronger penalty
+const MIN_MINOR_DEVELOPMENT_PENALTY: i32 = 9; // Slightly stronger for lower value pieces
+const MIN_MAJOR_DEVELOPMENT_PENALTY: i32 = 6; // Moderate - not too aggressive
 
 // King defender bonuses/penalties
 // Low-value pieces near own king = good (defense)
@@ -637,6 +639,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 }
                                 let piece = crate::board::Piece::from_packed(packed);
                                 let pt = piece.piece_type();
+                                let piece_val = get_piece_value_base(pt);
                                 let is_white = piece.color() == PlayerColor::White;
                                 let x = cx * 8 + (idx % 8) as i64;
                                 let y = cy * 8 + (idx / 8) as i64;
@@ -873,122 +876,120 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                     }
                                 }
 
-                                {
-                                    // Check White Kings
-                                    for &wk in white_royals {
-                                        let dx = x - wk.x;
-                                        let dy = y - wk.y;
-                                        let adx = dx.abs();
-                                        let ady = dy.abs();
-                                        let dist = adx.max(ady);
+                                // Check White Kings
+                                for &wk in white_royals {
+                                    let dx = x - wk.x;
+                                    let dy = y - wk.y;
+                                    let adx = dx.abs();
+                                    let ady = dy.abs();
+                                    let dist = adx.max(ady);
 
-                                        // Ring Cover
-                                        if !w_king_ring_covered
-                                            && dist == 1
-                                            && is_white
-                                            && (pt == PieceType::Pawn
-                                                || pt == PieceType::Guard
-                                                || pt == PieceType::Void)
-                                        {
-                                            w_king_ring_covered = true;
-                                        }
-
-                                        // Rays
-                                        if dx != 0 && dy == 0 {
-                                            let idx = if dx > 0 { 4 } else { 5 };
-                                            if (dist as i32) < w_king_rays[idx].0 {
-                                                w_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
-                                        } else if dx == 0 && dy != 0 {
-                                            let idx = if dy > 0 { 6 } else { 7 };
-                                            if (dist as i32) < w_king_rays[idx].0 {
-                                                w_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
-                                        } else if adx == ady && dist > 0 {
-                                            let idx = if dx > 0 {
-                                                if dy > 0 { 0 } else { 1 }
-                                            } else if dy > 0 {
-                                                2
-                                            } else {
-                                                3
-                                            };
-                                            if (dist as i32) < w_king_rays[idx].0 {
-                                                w_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
-                                        }
+                                    // Ring Cover
+                                    if !w_king_ring_covered
+                                        && dist == 1
+                                        && is_white
+                                        && (pt == PieceType::Pawn
+                                            || pt == PieceType::Guard
+                                            || pt == PieceType::Void)
+                                    {
+                                        w_king_ring_covered = true;
                                     }
 
-                                    // Check Black Kings
-                                    for &bk in black_royals {
-                                        let dx = x - bk.x;
-                                        let dy = y - bk.y;
-                                        let adx = dx.abs();
-                                        let ady = dy.abs();
-                                        let dist = adx.max(ady);
-
-                                        // Ring Cover
-                                        if !b_king_ring_covered
-                                            && dist == 1
-                                            && !is_white
-                                            && (pt == PieceType::Pawn
-                                                || pt == PieceType::Guard
-                                                || pt == PieceType::Void)
-                                        {
-                                            b_king_ring_covered = true;
+                                    // Rays
+                                    if dx != 0 && dy == 0 {
+                                        let idx = if dx > 0 { 4 } else { 5 };
+                                        if (dist as i32) < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
                                         }
+                                    } else if dx == 0 && dy != 0 {
+                                        let idx = if dy > 0 { 6 } else { 7 };
+                                        if (dist as i32) < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
+                                        }
+                                    } else if adx == ady && dist > 0 {
+                                        let idx = if dx > 0 {
+                                            if dy > 0 { 0 } else { 1 }
+                                        } else if dy > 0 {
+                                            2
+                                        } else {
+                                            3
+                                        };
+                                        if (dist as i32) < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
+                                        }
+                                    }
+                                }
 
-                                        // Rays
-                                        if dx != 0 && dy == 0 {
-                                            let idx = if dx > 0 { 4 } else { 5 };
-                                            if (dist as i32) < b_king_rays[idx].0 {
-                                                b_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
-                                        } else if dx == 0 && dy != 0 {
-                                            let idx = if dy > 0 { 6 } else { 7 };
-                                            if (dist as i32) < b_king_rays[idx].0 {
-                                                b_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
-                                        } else if adx == ady && dist > 0 {
-                                            let idx = if dx > 0 {
-                                                if dy > 0 { 0 } else { 1 }
-                                            } else if dy > 0 {
-                                                2
-                                            } else {
-                                                3
-                                            };
-                                            if (dist as i32) < b_king_rays[idx].0 {
-                                                b_king_rays[idx] = (
-                                                    dist as i32,
-                                                    get_piece_value_base(pt),
-                                                    piece.color(),
-                                                    pt,
-                                                );
-                                            }
+                                // Check Black Kings
+                                for &bk in black_royals {
+                                    let dx = x - bk.x;
+                                    let dy = y - bk.y;
+                                    let adx = dx.abs();
+                                    let ady = dy.abs();
+                                    let dist = adx.max(ady);
+
+                                    // Ring Cover
+                                    if !b_king_ring_covered
+                                        && dist == 1
+                                        && !is_white
+                                        && (pt == PieceType::Pawn
+                                            || pt == PieceType::Guard
+                                            || pt == PieceType::Void)
+                                    {
+                                        b_king_ring_covered = true;
+                                    }
+
+                                    // Rays
+                                    if dx != 0 && dy == 0 {
+                                        let idx = if dx > 0 { 4 } else { 5 };
+                                        if (dist as i32) < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
+                                        }
+                                    } else if dx == 0 && dy != 0 {
+                                        let idx = if dy > 0 { 6 } else { 7 };
+                                        if (dist as i32) < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
+                                        }
+                                    } else if adx == ady && dist > 0 {
+                                        let idx = if dx > 0 {
+                                            if dy > 0 { 0 } else { 1 }
+                                        } else if dy > 0 {
+                                            2
+                                        } else {
+                                            3
+                                        };
+                                        if (dist as i32) < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (
+                                                dist as i32,
+                                                piece_val,
+                                                piece.color(),
+                                                pt,
+                                            );
                                         }
                                     }
                                 }
@@ -1041,7 +1042,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                             && target.color() == enemy
                                         {
                                             let tv = get_piece_value_base(target.piece_type());
-                                            let mv = get_piece_value_base(pt);
+                                            let mv = piece_val;
                                             if tv >= 600 && mv < 600 {
                                                 if is_white {
                                                     w_minor_threats += MINOR_THREATENS_QUEEN;
@@ -1515,7 +1516,8 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
     };
 
     for &(x, y, piece) in piece_list {
-        let mut piece_score = match piece.piece_type() {
+        let pt = piece.piece_type();
+        let mut piece_score = match pt {
             PieceType::Rook => evaluate_rook(
                 game,
                 x,
@@ -1632,7 +1634,7 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
                 y,
                 piece.color(),
                 cloud_center.as_ref(),
-                piece.piece_type(),
+                pt,
                 cloud_avg_spread,
                 phase,
             ),
@@ -1642,7 +1644,7 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
                     y,
                     piece.color(),
                     cloud_center.as_ref(),
-                    piece.piece_type(),
+                    pt,
                     cloud_avg_spread,
                     phase,
                 );
@@ -1680,22 +1682,20 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
             ),
             _ => 0,
         };
+        let piece_val = get_piece_value_base(pt);
 
         if let Some(center) = &cloud_center {
             let dx = (x - center.x).abs();
             let dy = (y - center.y).abs();
             let cheb = dx.max(dy);
 
-            if piece.piece_type() != PieceType::Pawn
-                && !piece.piece_type().is_royal()
+            if pt != PieceType::Pawn && !pt.is_royal()
                 && cheb > PIECE_CLOUD_CHEB_RADIUS
             {
-                let pt = piece.piece_type();
                 let is_ortho = pt == PieceType::Rook || pt == PieceType::Chancellor;
                 let is_diag = pt == PieceType::Bishop || pt == PieceType::Archbishop;
                 let is_queen = pt == PieceType::Queen || pt == PieceType::Amazon;
 
-                let piece_val = get_piece_value_base(pt);
                 let value_factor = (piece_val / 100).max(1);
                 let mult = taper(MG_FAR_SLIDER_PENALTY_MULT, EG_FAR_SLIDER_PENALTY_MULT);
 
@@ -1732,27 +1732,30 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
             }
         }
 
-        if piece.piece_type() != PieceType::Pawn
-            && !piece.piece_type().is_royal()
-            && game.starting_squares.contains(&Coordinate::new(x, y))
-        {
-            piece_score -= match piece.piece_type() {
-                PieceType::Knight | PieceType::Bishop => MIN_DEVELOPMENT_PENALTY + 3,
-                PieceType::Archbishop => MIN_DEVELOPMENT_PENALTY,
-                _ => 0,
+        if game.starting_squares.contains(&Coordinate::new(x, y)) {
+            piece_score -= if pt.is_minor() {
+                if piece_val < MINOR_DEVELOPMENT_PENALTY_THRESHOLD {
+                    MIN_MINOR_DEVELOPMENT_PENALTY
+                } else {
+                    MIN_MAJOR_DEVELOPMENT_PENALTY
+                }
+            } else if pt == PieceType::Archbishop {
+                MIN_MAJOR_DEVELOPMENT_PENALTY
+            } else {
+                0
             };
         }
 
-        let own_royals = if piece.color() == PlayerColor::White {
-            white_royals
-        } else {
-            black_royals
-        };
-        for &ok in own_royals {
-            if !piece.piece_type().is_royal() && piece.piece_type() != PieceType::Pawn {
+        if !pt.is_royal() && pt != PieceType::Pawn {
+            let own_royals = if piece.color() == PlayerColor::White {
+                white_royals
+            } else {
+                black_royals
+            };
+            for &ok in own_royals {
                 let dist = (x - ok.x).abs().max((y - ok.y).abs());
                 if dist <= 3 {
-                    if get_piece_value_base(piece.piece_type()) < KING_DEFENDER_VALUE_THRESHOLD {
+                    if piece_val < KING_DEFENDER_VALUE_THRESHOLD {
                         piece_score += taper(MG_KING_DEFENDER_BONUS, EG_KING_DEFENDER_BONUS);
                     } else {
                         piece_score -= taper(
@@ -1766,7 +1769,7 @@ fn evaluate_pieces_processed<T: EvaluationTracer>(
         }
 
         let is_attacking_piece = matches!(
-            piece.piece_type(),
+            pt,
             PieceType::Rook
                 | PieceType::Queen
                 | PieceType::RoyalQueen
