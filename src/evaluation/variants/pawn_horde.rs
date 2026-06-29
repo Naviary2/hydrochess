@@ -8,6 +8,7 @@
 use crate::board::{Coordinate, PieceType, PlayerColor};
 use crate::game::GameState;
 use arrayvec::ArrayVec;
+use rustc_hash::FxHashSet;
 
 // ==================== Constants ====================
 
@@ -81,6 +82,13 @@ pub fn evaluate(game: &GameState) -> i32 {
         }
     }
 
+    // Create a hash set of white pawn coordinates for fast (constant amortized time) neighbor checks.
+    let mut pawn_set: FxHashSet<Coordinate> = FxHashSet::default();
+    pawn_set.reserve(white_pawns.len());
+    for pawn in &white_pawns {
+        pawn_set.insert(*pawn);
+    }
+
     // 2. White Logic (Horde). The horde advances toward higher Y (the promo
     // rank), so min_pawn_y is the rearmost rank (breakthrough check) and
     // max_pawn_y is the leading front line (king-safety proximity).
@@ -101,28 +109,28 @@ pub fn evaluate(game: &GameState) -> i32 {
         let dist = (promo_rank - pawn.y).max(0) as i32;
         score += get_pawn_advance_bonus(dist);
 
-        // Phalanx (Horizontal neighbors) - creates a wall
-        // We scan the list - O(N^2) but N is small (36) => ~1000 ops, totally fine
+        // Phalanx: same rank, adjacent files (x±1, y) - creates a wall of pawns
+        let neighbor_left = Coordinate::new(pawn.x - 1, pawn.y);
+        let neighbor_right = Coordinate::new(pawn.x + 1, pawn.y);
+
         let mut neighbors = 0;
+        if pawn_set.contains(&neighbor_left) {
+            neighbors += 1;
+        }
+        if pawn_set.contains(&neighbor_right) {
+            neighbors += 1;
+        }
+
+        // Support: diagonally behind (x±1, y-1) - protects the pawn from captures
+        let support_left = Coordinate::new(pawn.x - 1, pawn.y - 1);
+        let support_right = Coordinate::new(pawn.x + 1, pawn.y - 1);
+
         let mut supporting_pawns = 0;
-
-        for other in &white_pawns {
-            if other == pawn {
-                continue;
-            }
-
-            // Phalanx: Same Y, adjacent X
-            if other.y == pawn.y && (other.x - pawn.x).abs() == 1 {
-                neighbors += 1;
-            }
-
-            // Support: Behind by 1 rank, adjacent X
-            // Assuming White moves UP (increasing Y) towards promo_rank > start_rank
-            // If promo is 8, support is at y-1.
-            let support_y = pawn.y - 1;
-            if other.y == support_y && (other.x - pawn.x).abs() == 1 {
-                supporting_pawns += 1;
-            }
+        if pawn_set.contains(&support_left) {
+            supporting_pawns += 1;
+        }
+        if pawn_set.contains(&support_right) {
+            supporting_pawns += 1;
         }
 
         if supporting_pawns > 0 {
