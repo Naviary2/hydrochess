@@ -4988,12 +4988,21 @@ fn quiescence(
         let captures_royal_for_win = captured.is_some_and(|p| p.piece_type().is_royal())
             && win_condition_for_side(game, game.turn) == WinCondition::RoyalCapture;
 
+        // Obstocean breakout: a pawn capturing a (neutral) obstacle is the variant's
+        // defining line-opening tactic, but it classifies as "quiet" because the
+        // victim is neutral. Exempt it from the quiet-move cutoff; it still faces the
+        // SEE/delta prune below, which bounds node growth (unlike a blanket exemption).
+        let is_obstocean_breakout = game.variant == Some(crate::Variant::Obstocean)
+            && m.piece.piece_type() == PieceType::Pawn
+            && captured.is_some_and(|p| p.piece_type() == PieceType::Obstacle);
+
         // move_gives_check_fast is only needed to keep quiet checks; evaluate it
         // last so it is skipped for captures/recaptures and the first few moves.
         if !in_check
             && legal_moves > 2
             && !is_capture
             && !is_recapture
+            && !is_obstocean_breakout
             && !StagedMoveGen::move_gives_check_fast(game, m)
         {
             continue;
