@@ -1,4 +1,4 @@
-use super::{MATE_SCORE, MATE_VALUE, MAX_PLY};
+use super::{INFINITY, MATE_SCORE, MATE_VALUE, MAX_PLY};
 use crate::moves::Move;
 
 // ============================================================================
@@ -23,9 +23,31 @@ pub fn value_to_tt(value: i32, ply: usize) -> i32 {
     }
 }
 
+/// The i16 eval-field value reserved to mean "no static eval stored". Maps
+/// to/from the INFINITY+1 sentinel that search uses for an uncomputed eval.
+pub const TT_NO_EVAL: i16 = i16::MIN;
+
+/// Pack a static eval into the i16 eval field. The "not computed" sentinel
+/// (INFINITY + 1) becomes TT_NO_EVAL; real evals clamp into the remaining range
+/// (i16::MIN is reserved, so the floor is i16::MIN + 1). Inverse of [`eval_from_i16`].
 #[inline]
-pub fn clamp_to_i16(v: i32) -> i16 {
-    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+pub fn eval_to_i16(v: i32) -> i16 {
+    if v == INFINITY + 1 {
+        TT_NO_EVAL
+    } else {
+        v.clamp(i16::MIN as i32 + 1, i16::MAX as i32) as i16
+    }
+}
+
+/// Expand a stored i16 eval (sign-extended to i32) back to an engine eval.
+/// TT_NO_EVAL maps to the INFINITY+1 sentinel so callers recompute the eval.
+#[inline]
+pub fn eval_from_i16(s: i32) -> i32 {
+    if s == TT_NO_EVAL as i32 {
+        INFINITY + 1
+    } else {
+        s
+    }
 }
 
 
@@ -130,6 +152,30 @@ mod score_pack_tests {
         // ...while the largest normal score stays below the mate threshold.
         let stored = score_to_i16(TT_SCORE_NORMAL_MAX);
         assert!(score_from_i16(stored as i32) <= MATE_SCORE);
+    }
+
+    #[test]
+    fn eval_no_eval_sentinel_round_trips() {
+        // The "not computed" sentinel packs to TT_NO_EVAL and unpacks back to it,
+        // so callers recompute instead of trusting a bogus clamped value.
+        assert_eq!(eval_to_i16(INFINITY + 1), TT_NO_EVAL);
+        assert_eq!(eval_from_i16(TT_NO_EVAL as i32), INFINITY + 1);
+    }
+
+    #[test]
+    fn eval_real_values_never_collide_with_sentinel() {
+        // Real evals (including ones that clamp to the i16 extremes) must never
+        // pack to TT_NO_EVAL, and must round-trip to their clamped value.
+        for v in [0, 1, -1, 250, -250, 30000, -30000, 100_000, -100_000, i32::MAX, i32::MIN] {
+            let packed = eval_to_i16(v);
+            assert_ne!(packed, TT_NO_EVAL, "real eval {v} collided with NO_EVAL");
+            let clamped = v.clamp(i16::MIN as i32 + 1, i16::MAX as i32);
+            assert_eq!(eval_from_i16(packed as i32), clamped, "v = {v}");
+        }
+        // Previously the sentinel clamped to +32767; verify a genuine +32767 eval
+        // is still distinguishable from "no eval".
+        assert_ne!(eval_to_i16(32767), TT_NO_EVAL);
+        assert_eq!(eval_from_i16(eval_to_i16(32767) as i32), 32767);
     }
 }
 

@@ -4,7 +4,7 @@ use crate::moves::Move;
 
 use super::INFINITY;
 use super::tt_defs::{
-    TTFlag, TTProbeParams, TTProbeResult, TTStoreParams, clamp_to_i16, pack_coord,
+    TTFlag, TTProbeParams, TTProbeResult, TTStoreParams, eval_from_i16, eval_to_i16, pack_coord,
     score_from_i16, score_to_i16, unpack_coord, value_from_tt, value_to_tt,
 };
 
@@ -326,7 +326,7 @@ impl SharedTranspositionTable {
                 return Some(TTProbeResult {
                     cutoff_score: cutoff,
                     tt_score: score,
-                    eval,
+                    eval: eval_from_i16(eval),
                     depth,
                     flag,
                     is_pv: TTEntry::is_pv(gen_bound),
@@ -394,7 +394,7 @@ impl SharedTranspositionTable {
                 };
 
                 let store_eval = if params.static_eval != INFINITY + 1 {
-                    clamp_to_i16(params.static_eval)
+                    eval_to_i16(params.static_eval)
                 } else {
                     old_eval
                 };
@@ -450,7 +450,7 @@ impl SharedTranspositionTable {
         bucket.entries[replace_idx].write(
             key16,
             score_to_i16(adj_score),
-            clamp_to_i16(params.static_eval),
+            eval_to_i16(params.static_eval),
             params.depth as u8,
             TTEntry::pack_gen_bound(r#gen, params.is_pv, params.flag),
             &params.best_move,

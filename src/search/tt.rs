@@ -3,7 +3,7 @@ use crate::moves::Move;
 
 use super::INFINITY;
 use super::tt_defs::{
-    TTFlag, TTProbeParams, TTProbeResult, TTStoreParams, clamp_to_i16, pack_coord,
+    TTFlag, TTProbeParams, TTProbeResult, TTStoreParams, eval_from_i16, eval_to_i16, pack_coord,
     score_from_i16, score_to_i16, unpack_coord, value_from_tt, value_to_tt,
 };
 
@@ -316,7 +316,7 @@ impl LocalTranspositionTable {
                 return Some(TTProbeResult {
                     cutoff_score: cutoff,
                     tt_score: score,
-                    eval: e.eval16 as i32,
+                    eval: eval_from_i16(e.eval16 as i32),
                     depth: e.depth,
                     flag: e.flag(),
                     is_pv: e.is_pv(),
@@ -345,7 +345,7 @@ impl LocalTranspositionTable {
             for (i, e) in entries.iter_mut().enumerate() {
                 if e.key16 == key16 && !e.is_empty() {
                     let store_eval = if params.static_eval != INFINITY + 1 {
-                        clamp_to_i16(params.static_eval)
+                        eval_to_i16(params.static_eval)
                     } else {
                         e.eval16
                     };
@@ -393,7 +393,7 @@ impl LocalTranspositionTable {
                 depth: params.depth as u8,
                 gen_bound: TTEntry::pack_gen_bound(self.generation, params.is_pv, params.flag),
                 score16: score_to_i16(adj_score),
-                eval16: clamp_to_i16(params.static_eval),
+                eval16: eval_to_i16(params.static_eval),
                 move_data: NO_MOVE,
             };
             if let Some(m) = &params.best_move {
