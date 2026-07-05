@@ -4442,9 +4442,16 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     searcher.update_low_ply_history(ply, qidx, -bonus);
                 }
 
-                // Killer move heuristic (for non-captures)
-                searcher.killers[ply][1] = searcher.killers[ply][0];
-                searcher.killers[ply][0] = Some(m);
+                // Killer move heuristic (for non-captures).
+                // Skip when the move is already killer[0], so a repeated cutoff
+                // move doesn't shift a duplicate into killer[1] and kill that slot.
+                let already_killer0 = searcher.killers[ply][0].is_some_and(|k| {
+                    k.from == m.from && k.to == m.to && k.promotion == m.promotion
+                });
+                if !already_killer0 {
+                    searcher.killers[ply][1] = searcher.killers[ply][0];
+                    searcher.killers[ply][0] = Some(m);
+                }
 
                 // Countermove heuristic
                 if ply > 0 {
