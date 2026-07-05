@@ -5100,9 +5100,11 @@ fn quiescence(
         },
     );
 
-    // Update correction history for QSearch
-    // We learn from the search result relative to the static evaluation
-    if !must_escape {
+    // Update correction history for QSearch.
+    // We learn from the search result relative to the static evaluation, so only
+    // when a real static eval was computed (tactical_check nodes leave the eval
+    // at the INFINITY+1 sentinel, e.g. royal-capture resolution while in check).
+    if !tactical_check {
         let prev_move_idx = if ply > 0 {
             let (from_hash, to_hash) = searcher.prev_move_stack[ply - 1];
             from_hash ^ to_hash
