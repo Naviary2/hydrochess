@@ -4773,22 +4773,23 @@ fn quiescence(
         },
     );
 
-    let (tt_hit, tt_value, tt_data_static_eval, tt_data_bound, pv_hit) = if let Some(res) = tt_probe
-    {
-        (
-            true,
-            if res.tt_score == INFINITY + 1 {
-                None
-            } else {
-                Some(res.tt_score)
-            },
-            res.eval,
-            res.flag,
-            res.is_pv,
-        )
-    } else {
-        (false, None, INFINITY + 1, TTFlag::None, false)
-    };
+    let (tt_hit, tt_value, tt_data_static_eval, tt_data_bound, pv_hit, tt_move) =
+        if let Some(res) = tt_probe {
+            (
+                true,
+                if res.tt_score == INFINITY + 1 {
+                    None
+                } else {
+                    Some(res.tt_score)
+                },
+                res.eval,
+                res.flag,
+                res.is_pv,
+                res.best_move,
+            )
+        } else {
+            (false, None, INFINITY + 1, TTFlag::None, false, None)
+        };
 
     // TT Cutoff for QSearch
     if !is_pv
@@ -4969,6 +4970,18 @@ fn quiescence(
 
     // Sort captures by MVV-LVA
     sort_captures(game, &mut tactical_moves);
+
+    // Try the TT move first if it was generated here: it caused a cutoff or was
+    // best at this position before, so it is a strong first try. Only hoisted when
+    // already present in the list (no legality risk).
+    if let Some(tt) = tt_move
+        && let Some(idx) = tactical_moves
+            .iter()
+            .position(|m| m.from == tt.from && m.to == tt.to && m.promotion == tt.promotion)
+        && idx > 0
+    {
+        tactical_moves.swap(0, idx);
+    }
 
     let mut legal_moves = 0;
     let delta_margin = delta_margin();
