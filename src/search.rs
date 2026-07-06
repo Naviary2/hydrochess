@@ -4557,19 +4557,24 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         depth
     };
 
-    store_tt_with_shared(
-        searcher,
-        &StoreContext {
-            hash,
-            depth: tt_store_depth,
-            flag: tt_data_bound,
-            score: best_score,
-            static_eval: raw_eval,
-            is_pv: tt_pv,
-            best_move,
-            ply,
-        },
-    );
+    // Don't pollute the real TT entry during a singular-exclusion search: its
+    // score/bound exclude the best move and its best_move is not the true one.
+    // (The probe side is likewise gated on excluded_move.is_none().)
+    if excluded_move.is_none() {
+        store_tt_with_shared(
+            searcher,
+            &StoreContext {
+                hash,
+                depth: tt_store_depth,
+                flag: tt_data_bound,
+                score: best_score,
+                static_eval: raw_eval,
+                is_pv: tt_pv,
+                best_move,
+                ply,
+            },
+        );
+    }
 
     // Update TT Move History:
     // Tracks how reliable TT moves are: positive = TT moves tend to be best.
