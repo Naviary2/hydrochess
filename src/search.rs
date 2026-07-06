@@ -284,6 +284,9 @@ fn get_lmr(depth: usize, moves: usize) -> i32 {
         return reduction as i32;
     }
 
+    // depth can exceed MAX_PLY-1 after post-cap `depth += 1` bumps (hindsight
+    // extension, singularity); clamp to the last table row to avoid a panic.
+    let depth = depth.min(MAX_PLY - 1);
     table[depth][moves]
 }
 
@@ -3221,15 +3224,16 @@ fn negamax_root(
             }
         }
 
-        if alpha >= beta {
-            break;
+        // Track nodes spent on the first (best) root move. Accumulate across
+        // iterations so the ratio is comparable to the cumulative node count it is
+        // divided by (a single-iteration value can never reach the effort
+        // threshold). Recorded before the cutoff so a move-0 fail-high still counts.
+        if move_idx == 0 {
+            searcher.hot.best_move_nodes += searcher.hot.nodes - nodes_before_move;
         }
 
-        // Track nodes spent on this move (effort)
-        // If this is the current first move in the list (most likely the best move),
-        // track its effort for time management.
-        if move_idx == 0 {
-            searcher.hot.best_move_nodes = searcher.hot.nodes - nodes_before_move;
+        if alpha >= beta {
+            break;
         }
     }
 
