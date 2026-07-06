@@ -3626,6 +3626,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             let nmp_margin = static_eval - (nmp_depth_mult() * depth as i32) + nmp_base();
             if nmp_margin >= beta && game.has_non_pawn_material(game.turn) {
                 let saved_ep = game.en_passant;
+                let saved_plies_from_null = game.plies_from_null;
                 let move_history_backup = searcher.move_history[ply].take();
                 let piece_history_backup = searcher.moved_piece_history[ply];
 
@@ -3652,6 +3653,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
                 game.unmake_null_move();
                 game.en_passant = saved_ep;
+                game.plies_from_null = saved_plies_from_null;
 
                 searcher.move_history[ply] = move_history_backup;
                 searcher.moved_piece_history[ply] = piece_history_backup;
