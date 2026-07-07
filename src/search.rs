@@ -1460,7 +1460,9 @@ impl Searcher {
         ply: usize,
         prev_move_idx: usize,
     ) -> i32 {
-        let color_idx = (game.turn as usize).min(1);
+        // PlayerColor is Neutral=0/White=1/Black=2. Map White->0, Black->1 so the
+        // `color_idx == 0` branch below correctly selects white_nonpawn_hash for White.
+        let color_idx = (game.turn as usize).saturating_sub(1);
 
         let total_correction = match self.corrhist_mode {
             CorrHistMode::PawnBased => {
@@ -1553,7 +1555,9 @@ impl Searcher {
         }
 
         let diff = search_score - static_eval;
-        let color_idx = (game.turn as usize).min(1);
+        // PlayerColor is Neutral=0/White=1/Black=2. Map White->0, Black->1 so the
+        // `color_idx == 0` branch below correctly selects white_nonpawn_hash for White.
+        let color_idx = (game.turn as usize).saturating_sub(1);
         let weight = ((depth * depth + 2 * depth + 1) as i32).clamp(1, 128);
         let scaled_diff = diff * CORRHIST_GRAIN;
 
@@ -2905,34 +2909,26 @@ pub(crate) fn get_best_moves_multipv_impl(
         };
     }
 
-    // If only one move, return immediately with a simple static eval as score.
-    if legal_root_moves.len() == 1 {
+    // Standard (gameplay) path: with a single legal move, skip the search entirely and
+    // return a static eval — the move is forced, so looking deeper at this root is wasted
+    // effort. Analysis mode (identified by the streaming `on_depth` callback) deliberately
+    // does NOT shortcut: it searches the forced move to the target depth so the reported
+    // eval reflects the resulting position's look-ahead, and streams a line per depth.
+    if legal_root_moves.len() == 1 && on_depth.is_none() {
         let single = legal_root_moves[0];
         let stats = build_search_stats(searcher);
-        // Report at max_depth so the analysis driver treats the forced move as fully
-        // analyzed (searching a forced move deeper tells us nothing at this root).
-        let lines = vec![PVLine {
-            mv: single,
-            #[cfg(feature = "nnue")]
-            score: searcher.adjusted_eval(game, evaluate(game, searcher.nnue_at(0)), 0, 0),
-            #[cfg(not(feature = "nnue"))]
-            score: searcher.adjusted_eval(game, evaluate(game), 0, 0),
-            depth: max_depth,
-            pv: vec![single],
-        }];
-        if let Some(cb) = on_depth.as_deref_mut() {
-            cb(&DepthInfo {
-                depth: max_depth,
-                seldepth: 1,
-                nodes: 1,
-                qnodes: 0,
-                nps: 0,
-                time_ms: searcher.hot.timer.elapsed_ms(),
-                hashfull: stats.tt_fill_permille,
-                lines: &lines,
-            });
-        }
-        return MultiPVResult { lines, stats };
+        return MultiPVResult {
+            lines: vec![PVLine {
+                mv: single,
+                #[cfg(feature = "nnue")]
+                score: searcher.adjusted_eval(game, evaluate(game, searcher.nnue_at(0)), 0, 0),
+                #[cfg(not(feature = "nnue"))]
+                score: searcher.adjusted_eval(game, evaluate(game), 0, 0),
+                depth: 0,
+                pv: vec![single],
+            }],
+            stats,
+        };
     }
 
     // Cap multi_pv at number of legal moves
