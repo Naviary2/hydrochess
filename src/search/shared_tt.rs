@@ -362,7 +362,7 @@ impl SharedTranspositionTable {
                 let old_eval = (meta >> 48) as i16;
 
                 // Decode old move for preservation
-                let old_move_data = mdata;
+                let old_move_data = mdata ^ (params.hash >> 16);
 
                 let store_move = params.best_move.as_ref();
                 let mdata_to_write = if let Some(m) = store_move {
@@ -410,7 +410,6 @@ impl SharedTranspositionTable {
                 if params.flag == TTFlag::Exact
                     || (params.depth as i32 + pv_bonus) > (old_depth as i32 - 4)
                     || rel_age != 0
-                    || params.depth == 0
                 {
                     let new_meta = (key16 as u64)
                         | ((params.depth as u64) << 16)
@@ -542,5 +541,110 @@ mod tests {
         let decoded = res.best_move.unwrap();
         assert_eq!(decoded.from, m.from);
         assert_eq!(decoded.to, m.to);
+    }
+
+    #[test]
+    fn test_move_survives_best_move_none_restore() {
+        // Regression test for F37: a key-match store with best_move=None (preserve the
+        // existing move) used to read the move_data RAW (already XOR-protected) and
+        // feed it straight into the unconditional `^ hash_key` re-protect at the end,
+        // double-XORing it into garbage. The move must still decode correctly after a
+        // second store to the SAME position that doesn't supply a move.
+        let tt = SharedTranspositionTable::new(1);
+        let hash = 0x1357924680ABCDEFu64;
+        let m = Move {
+            from: Coordinate::new(3, 1),
+            to: Coordinate::new(3, 3),
+            piece: Piece::new(PieceType::Pawn, PlayerColor::White),
+            promotion: None,
+            rook_coord: None,
+        };
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 8,
+            flag: TTFlag::Exact,
+            score: 20,
+            static_eval: 15,
+            is_pv: true,
+            best_move: Some(m),
+            ply: 0,
+        });
+        // Re-store the same position with a deeper search but no move supplied - this
+        // must hit the key-match path and preserve the previously stored move.
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 9,
+            flag: TTFlag::Exact,
+            score: 25,
+            static_eval: 15,
+            is_pv: true,
+            best_move: None,
+            ply: 0,
+        });
+        let res = tt
+            .probe(&TTProbeParams {
+                hash,
+                alpha: -1000,
+                beta: 1000,
+                depth: 0,
+                ply: 0,
+                rule50_count: 0,
+                rule_limit: 100,
+            })
+            .unwrap();
+        let decoded = res
+            .best_move
+            .expect("move should survive a best_move=None re-store");
+        assert_eq!(decoded.from, m.from);
+        assert_eq!(decoded.to, m.to);
+    }
+
+    #[test]
+    fn test_shallow_store_does_not_clobber_deep_entry() {
+        // Regression test for F38: the key-match replacement condition had an extra
+        // `|| params.depth == 0` clause (absent from the single-threaded tt.rs), so
+        // ANY depth-0 store (e.g. an eager static-eval store) unconditionally evicted
+        // an existing deep, same-generation, non-exact-beating entry's metadata.
+        let tt = SharedTranspositionTable::new(1);
+        let hash = 0x1122334455667788u64;
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 10,
+            flag: TTFlag::Exact,
+            score: 100,
+            static_eval: 90,
+            is_pv: false,
+            best_move: None,
+            ply: 0,
+        });
+        // Same generation, non-exact, shallow: none of the replacement conditions
+        // should be met, so this must NOT overwrite the deep entry above.
+        tt.store(&TTStoreParams {
+            hash,
+            depth: 0,
+            flag: TTFlag::UpperBound,
+            score: -500,
+            static_eval: -500,
+            is_pv: false,
+            best_move: None,
+            ply: 0,
+        });
+        let res = tt
+            .probe(&TTProbeParams {
+                hash,
+                alpha: -1000,
+                beta: 1000,
+                depth: 10,
+                ply: 0,
+                rule50_count: 0,
+                rule_limit: 100,
+            })
+            .unwrap();
+        assert_eq!(
+            res.depth, 10,
+            "a depth-0 store must not clobber a deep entry's metadata"
+        );
+        assert_eq!(res.tt_score, 100);
+        assert_eq!(res.flag, TTFlag::Exact);
     }
 }

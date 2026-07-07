@@ -1180,8 +1180,11 @@ impl Searcher {
 
     /// Start a new search: reset per-search state and increment TT age (or clear if requested).
     pub fn new_search(&mut self) {
+        // Only the coordinating thread (thread_id 0) bumps the shared generation.
         #[cfg(feature = "multithreading")]
-        if let Some(tt) = SHARED_TT.get() {
+        if self.thread_id == 0
+            && let Some(tt) = SHARED_TT.get()
+        {
             tt.increment_age();
         }
         self.tt.increment_age();
@@ -2607,6 +2610,8 @@ pub(crate) fn get_best_move_threaded(
             searcher.rng = Prng::new(base_seed.wrapping_add(thread_id as u64));
         }
 
+        searcher.thread_id = thread_id;
+
         // Initialize searcher for this search
         searcher.new_search();
 
@@ -2615,7 +2620,6 @@ pub(crate) fn get_best_move_threaded(
             .hot
             .set_time_limits(opt_time_ms, max_time_ms, is_soft_limit);
         searcher.silent = silent;
-        searcher.thread_id = thread_id;
         searcher.hot.timer.reset();
 
         // Set correction mode based on variant (zero overhead during search)
