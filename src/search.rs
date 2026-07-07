@@ -158,10 +158,27 @@ pub const fn is_loss(value: i32) -> bool {
 }
 
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 /// Global stop flag for all search threads.
+/// Also written externally (via [`crate::stop_flag_ptr`]) to abort an analysis mid-search
+/// when the wasm memory is shared, so `check_time` polls it every node batch.
 pub(crate) static GLOBAL_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Transposition table size in MB used when (re)creating searchers and the shared TT.
+pub(crate) static TT_SIZE_MB: AtomicUsize = AtomicUsize::new(16);
+
+/// Sets the TT size for future searcher/shared-TT creations, and resizes the
+/// current thread's persistent searcher's local TT immediately if one exists.
+/// (An already-initialized shared TT can't be resized — respawn the worker for that.)
+pub fn set_tt_size_mb(mb: usize) {
+    TT_SIZE_MB.store(mb.clamp(1, 64), std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_SEARCHER.with(|cell| {
+        if let Some(searcher) = cell.borrow_mut().as_mut() {
+            searcher.tt = LocalTranspositionTable::new(mb);
+        }
+    });
+}
 
 #[inline(always)]
 pub const fn is_decisive(value: i32) -> bool {
@@ -253,6 +270,15 @@ pub use zobrist::{
 
 #[cfg(feature = "multithreading")]
 static SHARED_TT: OnceLock<SharedTranspositionTable> = OnceLock::new();
+
+/// Ensures the shared TT exists (sized by [`TT_SIZE_MB`] on first init).
+/// Required before any multithreaded search that sets [`USE_SHARED_TT`].
+#[cfg(feature = "multithreading")]
+pub(crate) fn init_shared_tt() {
+    SHARED_TT.get_or_init(|| {
+        SharedTranspositionTable::new(TT_SIZE_MB.load(std::sync::atomic::Ordering::Relaxed))
+    });
+}
 
 /// Precomputed LMR table to avoid ln() calls at runtime.
 /// Indexed by [depth][moves_searched].
@@ -599,6 +625,22 @@ pub struct MultiPVResult {
     pub lines: Vec<PVLine>,
     pub stats: SearchStats,
 }
+
+/// Snapshot of the search state after a completed iterative-deepening depth,
+/// streamed to the analysis UI via the depth callback.
+pub struct DepthInfo<'a> {
+    pub depth: usize,
+    pub seldepth: usize,
+    pub nodes: u64,
+    pub qnodes: u64,
+    pub nps: u128,
+    pub time_ms: u128,
+    pub hashfull: u32,
+    pub lines: &'a [PVLine],
+}
+
+/// Callback invoked after each completed iterative-deepening depth.
+pub type DepthCallback<'a> = &'a mut dyn FnMut(&DepthInfo);
 
 /// Result from a single thread's search, used for Lazy SMP thread voting.
 /// The thread voting algorithm weights votes by:
@@ -969,7 +1011,9 @@ impl Searcher {
                 )
                     as *mut [[[i32; 256]; 32]; PAWN_HISTORY_SIZE])
             },
-            tt: LocalTranspositionTable::new(16),
+            tt: LocalTranspositionTable::new(
+                TT_SIZE_MB.load(std::sync::atomic::Ordering::Relaxed),
+            ),
 
             #[cfg(feature = "nnue")]
             nnue_stack: {
@@ -1329,7 +1373,17 @@ impl Searcher {
 
     #[inline]
     pub fn check_time(&mut self) -> bool {
-        // Fast-path: no time limit (used by offline test/perft helpers).
+        // External/inter-thread stop request (helper threads, or an analysis abort
+        // written directly into shared wasm memory by the main thread). Polled even
+        // with no time limit — unlimited searches must still be stoppable.
+        if self.hot.nodes & 8191 == 0
+            && GLOBAL_STOP.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.hot.stopped = true;
+            return true;
+        }
+
+        // Fast-path: no time limit (unlimited analysis slices, offline test/perft helpers).
         if self.hot.time_limit_ms == u128::MAX {
             return false;
         }
@@ -2466,7 +2520,7 @@ pub fn get_best_move_parallel(
 /// Helper threads (thread_id > 0) skip the first move to distribute work.
 /// Uses persistent GLOBAL_SEARCHER - TT and histories persist across searches.
 /// Call reset_search_state() to clear for a new game.
-fn get_best_move_threaded(
+pub(crate) fn get_best_move_threaded(
     game: &mut GameState,
     max_depth: usize,
     opt_time_ms: u128,
@@ -2532,6 +2586,9 @@ pub fn get_best_moves_multipv(
     silent: bool,
     is_soft_limit: bool,
 ) -> MultiPVResult {
+    // Clear any stale stop request (check_time polls GLOBAL_STOP).
+    GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+
     // Ensure fast per-color piece counts are in sync with the board
     game.recompute_piece_counts();
     // Initialize correction history hashes
@@ -2580,7 +2637,82 @@ pub fn get_best_moves_multipv(
         }
 
         // MultiPV > 1: Search with special root handling to collect multiple best moves
-        get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent)
+        get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent, None, None)
+    })
+}
+
+/// Analysis driver: a time-sliced MultiPV search that streams a [`DepthInfo`] to
+/// `on_depth` after every completed iterative-deepening depth.
+///
+/// Designed to be called repeatedly with short `slice_ms` budgets from a worker that
+/// yields to its message queue between slices. Pass `start_depth = last_reached + 1`
+/// so each slice *resumes* the iterative deepening rather than re-walking from depth 1
+/// (the persistent TT makes the resumed depth cheap) — this is what lets "go deeper"
+/// actually progress instead of oscillating at the target depth. The first iteration
+/// always completes regardless of the slice budget (`min_depth_required`), so a slice
+/// always advances by at least one depth. Unlike the gameplay wrappers this always
+/// takes the MultiPV root path (even for `multi_pv == 1`) so every depth reports full
+/// PV lines.
+pub fn analyse_position(
+    game: &mut GameState,
+    max_depth: usize,
+    start_depth: usize,
+    slice_ms: u128,
+    multi_pv: usize,
+    on_depth: DepthCallback,
+) -> MultiPVResult {
+    // Clear any stale stop request (a stop may have been written externally).
+    GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    game.recompute_piece_counts();
+    game.recompute_correction_hashes();
+
+    let multi_pv = multi_pv.max(1);
+
+    // start_depth == 1 marks the first slice of a fresh position; anything higher is a
+    // resume of the same position's search, where we KEEP the accumulated heuristics
+    // (history, killers, PV, TT) so the resumed depth benefits from warm move ordering
+    // — a cold new_search() at a high depth would explode the node count.
+    let fresh = start_depth <= 1;
+
+    GLOBAL_SEARCHER.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        let searcher = opt.get_or_insert_with(|| Searcher::new(slice_ms));
+
+        if fresh {
+            searcher.new_search();
+        } else {
+            // Light per-slice reset: clear only the counters/flags that are scoped to a
+            // single blocking call, preserving the search heuristics built up so far.
+            searcher.hot.nodes = 0;
+            searcher.hot.qnodes = 0;
+            searcher.hot.seldepth = 0;
+            searcher.hot.stopped = false;
+            searcher.hot.min_depth_required = 1;
+            searcher.hot.iter_start_ms = 0.0;
+            searcher.hot.total_time_ms = 0.0;
+        }
+        // Soft limit: analysis has no flagging risk, so let iterations run
+        // as close to the slice budget as the proactive checks allow.
+        searcher.hot.set_time_limits(slice_ms, slice_ms, true);
+        searcher.silent = true;
+        searcher.hot.timer.reset();
+
+        searcher.set_corrhist_mode(game);
+        searcher.move_rule_limit = game
+            .game_rules
+            .move_rule_limit
+            .map_or(i32::MAX, |v| v as i32);
+
+        get_best_moves_multipv_impl(
+            searcher,
+            game,
+            max_depth,
+            multi_pv,
+            true,
+            Some(start_depth),
+            Some(on_depth),
+        )
     })
 }
 
@@ -2642,6 +2774,9 @@ pub(crate) fn get_best_move_limited(
     silent: bool,
     is_soft_limit: bool,
 ) -> Option<(Move, i32, SearchStats)> {
+    // Clear any stale stop request (check_time polls GLOBAL_STOP).
+    GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+
     game.recompute_piece_counts();
     game.recompute_correction_hashes();
 
@@ -2703,8 +2838,15 @@ pub(crate) fn get_best_move_limited(
         }
 
         if multi_pv > 1 {
-            let result =
-                get_best_moves_multipv_impl(searcher, game, effective_depth, multi_pv, silent);
+            let result = get_best_moves_multipv_impl(
+                searcher,
+                game,
+                effective_depth,
+                multi_pv,
+                silent,
+                None,
+                None,
+            );
             let stats = result.stats.clone();
             pick_best(&result, skill_level, &mut searcher.rng).map(|(m, eval)| (m, eval, stats))
         } else {
@@ -2721,6 +2863,10 @@ pub(crate) fn get_best_moves_multipv_impl(
     max_depth: usize,
     multi_pv: usize,
     silent: bool,
+    // When `Some`, resume iterative deepening at this depth instead of starting from 1
+    // (relies on a warm TT from a previous slice of the same position). Used by analysis.
+    resume_from_depth: Option<usize>,
+    mut on_depth: Option<DepthCallback>,
 ) -> MultiPVResult {
     // Initialize NNUE accumulator stack (stored on searcher).
     #[cfg(feature = "nnue")]
@@ -2763,18 +2909,30 @@ pub(crate) fn get_best_moves_multipv_impl(
     if legal_root_moves.len() == 1 {
         let single = legal_root_moves[0];
         let stats = build_search_stats(searcher);
-        return MultiPVResult {
-            lines: vec![PVLine {
-                mv: single,
-                #[cfg(feature = "nnue")]
-                score: searcher.adjusted_eval(game, evaluate(game, searcher.nnue_at(0)), 0, 0),
-                #[cfg(not(feature = "nnue"))]
-                score: searcher.adjusted_eval(game, evaluate(game), 0, 0),
-                depth: 0,
-                pv: Vec::new(),
-            }],
-            stats,
-        };
+        // Report at max_depth so the analysis driver treats the forced move as fully
+        // analyzed (searching a forced move deeper tells us nothing at this root).
+        let lines = vec![PVLine {
+            mv: single,
+            #[cfg(feature = "nnue")]
+            score: searcher.adjusted_eval(game, evaluate(game, searcher.nnue_at(0)), 0, 0),
+            #[cfg(not(feature = "nnue"))]
+            score: searcher.adjusted_eval(game, evaluate(game), 0, 0),
+            depth: max_depth,
+            pv: vec![single],
+        }];
+        if let Some(cb) = on_depth.as_deref_mut() {
+            cb(&DepthInfo {
+                depth: max_depth,
+                seldepth: 1,
+                nodes: 1,
+                qnodes: 0,
+                nps: 0,
+                time_ms: searcher.hot.timer.elapsed_ms(),
+                hashfull: stats.tt_fill_permille,
+                lines: &lines,
+            });
+        }
+        return MultiPVResult { lines, stats };
     }
 
     // Cap multi_pv at number of legal moves
@@ -2784,8 +2942,11 @@ pub(crate) fn get_best_moves_multipv_impl(
     let mut root_scores: Vec<(Move, i32, Vec<Move>)> = Vec::with_capacity(legal_root_moves.len());
     let mut best_lines: Vec<PVLine> = Vec::with_capacity(multi_pv);
 
-    // Lazy SMP: Helper threads start at different depths to create search diversity.
-    let start_depth = if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
+    // Resume point (analysis) takes precedence; otherwise Lazy SMP helper threads
+    // start at staggered depths for search diversity.
+    let start_depth = if let Some(resume) = resume_from_depth {
+        resume.clamp(1, max_depth)
+    } else if searcher.thread_id > 0 && searcher.thread_id % 2 == 1 {
         2.min(max_depth)
     } else {
         1
@@ -2979,36 +3140,73 @@ pub(crate) fn get_best_moves_multipv_impl(
             break;
         }
 
-        // Sort by score descending
-        root_scores.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        // Whether this depth was searched to completion (every root move). A depth
+        // interrupted mid-way only has scores for the moves searched before the stop —
+        // committing those would shrink the MultiPV set (and corrupt gameplay move
+        // selection), so we keep the previous complete depth's lines instead. The one
+        // exception is the very first results, where a partial set is all we have.
+        let depth_completed = !searcher.hot.stopped;
 
-        // Reorder legal_root_moves by this iteration's scores for better PVS efficiency
-        // at the next depth - the previous best move will be searched first
-        legal_root_moves.clear();
-        for (mv, _, _) in &root_scores {
-            legal_root_moves.push(*mv);
+        if depth_completed || best_lines.is_empty() {
+            // Sort by score descending
+            root_scores.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+            // Reorder legal_root_moves by this iteration's scores for better PVS efficiency
+            // at the next depth - the previous best move will be searched first
+            legal_root_moves.clear();
+            for (mv, _, _) in &root_scores {
+                legal_root_moves.push(*mv);
+            }
+
+            // Update best_lines with results from this depth
+            best_lines.clear();
+            for (mv, score, pv) in root_scores.iter().take(multi_pv) {
+                best_lines.push(PVLine {
+                    mv: *mv,
+                    score: *score,
+                    depth: depth.min(searcher.hot.seldepth.max(1)),
+                    pv: pv.clone(),
+                });
+            }
+
+            if !silent {
+                searcher.print_multi_pv_depth(depth, &best_lines);
+            }
+
+            // Only stream a completed depth to the analysis UI (a partial first depth
+            // is committed above for correctness but not emitted, to avoid a flicker).
+            if depth_completed && let Some(cb) = on_depth.as_deref_mut() {
+                let time_ms = searcher.hot.timer.elapsed_ms();
+                #[cfg(feature = "multithreading")]
+                let hashfull = if let Some(tt) = SHARED_TT.get() {
+                    tt.fill_permille()
+                } else {
+                    searcher.tt.fill_permille()
+                };
+                #[cfg(not(feature = "multithreading"))]
+                let hashfull = searcher.tt.fill_permille();
+                cb(&DepthInfo {
+                    depth,
+                    seldepth: searcher.hot.seldepth,
+                    nodes: searcher.hot.nodes,
+                    qnodes: searcher.hot.qnodes,
+                    nps: if time_ms > 0 {
+                        (searcher.hot.nodes as u128 * 1000) / time_ms
+                    } else {
+                        0
+                    },
+                    time_ms,
+                    hashfull,
+                    lines: &best_lines,
+                });
+            }
+
+            searcher.prev_score = if !root_scores.is_empty() {
+                root_scores[0].1
+            } else {
+                -INFINITY
+            };
         }
-
-        // Update best_lines with results from this depth
-        best_lines.clear();
-        for (mv, score, pv) in root_scores.iter().take(multi_pv) {
-            best_lines.push(PVLine {
-                mv: *mv,
-                score: *score,
-                depth: depth.min(searcher.hot.seldepth.max(1)),
-                pv: pv.clone(),
-            });
-        }
-
-        if !silent {
-            searcher.print_multi_pv_depth(depth, &best_lines);
-        }
-
-        searcher.prev_score = if !root_scores.is_empty() {
-            root_scores[0].1
-        } else {
-            -INFINITY
-        };
         searcher.hot.min_depth_required = 0;
 
         if !best_lines.is_empty() && best_lines[0].score.abs() > MATE_SCORE {

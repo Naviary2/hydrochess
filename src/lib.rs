@@ -225,6 +225,25 @@ pub fn reset_engine_state() {
     crate::search::reset_search_state();
 }
 
+/// Byte offset of the global stop flag inside wasm linear memory.
+///
+/// When the module is built with shared memory (multithreaded build), the main
+/// thread can abort an in-flight search instantly by writing a non-zero byte at
+/// this address (`new Uint8Array(memory.buffer)[ptr] = 1`). The search polls the
+/// flag every node batch. Each new search clears it.
+#[wasm_bindgen]
+pub fn stop_flag_ptr() -> u32 {
+    &crate::search::GLOBAL_STOP as *const _ as u32
+}
+
+/// Sets the transposition table size in MB (clamped to 1..=64).
+/// Takes effect immediately for the calling thread's local TT; the shared TT
+/// (multithreaded build) only honors it if called before the first search.
+#[wasm_bindgen]
+pub fn set_hash_size(mb: u32) {
+    crate::search::set_tt_size_mb(mb as usize);
+}
+
 // Lazy SMP via wasm-bindgen-rayon (shared memory thread pool)
 #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
@@ -270,6 +289,99 @@ pub struct JsEngineConfig {
     pub btime: Option<u64>,
     pub winc: Option<u64>,
     pub binc: Option<u64>,
+}
+
+/// Options for [`Engine::analyse`].
+#[derive(Deserialize)]
+pub struct JsAnalyseOptions {
+    /// Number of principal variations to search (1..=legal move count).
+    pub multi_pv: Option<usize>,
+    /// Depth cap for this analysis (defaults to 50).
+    pub max_depth: Option<usize>,
+    /// Depth to resume iterative deepening at (defaults to 1). Pass `last_reached + 1`
+    /// on successive slices of the same position so the search keeps deepening instead
+    /// of re-walking from depth 1.
+    pub start_depth: Option<usize>,
+    /// Time budget of this slice in milliseconds. 0/absent = unlimited: the call runs
+    /// until `max_depth` completes. Unlimited slices are fully deterministic — no
+    /// wall-clock-dependent aborts can vary the search tree between runs.
+    pub slice_ms: Option<u64>,
+}
+
+/// One principal variation of an analysis update.
+/// Moves are site-format compact tokens (`"x,y>x,y"`, promotions `"=Q"`/`"=q"` by mover color).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsAnalysisLine {
+    pub moves: Vec<String>,
+    /// Centipawn score from the side-to-move's perspective. Absent when mating.
+    pub cp: Option<i32>,
+    /// Full moves to mate from the side-to-move's perspective (negative = getting mated).
+    pub mate: Option<i32>,
+}
+
+/// A streamed analysis update (per completed depth) or the final slice summary.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsAnalysisInfo {
+    pub depth: u32,
+    pub seldepth: u32,
+    pub nodes: f64,
+    pub nps: f64,
+    pub time_ms: f64,
+    /// TT fill in permille (0-1000).
+    pub hashfull: u32,
+    pub lines: Vec<JsAnalysisLine>,
+}
+
+/// Formats a move as the site's compact ICN token, casing the promotion
+/// abbreviation by the mover's color (white uppercase, black lowercase).
+fn move_to_site_token(m: &crate::moves::Move) -> String {
+    let mut token = format!("{},{}>{},{}", m.from.x, m.from.y, m.to.x, m.to.y);
+    if let Some(promotion) = m.promotion {
+        let code = promotion.to_site_code();
+        if m.piece.color() == PlayerColor::Black {
+            token.push_str(&format!("={}", code.to_lowercase()));
+        } else {
+            token.push_str(&format!("={}", code));
+        }
+    }
+    token
+}
+
+/// Splits an engine score into (cp, mate) for JS consumption.
+fn split_score(score: i32) -> (Option<i32>, Option<i32>) {
+    use crate::search::{MATE_SCORE, MATE_VALUE};
+    if score > MATE_SCORE {
+        (None, Some((MATE_VALUE - score + 1) / 2))
+    } else if score < -MATE_SCORE {
+        (None, Some(-((MATE_VALUE + score + 1) / 2)))
+    } else {
+        (Some(score), None)
+    }
+}
+
+/// Converts an engine PV line into the JS-facing struct.
+fn pv_line_to_js(line: &search::PVLine) -> JsAnalysisLine {
+    let (cp, mate) = split_score(line.score);
+    JsAnalysisLine {
+        moves: line.pv.iter().map(move_to_site_token).collect(),
+        cp,
+        mate,
+    }
+}
+
+/// Converts a [`search::DepthInfo`] into the JS-facing struct.
+fn build_js_info(info: &search::DepthInfo) -> JsAnalysisInfo {
+    JsAnalysisInfo {
+        depth: info.depth as u32,
+        seldepth: info.seldepth as u32,
+        nodes: info.nodes as f64,
+        nps: info.nps as f64,
+        time_ms: info.time_ms as f64,
+        hashfull: info.hashfull,
+        lines: info.lines.iter().map(pv_line_to_js).collect(),
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
@@ -777,6 +889,106 @@ impl Engine {
         serde_wasm_bindgen::to_value(&js_lines).unwrap_or(JsValue::NULL)
     }
 
+    /// Replaces the engine's position from an ICN string, keeping the persistent
+    /// searcher (and its transposition table) warm.
+    pub fn set_position(&mut self, icn_string: &str) {
+        let mut game = GameState::new();
+        game.setup_position_from_icn(icn_string);
+        self.game = game;
+    }
+
+    /// Runs one time-sliced MultiPV analysis of the current position.
+    ///
+    /// Invokes `on_info` with a `JsAnalysisInfo` after every completed depth, and
+    /// returns the final `JsAnalysisInfo` for the slice (lines empty if the position
+    /// is terminal). Issue repeated calls to deepen; abort mid-slice by writing to
+    /// [`stop_flag_ptr`] (shared-memory builds only).
+    pub fn analyse(&mut self, options: JsValue, on_info: js_sys::Function) -> JsValue {
+        let options: JsAnalyseOptions = match serde_wasm_bindgen::from_value(options) {
+            Ok(o) => o,
+            Err(_) => JsAnalyseOptions {
+                multi_pv: None,
+                max_depth: None,
+                start_depth: None,
+                slice_ms: None,
+            },
+        };
+        let multi_pv = options.multi_pv.unwrap_or(1).clamp(1, 16);
+        let max_depth = options.max_depth.unwrap_or(50).clamp(1, 50);
+        let start_depth = options.start_depth.unwrap_or(1).clamp(1, max_depth);
+        let slice_ms = match options.slice_ms.unwrap_or(0) {
+            0 => u128::MAX, // Unlimited: run until max_depth completes (deterministic).
+            ms => (ms as u128).clamp(50, 600_000),
+        };
+
+        let mut callback = |info: &search::DepthInfo| {
+            let js_info = serde_wasm_bindgen::to_value(&build_js_info(info)).unwrap_or(JsValue::NULL); // prettier-ignore
+            let _ = on_info.call1(&JsValue::NULL, &js_info);
+        };
+
+        // Multithreaded build with an initialized thread pool: helper threads run a plain
+        // search on the same position to fill the shared TT (Lazy SMP) while the main
+        // thread runs the MultiPV analysis. GLOBAL_STOP must be cleared before helpers
+        // launch and set once the main slice finishes so they wind down promptly.
+        #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
+        {
+            let num_threads = rayon::current_num_threads().max(1);
+            if num_threads > 1 {
+                /// The scope closure must be `Send`, but the captured JS callback (and the
+                /// engine's game state) are only ever touched by the main thread inside the
+                /// scope — helpers get their own clones — so asserting `Send` is sound.
+                struct MainThreadOnly<T>(T);
+                unsafe impl<T> Send for MainThreadOnly<T> {}
+
+                search::GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+                search::init_shared_tt();
+                search::USE_SHARED_TT.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                let helper_game = self.game.clone();
+                let main_ctx = MainThreadOnly((&mut self.game, &mut callback));
+
+                let result = rayon::scope(move |s| {
+                    // Force capturing the whole wrapper — precise closure capture would
+                    // otherwise capture its (non-Send) fields individually.
+                    let main_ctx = main_ctx;
+                    for i in 1..num_threads {
+                        let mut game_clone = helper_game.clone();
+                        s.spawn(move |_| {
+                            let _ = search::get_best_move_threaded(
+                                &mut game_clone,
+                                max_depth,
+                                slice_ms,
+                                slice_ms,
+                                true,
+                                i,
+                                true,
+                            );
+                        });
+                    }
+
+                    let MainThreadOnly((game, callback)) = main_ctx;
+                    let result = search::analyse_position(
+                        game, max_depth, start_depth, slice_ms, multi_pv, callback,
+                    );
+                    search::GLOBAL_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+                    result
+                });
+
+                return self.analysis_result_to_js(&result);
+            }
+        }
+
+        let result = search::analyse_position(
+            &mut self.game,
+            max_depth,
+            start_depth,
+            slice_ms,
+            multi_pv,
+            &mut callback,
+        );
+        self.analysis_result_to_js(&result)
+    }
+
     pub fn perft(&mut self, depth: usize) -> u64 {
         self.game.perft(depth)
     }
@@ -815,6 +1027,21 @@ impl Engine {
 }
 
 impl Engine {
+    /// Builds the final slice summary returned by [`Engine::analyse`].
+    fn analysis_result_to_js(&self, result: &search::MultiPVResult) -> JsValue {
+        let depth = result.lines.first().map_or(0, |l| l.depth);
+        let info = JsAnalysisInfo {
+            depth: depth as u32,
+            seldepth: depth as u32,
+            nodes: result.stats.nodes as f64,
+            nps: 0.0,
+            time_ms: 0.0,
+            hashfull: result.stats.tt_fill_permille,
+            lines: result.lines.iter().map(pv_line_to_js).collect(),
+        };
+        serde_wasm_bindgen::to_value(&info).unwrap_or(JsValue::NULL)
+    }
+
     /// Return the engine's static evaluation of the current position in centipawns,
     /// from the side-to-move's perspective (positive = advantage for side to move).
     pub fn evaluate_position(game: &GameState) -> i32 {
