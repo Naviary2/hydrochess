@@ -1038,7 +1038,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 }
 
                                 // 8. Minor stats
-                                if (pt == PieceType::Knight || pt == PieceType::Bishop)
+                                if (pt.is_minor() || pt == PieceType::Archbishop)
                                     && game.starting_squares.contains(&Coordinate::new(x, y))
                                 {
                                     if is_white {

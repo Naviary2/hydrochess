@@ -914,7 +914,7 @@ impl Engine {
             },
         };
         let multi_pv = options.multi_pv.unwrap_or(1).clamp(1, 16);
-        let max_depth = options.max_depth.unwrap_or(50).clamp(1, 50);
+        let max_depth = options.max_depth.unwrap_or(50).clamp(1, 64);
         let start_depth = options.start_depth.unwrap_or(1).clamp(1, max_depth);
         let slice_ms = match options.slice_ms.unwrap_or(0) {
             0 => u128::MAX, // Unlimited: run until max_depth completes (deterministic).
