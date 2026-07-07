@@ -1794,6 +1794,60 @@ impl Searcher {
         pv
     }
 
+    /// Extends a root PV line in place by walking transposition-table moves from the
+    /// line's end position, up to `target_len` total moves. Works on a clone of `game`,
+    /// validating every move and guarding against TT cycles — same technique as
+    /// {@link extract_pv_only}, generalized to a line that starts with a root move.
+    pub fn extend_pv_with_tt(&self, game: &GameState, pv: &mut Vec<Move>, target_len: usize) {
+        if pv.len() >= target_len {
+            return;
+        }
+
+        let mut temp_game = game.clone();
+        let mut seen_hashes = Vec::with_capacity(target_len);
+
+        // Advance to the end of the existing line, validating each move.
+        for m in pv.iter() {
+            let piece_at_from = temp_game.board.get_piece(m.from.x, m.from.y);
+            if piece_at_from.is_none() || piece_at_from != Some(m.piece) {
+                return; // Line no longer replayable; leave it as-is.
+            }
+            seen_hashes.push(temp_game.hash);
+            temp_game.make_move(m);
+        }
+
+        // Walk TT moves from here.
+        while pv.len() < target_len {
+            let hash = temp_game.hash;
+            if seen_hashes.contains(&hash) {
+                break;
+            }
+            seen_hashes.push(hash);
+
+            let tt_move = if let Some(m) = self.tt.probe_move(hash) {
+                Some(m)
+            } else {
+                #[cfg(feature = "multithreading")]
+                {
+                    SHARED_TT.get().and_then(|tt| tt.probe_move(hash))
+                }
+                #[cfg(not(feature = "multithreading"))]
+                None
+            };
+
+            let Some(m) = tt_move else { break };
+            let piece_at_from = temp_game.board.get_piece(m.from.x, m.from.y);
+            if piece_at_from.is_none() || piece_at_from != Some(m.piece) {
+                break;
+            }
+            temp_game.make_move(&m);
+            if temp_game.is_move_illegal() {
+                break;
+            }
+            pv.push(m);
+        }
+    }
+
     /// Format current searcher's PV as string
     pub fn format_pv(&self, game: &mut GameState, depth: usize) -> String {
         let pv = self.extract_pv_only(game, depth);
@@ -3039,9 +3093,12 @@ pub(crate) fn get_best_moves_multipv_impl(
             // For MultiPV, we need to search all moves to get their scores.
             // First move gets aspiration window (or full), others use PVS logic.
             let mut score;
+            // Whether `score` is exact (came from a PV/full-window search).
+            let exact;
 
             if move_idx == 0 {
                 // first move: try aspiration window
+                exact = true;
                 score = -negamax(&mut NegamaxContext {
                     searcher,
                     game,
@@ -3088,7 +3145,8 @@ pub(crate) fn get_best_moves_multipv_impl(
                     excluded_move: None,
                 });
 
-                if score > target_alpha && !searcher.hot.stopped {
+                exact = score > target_alpha && !searcher.hot.stopped;
+                if exact {
                     // Re-search with full window to get accurate score
                     score = -negamax(&mut NegamaxContext {
                         searcher,
@@ -3102,6 +3160,10 @@ pub(crate) fn get_best_moves_multipv_impl(
                         was_null_move: false,
                         excluded_move: None,
                     });
+                } else if target_alpha != -INFINITY {
+                    // The move failed to beat the K-th best: `score` is only an upper bound. 
+                    // Clamp it below target_alpha so it can never tie with an exactly-searched top-K move.
+                    score = score.min(target_alpha - 1);
                 }
             };
 
@@ -3109,13 +3171,17 @@ pub(crate) fn get_best_moves_multipv_impl(
             game.undo_move(m, undo);
 
             if !searcher.hot.stopped {
-                // Extract PV for this move from ply 1's triangular row
-                let child_base = MAX_PLY; // ply 1 base offset
                 let mut pv = Vec::with_capacity(searcher.pv_length[1] + 1);
                 pv.push(*m);
-                for i in 0..searcher.pv_length[1] {
-                    if let Some(pv_move) = searcher.pv_table[child_base + i] {
-                        pv.push(pv_move);
+                if exact {
+                    // Extract PV for this move from ply 1's triangular row. Only valid
+                    // when a PV search just ran — otherwise the row belongs to an
+                    // earlier root move and would attach a garbage continuation.
+                    let child_base = MAX_PLY; // ply 1 base offset
+                    for i in 0..searcher.pv_length[1] {
+                        if let Some(pv_move) = searcher.pv_table[child_base + i] {
+                            pv.push(pv_move);
+                        }
                     }
                 }
                 root_scores.push((*m, score, pv));
@@ -3154,14 +3220,18 @@ pub(crate) fn get_best_moves_multipv_impl(
                 legal_root_moves.push(*mv);
             }
 
-            // Update best_lines with results from this depth
+            // Update best_lines with results from this depth. Triangular-table PVs
+            // are often truncated by TT cutoffs, so extend each displayed line by
+            // walking TT moves toward the full search depth.
             best_lines.clear();
             for (mv, score, pv) in root_scores.iter().take(multi_pv) {
+                let mut pv = pv.clone();
+                searcher.extend_pv_with_tt(game, &mut pv, depth);
                 best_lines.push(PVLine {
                     mv: *mv,
                     score: *score,
                     depth: depth.min(searcher.hot.seldepth.max(1)),
-                    pv: pv.clone(),
+                    pv,
                 });
             }
 
