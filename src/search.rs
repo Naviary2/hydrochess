@@ -2695,7 +2695,7 @@ pub fn get_best_moves_multipv(
         }
 
         // MultiPV > 1: Search with special root handling to collect multiple best moves
-        get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent, None, None)
+        get_best_moves_multipv_impl(searcher, game, max_depth, multi_pv, silent, None, None, None)
     })
 }
 
@@ -2750,9 +2750,10 @@ pub fn analyse_position(
             searcher.hot.iter_start_ms = 0.0;
             searcher.hot.total_time_ms = 0.0;
         }
-        // Soft limit: analysis has no flagging risk, so let iterations run
-        // as close to the slice budget as the proactive checks allow.
-        searcher.hot.set_time_limits(slice_ms, slice_ms, true);
+        // No per-node time limit: `check_time` must never abort mid-depth, so every depth
+        // completes fully and its result is deterministic. Responsiveness instead comes
+        // from the between-depth deadline (whole depths only), passed to the impl below.
+        searcher.hot.set_time_limits(u128::MAX, u128::MAX, true);
         searcher.silent = true;
         searcher.hot.timer.reset();
 
@@ -2762,6 +2763,11 @@ pub fn analyse_position(
             .move_rule_limit
             .map_or(i32::MAX, |v| v as i32);
 
+        // slice_ms == 0 means "run to max_depth" (no deadline); otherwise stop after the
+        // first completed depth past the deadline, so a new position can be picked up
+        // within roughly slice_ms instead of waiting for the whole search.
+        let deadline = if slice_ms == 0 { None } else { Some(slice_ms) };
+
         get_best_moves_multipv_impl(
             searcher,
             game,
@@ -2769,6 +2775,7 @@ pub fn analyse_position(
             multi_pv,
             true,
             Some(start_depth),
+            deadline,
             Some(on_depth),
         )
     })
@@ -2904,6 +2911,7 @@ pub(crate) fn get_best_move_limited(
                 silent,
                 None,
                 None,
+                None,
             );
             let stats = result.stats.clone();
             pick_best(&result, skill_level, &mut searcher.rng).map(|(m, eval)| (m, eval, stats))
@@ -2924,6 +2932,9 @@ pub(crate) fn get_best_moves_multipv_impl(
     // When `Some`, resume iterative deepening at this depth instead of starting from 1
     // (relies on a warm TT from a previous slice of the same position). Used by analysis.
     resume_from_depth: Option<usize>,
+    // When `Some`, stop after finishing the first depth that ends past this elapsed-ms
+    // deadline. Only whole depths are ever committed, so results stay deterministic.
+    deadline_ms: Option<u128>,
     mut on_depth: Option<DepthCallback>,
 ) -> MultiPVResult {
     // Initialize NNUE accumulator stack (stored on searcher).
@@ -3276,6 +3287,15 @@ pub(crate) fn get_best_moves_multipv_impl(
         searcher.hot.min_depth_required = 0;
 
         if !best_lines.is_empty() && best_lines[0].score.abs() > MATE_SCORE {
+            break;
+        }
+
+        // Analysis slicing: this depth completed, so if we're past the deadline stop here
+        // and let the caller resume at the next depth. Only whole depths are committed, so
+        // the result stays deterministic regardless of where the deadline lands.
+        if let Some(dl) = deadline_ms
+            && searcher.hot.timer.elapsed_ms() >= dl
+        {
             break;
         }
 
