@@ -2924,7 +2924,7 @@ fn compute_pawn_structure_traced<T: EvaluationTracer>(
                     });
                     if start < black_pawns.len()
                         && black_pawns[start].0 == target_file
-                        && black_pawns[start].1 <= w_promo
+                        && black_pawns[start].1 <= w_promo.saturating_add(1)
                     {
                         safe_path = false;
                         break;
