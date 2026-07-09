@@ -160,8 +160,8 @@ impl Variant {
         match normalized.as_str() {
             "classical" => Variant::Classical,
             "confined_classical" => Variant::ConfinedClassical,
-            "classical_plus" => Variant::ClassicalPlus,
-            "coaip" => Variant::CoaIP,
+            "classical_plus" | "classical+" => Variant::ClassicalPlus,
+            "coaip" | "chess_on_an_infinite_plane" => Variant::CoaIP,
             "coaip_ho" | "chess_on_an_infinite_plane_-_huygens_option" => Variant::CoaIPHO,
             "coaip_ro" | "chess_on_an_infinite_plane_-_roses_option" => Variant::CoaIPRO,
             "coaip_no" | "chess_on_an_infinite_plane_-_knightriders_option" => Variant::CoaIPNO,
@@ -1111,6 +1111,11 @@ mod tests {
             Variant::parse("Chess on an Infinite Plane - Knightriders Option"),
             Variant::CoaIPNO
         );
+        assert_eq!(
+            Variant::parse("Chess on an Infinite Plane"),
+            Variant::CoaIP
+        );
+        assert_eq!(Variant::parse("Classical+"), Variant::ClassicalPlus);
         assert_eq!(Variant::parse("not a real variant"), Variant::Classical);
 
         assert_eq!(Variant::Chess.get_default_bounds(), (1, 8, 1, 8));

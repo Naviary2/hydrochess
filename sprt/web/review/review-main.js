@@ -19,13 +19,15 @@ const CLASSIFICATION = {
 
 /**
  * Convert centipawn evaluation to win probability [0, 1].
- * Formula: wp = 0.5 + 0.5 * (2 / (1 + exp(-0.004 * cp)) - 1)
- * This is the chess.com-style sigmoid. For mate scores, returns 1 or 0.
+ * Formula: wp = 0.5 + 0.5 * (2 / (1 + exp(-0.003 * cp)) - 1)
+ * Shallower curve (0.003) assumes players convert advantages less efficiently.
+ * For mate scores, converts to equivalent cp (no clamp) then uses sigmoid.
  */
 function cpToWinProb(cp) {
-    if (cp >= MATE_SCORE) return 1.0;
-    if (cp <= -MATE_SCORE) return 0.0;
-    return 0.5 + 0.5 * (2.0 / (1.0 + Math.exp(-0.004 * cp)) - 1.0);
+    if (cp >= MATE_SCORE) cp = 1800; // Mate in 1 equivalent: (25 - 1) * 75
+    else if (cp <= -MATE_SCORE) cp = -1800;
+    else cp = Math.min(Math.max(-1000, cp), 1000); // Clamp non-mate evals
+    return 0.5 + 0.5 * (2.0 / (1.0 + Math.exp(-0.003 * cp)) - 1.0);
 }
 
 /**
