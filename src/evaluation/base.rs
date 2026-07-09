@@ -841,7 +841,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                     let dy = y - wk.y;
                                     let adx = dx.abs();
                                     let ady = dy.abs();
-                                    let dist = adx.max(ady);
+                                    let dist = saturating_dist_i32(adx.max(ady));
 
                                     // Ring Cover: own pawn/guard, or a neutral wall
                                     // (obstacle/void) which shields either king.
@@ -858,23 +858,13 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                     // Rays
                                     if dx != 0 && dy == 0 {
                                         let idx = if dx > 0 { 4 } else { 5 };
-                                        if (dist as i32) < w_king_rays[idx].0 {
-                                            w_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     } else if dx == 0 && dy != 0 {
                                         let idx = if dy > 0 { 6 } else { 7 };
-                                        if (dist as i32) < w_king_rays[idx].0 {
-                                            w_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     } else if adx == ady && dist > 0 {
                                         let idx = if dx > 0 {
@@ -884,13 +874,8 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                         } else {
                                             3
                                         };
-                                        if (dist as i32) < w_king_rays[idx].0 {
-                                            w_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < w_king_rays[idx].0 {
+                                            w_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     }
                                 }
@@ -901,7 +886,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                     let dy = y - bk.y;
                                     let adx = dx.abs();
                                     let ady = dy.abs();
-                                    let dist = adx.max(ady);
+                                    let dist = saturating_dist_i32(adx.max(ady));
 
                                     // Ring Cover: own pawn/guard, or a neutral wall
                                     // (obstacle/void) which shields either king.
@@ -918,23 +903,13 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                     // Rays
                                     if dx != 0 && dy == 0 {
                                         let idx = if dx > 0 { 4 } else { 5 };
-                                        if (dist as i32) < b_king_rays[idx].0 {
-                                            b_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     } else if dx == 0 && dy != 0 {
                                         let idx = if dy > 0 { 6 } else { 7 };
-                                        if (dist as i32) < b_king_rays[idx].0 {
-                                            b_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     } else if adx == ady && dist > 0 {
                                         let idx = if dx > 0 {
@@ -944,13 +919,8 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                         } else {
                                             3
                                         };
-                                        if (dist as i32) < b_king_rays[idx].0 {
-                                            b_king_rays[idx] = (
-                                                dist as i32,
-                                                piece_val,
-                                                piece.color(),
-                                                pt,
-                                            );
+                                        if dist < b_king_rays[idx].0 {
+                                            b_king_rays[idx] = (dist, piece_val, piece.color(), pt);
                                         }
                                     }
                                 }
@@ -1238,20 +1208,20 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                             if ppiece.color() == PlayerColor::White {
                                 for bk in &black_royal_tropisms {
                                     let d = (px - bk.x).abs().max((py - bk.y).abs());
-                                    w_attacking_tropism += piece_val / (d as i32 + bk.tropism_addend);
+                                    w_attacking_tropism += tropism_contribution(piece_val, d, bk.tropism_addend);
                                 }
                                 for wk in &white_royal_tropisms {
                                     let d = (px - wk.x).abs().max((py - wk.y).abs());
-                                    w_defensive_tropism += piece_val.min(350) / (d as i32 + wk.tropism_addend);
+                                    w_defensive_tropism += tropism_contribution(piece_val.min(350), d, wk.tropism_addend);
                                 }
                             } else {
                                 for wk in &white_royal_tropisms {
                                     let d = (px - wk.x).abs().max((py - wk.y).abs());
-                                    b_attacking_tropism += piece_val / (d as i32 + wk.tropism_addend);
+                                    b_attacking_tropism += tropism_contribution(piece_val, d, wk.tropism_addend);
                                 }
                                 for bk in &black_royal_tropisms {
                                     let d = (px - bk.x).abs().max((py - bk.y).abs());
-                                    b_defensive_tropism += piece_val.min(350) / (d as i32 + bk.tropism_addend);
+                                    b_defensive_tropism += tropism_contribution(piece_val.min(350), d, bk.tropism_addend);
                                 }
                             }
                         }
@@ -1809,6 +1779,19 @@ pub struct RoyalTropismMetrics {
 #[inline(always)]
 fn compute_tropism_addend(slider_count: i32) -> i32 {
     12 - slider_count.clamp(1, 7)
+}
+
+/// Saturating i64->i32 cast for a (non-negative) Chebyshev distance.
+#[inline(always)]
+fn saturating_dist_i32(d: i64) -> i32 {
+    d.min(i32::MAX as i64) as i32
+}
+
+/// One piece's king-tropism contribution: `numerator / (chebyshev_dist + addend)`.
+#[inline(always)]
+fn tropism_contribution(numerator: i32, d: i64, addend: i32) -> i32 {
+    let denom = saturating_dist_i32(d).saturating_add(addend).max(1);
+    numerator / denom
 }
 
 fn compute_attack_readiness_optimized(
