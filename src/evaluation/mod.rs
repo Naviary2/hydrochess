@@ -5,14 +5,15 @@
 // 2. Variant files in `variants/` ONLY exist if they have special logic
 
 pub mod base;
+pub mod eval_kind;
 pub mod helpers;
 pub mod insufficient_material;
 pub mod mop_up;
 pub mod variants;
 
-use crate::Variant;
 use crate::board::PlayerColor;
 use crate::game::GameState;
+use eval_kind::EvalKind;
 
 pub use base::{calculate_initial_material, get_piece_phase, get_piece_value_base};
 
@@ -151,12 +152,11 @@ pub fn evaluate(game: &GameState, nnue_state: Option<&crate::nnue::NnueState>) -
     if insufficient_material::evaluate_insufficient_material(game) {
         return 0;
     }
-    let raw_eval = match game.variant {
-        Some(Variant::Chess) => variants::chess::evaluate(game),
-        Some(Variant::Obstocean) => variants::obstocean::evaluate(game),
-        Some(Variant::PawnHorde) => variants::pawn_horde::evaluate(game),
-        // Add new variants here as they get custom evaluators
-        _ => {
+    let raw_eval = match game.eval_kind {
+        EvalKind::Chess => variants::chess::evaluate(game),
+        EvalKind::Obstocean => variants::obstocean::evaluate(game),
+        EvalKind::PawnHorde => variants::pawn_horde::evaluate(game),
+        EvalKind::Generic => {
             // Try NNUE first if applicable (standard pieces, kings present, weights loaded)
             if crate::nnue::is_applicable(game) {
                 if let Some(state) = nnue_state {
@@ -167,7 +167,7 @@ pub fn evaluate(game: &GameState, nnue_state: Option<&crate::nnue::NnueState>) -
             } else {
                 base::evaluate(game)
             }
-        } // Default: use base for all others
+        }
     };
     let mop_up = compute_mop_up_term(game);
 
@@ -185,12 +185,11 @@ pub fn evaluate(game: &GameState) -> i32 {
     if insufficient_material::evaluate_insufficient_material(game) {
         return 0;
     }
-    let raw_eval = match game.variant {
-        Some(Variant::Chess) => variants::chess::evaluate(game),
-        Some(Variant::Obstocean) => variants::obstocean::evaluate(game),
-        Some(Variant::PawnHorde) => variants::pawn_horde::evaluate(game),
-        // Add new variants here as they get custom evaluators
-        _ => base::evaluate(game), // Default: use base for all others
+    let raw_eval = match game.eval_kind {
+        EvalKind::Chess => variants::chess::evaluate(game),
+        EvalKind::Obstocean => variants::obstocean::evaluate(game),
+        EvalKind::PawnHorde => variants::pawn_horde::evaluate(game),
+        EvalKind::Generic => base::evaluate(game),
     };
     let mop_up = compute_mop_up_term(game);
 

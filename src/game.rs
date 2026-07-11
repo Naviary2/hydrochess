@@ -190,6 +190,11 @@ pub struct GameState {
     /// variant-specific evaluation and tuning. Not serialized.
     #[serde(skip)]
     pub variant: Option<crate::Variant>,
+    /// Evaluator selected from the position's characteristics (board bounds,
+    /// piece composition, obstacle density) rather than the variant tag.
+    /// Computed once in `finalize_setup` and read on the eval hot path.
+    #[serde(skip)]
+    pub eval_kind: crate::evaluation::eval_kind::EvalKind,
     #[serde(skip)]
     pub hash: u64, // Incrementally maintained Zobrist hash
     #[serde(skip)]
@@ -457,6 +462,7 @@ impl GameState {
             material_score: 0,
             game_rules: GameRules::default(),
             variant: None,
+            eval_kind: crate::evaluation::eval_kind::EvalKind::default(),
             hash: 0,
             rep_hash: 0,
             hash_stack: Vec::with_capacity(128),
@@ -521,6 +527,7 @@ impl GameState {
             material_score: 0,
             game_rules,
             variant: None,
+            eval_kind: crate::evaluation::eval_kind::EvalKind::default(),
             hash: 0,
             rep_hash: 0,
             hash_stack: Vec::with_capacity(128),
@@ -3979,6 +3986,7 @@ impl GameState {
         if tokens.len() == 1 && !tokens[0].contains('>') {
             self.parse_icn_pieces(tokens[0]);
             self.finalize_setup();
+            self.eval_kind = crate::evaluation::eval_kind::detect(self);
             return;
         }
 
@@ -4169,6 +4177,9 @@ impl GameState {
                 }
             }
         }
+
+        // Classify the evaluator from the final board
+        self.eval_kind = crate::evaluation::eval_kind::detect(self);
     }
 
     fn parse_icn_pieces(&mut self, piece_segment: &str) {
