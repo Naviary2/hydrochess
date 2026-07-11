@@ -116,7 +116,7 @@ pub const MATE_VALUE: i32 = 900_000;
 pub const MATE_SCORE: i32 = 800_000;
 pub const THINK_TIME_MS: u128 = 3000; // 3 seconds per move (default, may be overridden by caller)
 
-pub const MAX_SITE_SKILL: u32 = 3; // Current max skill level on the site
+pub const MAX_SITE_SKILL: u32 = 8; // Current max skill level on the site
 pub const MAX_PV_COUNT: usize = 4; // MultiPV lines to use when limiting strength
 
 #[inline(always)]
