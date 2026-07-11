@@ -1369,8 +1369,11 @@ impl GameState {
         self.repetition != 0 && self.repetition < (ply as i32)
     }
 
-    /// Check if we have an upcoming move that draws by repetition.
-    #[inline]
+    /// Check if we have an upcoming move that draws by repetition: some
+    /// reversible move by the side to move recreates a position from the
+    /// last `end` plies. Candidate transition moves are the reverses of our
+    /// own recent moves (an unbounded board has no precomputed cuckoo table),
+    /// verified against the exact hash difference to the earlier position.
     pub fn upcoming_repetition(&self, ply: usize) -> bool {
         use crate::search::zobrist::{SIDE_KEY, piece_key};
 
@@ -1379,79 +1382,99 @@ impl GameState {
             return false;
         }
 
-        // Use minimum of halfmove_clock and plies_from_null
-        let end = (self.halfmove_clock as usize).min(self.plies_from_null as usize);
+        let stack_len = self.hash_stack.len();
+        let history_len = self.move_history.len();
+        let end = (self.halfmove_clock as usize)
+            .min(self.plies_from_null as usize)
+            .min(stack_len)
+            .min(history_len);
         if end < 3 {
             return false;
         }
 
-        // Check if positions differ by exactly two moves that allow reversal.
-        // We look for recent moves that can be reversed to create a repetition.
-        let current_hash = self.hash;
-        let stack_len = self.hash_stack.len();
-        let history_len = self.move_history.len();
-
-        if history_len < 2 || stack_len < 3 {
-            return false;
+        // Our moves sit at history indices len-2, len-4, ... (the entry one
+        // ply back is the opponent's). Everything in the window is reversible:
+        // pawn moves and captures reset the halfmove clock. Keys are pure
+        // zobrist math; board playability is only verified on a key match.
+        let mut candidates: ArrayVec<(u64, usize), 32> = ArrayVec::new();
+        let mut d = 2;
+        while d <= end && !candidates.is_full() {
+            let idx = history_len - d;
+            let e = &self.move_history[idx];
+            let key = piece_key(e.piece_type, self.turn, e.from_x, e.from_y)
+                ^ piece_key(e.piece_type, self.turn, e.to_x, e.to_y);
+            candidates.push((key, idx));
+            d += 2;
         }
 
-        // For each odd distance (opposite side to move), check if we can make a move
-        // that transforms current position to match an earlier position.
-        for i in (3..=end.min(stack_len)).step_by(2) {
-            let hist_idx = if history_len >= i {
-                history_len - i
-            } else {
-                continue;
-            };
-            let hash_idx = if stack_len >= i {
-                stack_len - i
-            } else {
-                continue;
-            };
-            let target_hash = self.hash_stack[hash_idx];
+        let current_hash = self.hash;
 
-            // Compute what single move would transform current position to target position
+        // Positions an odd number of plies back have the opposite side to
+        // move; one move by us can transform the current position into one
+        // of them.
+        for i in (3..=end).step_by(2) {
+            let hash_idx = stack_len - i;
+            let target_hash = self.hash_stack[hash_idx];
             let move_key = current_hash ^ target_hash ^ SIDE_KEY;
 
-            // Check if any of our pieces can make a move that produces this hash difference.
-            // The most common case: the piece that moved i plies ago can move back.
-            // Check our move from (i-1)/2 moves ago (rounded).
-            if hist_idx < history_len {
-                let entry = &self.move_history[hist_idx];
-                let pt = entry.piece_type;
+            for &(key, idx) in &candidates {
+                if key != move_key || !self.reverse_move_playable(&self.move_history[idx]) {
+                    continue;
+                }
 
-                // Check if the piece is still at entry.to and can move back to entry.from
-                if let Some(piece) = self.board.get_piece(entry.to_x, entry.to_y)
-                    && piece.piece_type() == pt
-                    && piece.color() == self.turn
-                {
-                    // Check if entry.from is empty (piece can move back)
-                    if self.board.get_piece(entry.from_x, entry.from_y).is_none() {
-                        // Compute hash difference for this reverse move
-                        let from_key = piece_key(pt, self.turn, entry.to_x, entry.to_y);
-                        let to_key = piece_key(pt, self.turn, entry.from_x, entry.from_y);
-                        let expected_key = from_key ^ to_key;
+                // Repetition falls within the search tree.
+                if ply > i {
+                    return true;
+                }
 
-                        if expected_key == move_key {
-                            // This move would create the repetition!
-                            // Check if repetition is within search tree
-                            if ply > i {
-                                return true;
-                            }
-
-                            // For root nodes, check if target position was already repeated
-                            for j in (0..hash_idx).rev().step_by(2).take(4) {
-                                if self.hash_stack[j] == target_hash {
-                                    return true;
-                                }
-                            }
-                        }
+                // At or below the root: only claim a draw if the target
+                // position itself already occurred (same side to move, so
+                // matches lie an even number of plies before it).
+                let mut j = hash_idx;
+                for _ in 0..4 {
+                    if j < 2 {
+                        break;
+                    }
+                    j -= 2;
+                    if self.hash_stack[j] == target_hash {
+                        return true;
                     }
                 }
             }
         }
 
         false
+    }
+
+    /// True if the reverse of a recorded move (to -> from) can be played on
+    /// the current board: our matching piece still on `to`, `from` empty, and
+    /// a clear path for line moves. Bent-path riders are skipped since their
+    /// paths can't be verified cheaply (conservative false negative).
+    fn reverse_move_playable(&self, e: &MoveHistoryEntry) -> bool {
+        match self.board.get_piece(e.to_x, e.to_y) {
+            Some(p) if p.piece_type() == e.piece_type && p.color() == self.turn => {}
+            _ => return false,
+        }
+        if self.board.get_piece(e.from_x, e.from_y).is_some() {
+            return false;
+        }
+        if matches!(
+            e.piece_type,
+            PieceType::Knightrider | PieceType::Rose | PieceType::Huygen
+        ) {
+            return false;
+        }
+
+        let dx = e.from_x - e.to_x;
+        let dy = e.from_y - e.to_y;
+        if (dx == 0 || dy == 0 || dx.abs() == dy.abs()) && dx.abs().max(dy.abs()) > 1 {
+            return crate::evaluation::base::is_clear_line_between_fast(
+                &self.spatial_indices,
+                &Coordinate::new(e.to_x, e.to_y),
+                &Coordinate::new(e.from_x, e.from_y),
+            );
+        }
+        true
     }
 
     /// Check if this is a lone king endgame (one side only has a king)
@@ -4609,6 +4632,69 @@ mod tests {
         // Threefold is always a draw (negative is always < positive ply)
         assert!(game.is_repetition(1), "Threefold should always draw");
         assert!(game.is_repetition(10), "Threefold should always draw");
+    }
+
+    #[test]
+    fn test_upcoming_repetition_shuffle_return() {
+        let mut game = create_test_game_from_icn("w (8;q|1;q) K5,1|R1,1|k5,8|r8,8");
+        game.special_rights.clear();
+
+        game.make_move_coords(1, 1, 1, 2, None); // Ra2
+        game.make_move_coords(8, 8, 8, 7, None); // ...rh7
+        assert!(!game.upcoming_repetition(10), "window too short");
+        game.make_move_coords(1, 2, 1, 1, None); // Ra1
+
+        // Black to move: rh7-h8 recreates the starting position.
+        assert!(game.upcoming_repetition(10));
+        // At/below root the target position must itself have repeated.
+        assert!(!game.upcoming_repetition(1));
+    }
+
+    #[test]
+    fn test_upcoming_repetition_at_root_needs_prior_occurrence() {
+        let mut game = create_test_game_from_icn("w (8;q|1;q) K5,1|R1,1|k5,8|r8,8");
+        game.special_rights.clear();
+
+        game.make_move_coords(1, 1, 1, 2, None);
+        game.make_move_coords(8, 8, 8, 7, None);
+        game.make_move_coords(1, 2, 1, 1, None);
+        game.make_move_coords(8, 7, 8, 8, None); // start position revisited
+        game.make_move_coords(1, 1, 1, 2, None);
+        game.make_move_coords(8, 8, 8, 7, None);
+        game.make_move_coords(1, 2, 1, 1, None);
+
+        // Black to move at the root: rh7-h8 reaches the start position,
+        // which already occurred earlier on the same side to move.
+        assert!(game.upcoming_repetition(1));
+    }
+
+    #[test]
+    fn test_upcoming_repetition_blocked_return_path() {
+        // Knight vacates (1,3), the rook slides through that square, the
+        // knight returns: the position differs from 3 plies ago only by the
+        // rook, but the rook's return path is now blocked.
+        let mut game = create_test_game_from_icn("b (8;q|1;q) K20,1|R1,4|k20,8|n1,3");
+        game.special_rights.clear();
+
+        game.make_move_coords(1, 3, 3, 4, None); // n leaves the file
+        game.make_move_coords(1, 4, 1, 1, None); // R slides through (1,3)
+        game.make_move_coords(3, 4, 1, 3, None); // n returns
+
+        assert!(!game.upcoming_repetition(10));
+    }
+
+    #[test]
+    fn test_upcoming_repetition_clear_return_path() {
+        // Same shape but the knight shuffle never touches the rook's file:
+        // the rook can move back and repeat.
+        let mut game = create_test_game_from_icn("b (8;q|1;q) K20,1|R1,4|k20,8|n5,3");
+        game.special_rights.clear();
+
+        game.make_move_coords(5, 3, 7, 4, None);
+        game.make_move_coords(1, 4, 1, 1, None);
+        game.make_move_coords(7, 4, 5, 3, None);
+
+        assert!(game.upcoming_repetition(10));
     }
 
     #[test]
