@@ -2416,6 +2416,7 @@ pub fn get_best_move(
     )
 }
 
+
 #[cfg(feature = "multithreading")]
 pub fn get_best_move_parallel(
     game: &mut GameState,
@@ -2431,10 +2432,14 @@ pub fn get_best_move_parallel(
     // Clear global stop flag
     GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    // Pool size (initThreadPool on wasm, RAYON_NUM_THREADS native) decides the thread count.
-    // Like Stockfish, gameplay MT gains come from best-thread VOTING at fixed time — not
-    // faster time-to-depth — so all pool threads participate.
+    // Lazy SMP runs only where a thread pool was explicitly provisioned
+    // (initThreadPool on wasm decides the count). Native builds always search
+    // single-threaded; parallelism there belongs to the caller (e.g. one
+    // engine per game), which must not share the global stop/TT coordination.
+    #[cfg(target_arch = "wasm32")]
     let num_threads = rayon::current_num_threads().max(1);
+    #[cfg(not(target_arch = "wasm32"))]
+    let num_threads = 1;
 
     USE_SHARED_TT.store(num_threads > 1, std::sync::atomic::Ordering::Relaxed);
 

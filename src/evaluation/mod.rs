@@ -16,6 +16,12 @@ use crate::game::GameState;
 
 pub use base::{calculate_initial_material, get_piece_phase, get_piece_value_base};
 
+/// Largest slice of the evaluation the halfmove-clock damping may take away.
+/// This is the conversion urgency: large enough that the winning side always
+/// strives forward against the move-rule clock, small enough per tick that
+/// stale TT scores can never outweigh real progress gradients.
+const RULE50_DAMP_CAP: i32 = 700;
+
 #[cfg(any(feature = "param_tuning", feature = "eval_tuning"))]
 pub use crate::search::params::{
     EVAL_PARAMS, EvalParamSpec, EvalParams, TUNABLE_EVAL_PARAM_SPECS, get_eval_params_as_json,
@@ -25,44 +31,117 @@ pub use crate::search::params::{
 pub use base::{EVAL_FEATURES, EvalFeatures, reset_eval_features, snapshot_eval_features};
 
 /// Returns the mop-up bonus from the side-to-move's perspective (positive = good for side to move).
+/// Activation, scaling, and magnitude saturation all live in the mop_up
+/// module (`active_mop_up` / `evaluate_mop_up_scaled`), shared with the
+/// search's mop-up check extension.
 #[inline]
 fn compute_mop_up_term(game: &GameState) -> i32 {
-    let white_pieces = game.white_piece_count.saturating_sub(game.white_pawn_count);
-    let black_pieces = game.black_piece_count.saturating_sub(game.black_pawn_count);
-    let white_has_promo = game.white_pawn_count > 0;
-    let black_has_promo = game.black_pawn_count > 0;
-    
-    let raw = if black_pieces < 3
-        && white_pieces > 1
-        && !white_has_promo
-        && let Some(bk) = game.black_royals.first()
-        && crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::Black).is_some()
-    {
-        crate::evaluation::mop_up::evaluate_mop_up_scaled(
-            game,
-            game.white_royals.first(),
-            bk,
-            PlayerColor::White,
-            PlayerColor::Black,
-        )
-    } else if white_pieces < 3
-        && black_pieces > 1
-        && !black_has_promo
-        && let Some(wk) = game.white_royals.first()
-        && crate::evaluation::mop_up::calculate_mop_up_scale(game, PlayerColor::White).is_some()
-    {
-        -crate::evaluation::mop_up::evaluate_mop_up_scaled(
-            game,
-            game.black_royals.first(),
-            wk,
-            PlayerColor::Black,
-            PlayerColor::White,
-        )
-    } else {
+    let Some((winner, scale)) = crate::evaluation::mop_up::active_mop_up(game) else {
         return 0;
     };
-
+    let term = crate::evaluation::mop_up::evaluate_mop_up_scaled(game, winner, scale);
+    let raw = if winner == PlayerColor::White { term } else { -term };
     if game.turn == PlayerColor::Black { -raw } else { raw }
+}
+
+/// Bounded-board rook/minor endings that are drawn with correct defense are
+/// scaled hard toward the draw.
+fn apply_bounded_drawish_scale(game: &GameState, eval: i32) -> i32 {
+    bounded_drawish_scale_inner(game, eval, crate::moves::get_world_size())
+}
+
+fn bounded_drawish_scale_inner(game: &GameState, eval: i32, world_size: i64) -> i32 {
+    if eval == 0 || world_size > 200 {
+        return eval;
+    }
+    if game.white_royals.len() != 1 || game.black_royals.len() != 1 {
+        return eval;
+    }
+    // Small endings only (up to two non-king pieces per side).
+    if game.white_piece_count + game.black_piece_count > 6 {
+        return eval;
+    }
+
+    use crate::board::PieceType;
+    // Non-pawn material value and pawn presence per side; only rook/minor/pawn
+    // endings qualify — a queen (or other heavy) is a genuine win, handled by
+    // the normal eval.
+    let (mut w_npm, mut b_npm) = (0i32, 0i32);
+    let (mut w_pawns, mut b_pawns) = (false, false);
+    for (_, _, piece) in game.board.iter() {
+        let pt = piece.piece_type();
+        if pt.is_royal() {
+            continue;
+        }
+        let white = piece.color() == PlayerColor::White;
+        match pt {
+            PieceType::Rook | PieceType::Knight | PieceType::Bishop => {
+                let v = get_piece_value_base(pt);
+                if white {
+                    w_npm += v;
+                } else {
+                    b_npm += v;
+                }
+            }
+            PieceType::Pawn => {
+                if white {
+                    w_pawns = true;
+                } else {
+                    b_pawns = true;
+                }
+            }
+            _ => return eval,
+        }
+    }
+
+    // Identify the stronger side by non-pawn material; an equal split (e.g.
+    // R+P vs R) is left to the normal eval, which knows KRPKR can be won.
+    let (strong_npm, weak_npm, strong_has_pawns, strong_is_white) = if w_npm > b_npm {
+        (w_npm, b_npm, w_pawns, true)
+    } else if b_npm > w_npm {
+        (b_npm, w_npm, b_pawns, false)
+    } else {
+        return eval;
+    };
+
+    // A pawn for the stronger side is a real winning try (it can promote).
+    if strong_has_pawns {
+        return eval;
+    }
+    // Only scale the stronger side's own advantage claim (eval is from the
+    // side-to-move's perspective).
+    let strong_to_move = (game.turn == PlayerColor::White) == strong_is_white;
+    if (eval > 0) != strong_to_move {
+        return eval;
+    }
+    // Bare piece edge (≤ a minor) with no pawns cannot force mate: fortress.
+    if strong_npm - weak_npm <= get_piece_value_base(PieceType::Bishop) {
+        eval / 8
+    } else {
+        eval
+    }
+}
+
+/// Applies the halfmove-clock damping: gentle "get on with it" pressure as the
+/// clock rises. During mop-up conversion only a capped slice of the eval is
+/// damped: TT entries don't know the clock, so full damping of the huge mop-up
+/// evals makes stale shuffle scores beat fresh progress and the engine loops
+/// instead of converting; everywhere else the full eval damps as before.
+#[inline]
+fn apply_rule50_damping(game: &GameState, raw_eval: i32, mop_up_active: bool) -> i32 {
+    match game.game_rules.move_rule_limit {
+        Some(limit) if limit > 0 => {
+            let divisor = 2 * limit as i32 - 1;
+            let clock = (game.halfmove_clock as i32).min(divisor);
+            let dampable = if mop_up_active {
+                raw_eval.clamp(-RULE50_DAMP_CAP, RULE50_DAMP_CAP)
+            } else {
+                raw_eval
+            };
+            raw_eval - (dampable * clock) / divisor
+        }
+        _ => raw_eval,
+    }
 }
 
 /// Main evaluation entry point - NNUE Enabled
@@ -89,18 +168,14 @@ pub fn evaluate(game: &GameState, nnue_state: Option<&crate::nnue::NnueState>) -
                 base::evaluate(game)
             }
         } // Default: use base for all others
-    } + compute_mop_up_term(game);
+    };
+    let mop_up = compute_mop_up_term(game);
 
-    // As the halfmove clock increases during shuffling, we slightly damp the
-    // evaluation. This provides a gentle pressure to "get on with it" and
-    // avoid unnecessary repetitions or shuffling.
-    let rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
-    if rule_limit > 0 {
-        let divisor = 2 * rule_limit - 1;
-        raw_eval - (raw_eval * game.halfmove_clock as i32) / divisor
-    } else {
-        raw_eval
-    }
+    apply_rule50_damping(
+        game,
+        apply_bounded_drawish_scale(game, raw_eval + mop_up),
+        mop_up != 0,
+    )
 }
 
 /// Main evaluation entry point - NNUE Disabled
@@ -116,18 +191,14 @@ pub fn evaluate(game: &GameState) -> i32 {
         Some(Variant::PawnHorde) => variants::pawn_horde::evaluate(game),
         // Add new variants here as they get custom evaluators
         _ => base::evaluate(game), // Default: use base for all others
-    } + compute_mop_up_term(game);
+    };
+    let mop_up = compute_mop_up_term(game);
 
-    // As the halfmove clock increases during shuffling, we slightly damp the
-    // evaluation. This provides a gentle pressure to "get on with it" and
-    // avoid unnecessary repetitions or shuffling.
-    let rule_limit = game.game_rules.move_rule_limit.unwrap_or(100) as i32;
-    if rule_limit > 0 {
-        let divisor = 2 * rule_limit - 1;
-        raw_eval - (raw_eval * game.halfmove_clock as i32) / divisor
-    } else {
-        raw_eval
-    }
+    apply_rule50_damping(
+        game,
+        apply_bounded_drawish_scale(game, raw_eval + mop_up),
+        mop_up != 0,
+    )
 }
 
 #[cfg(test)]
@@ -152,6 +223,48 @@ mod tests {
         return evaluate(game, None);
         #[cfg(not(feature = "nnue"))]
         return evaluate(game);
+    }
+
+    #[test]
+    fn test_bounded_drawish_endings_scaled() {
+        // R+minor vs R and R vs lone minor are draws with correct defense on
+        // a bounded board: the stronger, pawnless side (white, to move here)
+        // must not keep its full material claim. The inner function takes the
+        // world size directly so the test never mutates the global bounds.
+        for icn in [
+            "w (8;q|1;q) K2,2|R4,4|N5,5|k7,7|r7,1", // R+N vs R
+            "w (8;q|1;q) K2,2|R4,4|B5,4|k7,7|r7,1", // R+B vs R
+            "w (8;q|1;q) K2,2|R4,4|k7,7|n6,1",      // R vs N
+            "w (8;q|1;q) K2,2|R4,4|k7,7|b6,1",      // R vs B
+        ] {
+            let game = create_test_game_from_icn(icn);
+            assert_eq!(
+                bounded_drawish_scale_inner(&game, 400, 8),
+                50,
+                "strong side's winning claim must scale toward the draw: {}",
+                icn
+            );
+        }
+
+        // A defender pawn's counterplay is never masked: an eval favoring the
+        // weaker (pawned) side keeps full volume.
+        let game =
+            create_test_game_from_icn("w (8;q|1;q) K2,2|R4,4|N5,5|k7,7|r7,1|p6,2");
+        assert_eq!(
+            bounded_drawish_scale_inner(&game, -547, 8),
+            -547,
+            "danger from the defender's promoting pawn must not be scaled"
+        );
+        // But the strong side's own claim still scales in the same ending.
+        assert_eq!(bounded_drawish_scale_inner(&game, 400, 8), 50);
+
+        // Unbounded world: never scaled.
+        let unb = create_test_game_from_icn("w (8;q|1;q) K2,2|R4,4|N5,5|k7,7|r7,1");
+        assert_eq!(
+            bounded_drawish_scale_inner(&unb, 400, 1_000_000),
+            400,
+            "unbounded boards are handled by insufficient-material, not scaling"
+        );
     }
 
     #[test]
@@ -202,12 +315,6 @@ mod tests {
         game.halfmove_clock = 100;
         let eval_100 = evaluate_wrapper(&game);
 
-        // With 100-move rule limit (200 halfmoves), at 100 halfmoves
-        // the damping should be roughly halving the evaluation.
-        // Formula: v -= v * clock / (2 * limit - 1)
-        // v = 1000, clock = 50, limit = 100 -> 1000 - (1000 * 50 / 199) = 1000 - 251 = 749
-        // v = 1000, clock = 100, limit = 100 -> 1000 - (1000 * 100 / 199) = 1000 - 502 = 498
-
         assert!(eval_50 < eval_0, "Eval should decrease at clock=50");
         assert!(
             eval_100 < eval_50,
@@ -215,9 +322,11 @@ mod tests {
         );
         assert!(eval_100 > 0, "Eval should not drop to 0 at the limit");
 
-        // Approximate values check
+        // Only a capped slice of the eval is damped:
+        // delta(clock) = min(|eval_0|, cap) * clock / (2 * limit - 1)
+        let dampable = eval_0.clamp(-RULE50_DAMP_CAP, RULE50_DAMP_CAP);
         let delta_50 = eval_0 - eval_50;
-        let expected_delta_50 = (eval_0 * 50) / 199;
+        let expected_delta_50 = (dampable * 50) / 199;
         assert!(
             (delta_50 - expected_delta_50).abs() < 2,
             "Delta 50: expected {}, got {}",
@@ -226,7 +335,7 @@ mod tests {
         );
 
         let delta_100 = eval_0 - eval_100;
-        let expected_delta_100 = (eval_0 * 100) / 199;
+        let expected_delta_100 = (dampable * 100) / 199;
         assert!(
             (delta_100 - expected_delta_100).abs() < 2,
             "Delta 100: expected {}, got {}",
