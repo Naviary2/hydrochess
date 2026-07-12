@@ -56,6 +56,19 @@ pub struct NegamaxContext<'a> {
     pub excluded_move: Option<Move>,
 }
 
+/// Snapshot of the per-ply node-context fields, returned by
+/// `Searcher::push_move_context`/`push_null_context` and restored by
+/// `pop_move_context`. `Copy` so the main loop can hold one backup across the
+/// singular-extension undo/re-make dance without moving it.
+#[derive(Clone, Copy)]
+struct MoveContextBackup {
+    prev_move: (usize, usize),
+    move_hist: Option<Move>,
+    piece: u8,
+    in_check: bool,
+    capture: bool,
+}
+
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 fn now_ms() -> f64 {
     Date::now()
@@ -1397,6 +1410,66 @@ impl Searcher {
 
         // Reset TT move history
         self.tt_move_history = 0;
+    }
+
+    /// Install the per-ply node context that child searches and the
+    /// continuation-history offsets read at `ply`: the move played, the piece
+    /// that moved, whether this node was in check, and whether the move was a
+    /// capture. Returns a backup to restore with [`Self::pop_move_context`]
+    /// once the child returns. Centralizes what several recursion sites used to
+    /// install inconsistently (main loop, ProbCut, null move, qsearch).
+    #[inline]
+    fn push_move_context(
+        &mut self,
+        ply: usize,
+        m: &Move,
+        in_check: bool,
+        is_capture: bool,
+    ) -> MoveContextBackup {
+        let backup = MoveContextBackup {
+            prev_move: self.prev_move_stack[ply],
+            move_hist: self.move_history[ply],
+            piece: self.moved_piece_history[ply],
+            in_check: self.in_check_history[ply],
+            capture: self.capture_history_stack[ply],
+        };
+        self.prev_move_stack[ply] = (hash_move_from(m), hash_move_dest(m));
+        self.move_history[ply] = Some(*m);
+        self.moved_piece_history[ply] = m.piece.piece_type() as u8;
+        self.in_check_history[ply] = in_check;
+        self.capture_history_stack[ply] = is_capture;
+        backup
+    }
+
+    /// Install a null-move context. `move_history[ply] = None` disables the
+    /// continuation-history lookups keyed on this ply (a null move has no
+    /// piece/from/to), and the other fields are reset to neutral values.
+    #[inline]
+    fn push_null_context(&mut self, ply: usize) -> MoveContextBackup {
+        let backup = MoveContextBackup {
+            prev_move: self.prev_move_stack[ply],
+            move_hist: self.move_history[ply],
+            piece: self.moved_piece_history[ply],
+            in_check: self.in_check_history[ply],
+            capture: self.capture_history_stack[ply],
+        };
+        self.prev_move_stack[ply] = (0, 0);
+        self.move_history[ply] = None;
+        self.moved_piece_history[ply] = 0;
+        self.in_check_history[ply] = false;
+        self.capture_history_stack[ply] = false;
+        backup
+    }
+
+    /// Restore the per-ply node context saved by [`Self::push_move_context`] /
+    /// [`Self::push_null_context`].
+    #[inline]
+    fn pop_move_context(&mut self, ply: usize, backup: MoveContextBackup) {
+        self.prev_move_stack[ply] = backup.prev_move;
+        self.move_history[ply] = backup.move_hist;
+        self.moved_piece_history[ply] = backup.piece;
+        self.in_check_history[ply] = backup.in_check;
+        self.capture_history_stack[ply] = backup.capture;
     }
 
     /// Gravity-style history update: scales updates based on current value and clamps to [-MAX_HISTORY, MAX_HISTORY].
@@ -4103,8 +4176,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             if nmp_margin >= beta && game.has_non_pawn_material(game.turn) {
                 let saved_ep = game.en_passant;
                 let saved_plies_from_null = game.plies_from_null;
-                let move_history_backup = searcher.move_history[ply].take();
-                let piece_history_backup = searcher.moved_piece_history[ply];
+                // Install a null context so the child sees "no previous move"
+                // (disabling continuation-history lookups keyed on this ply)
+                // instead of a stale real move from an earlier sibling.
+                let ctx_backup = searcher.push_null_context(ply);
+                searcher.reduction_stack[ply] = 0;
 
                 game.make_null_move();
 
@@ -4131,8 +4207,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 game.en_passant = saved_ep;
                 game.plies_from_null = saved_plies_from_null;
 
-                searcher.move_history[ply] = move_history_backup;
-                searcher.moved_piece_history[ply] = piece_history_backup;
+                searcher.pop_move_context(ply, ctx_backup);
 
                 if searcher.hot.stopped {
                     return 0;
@@ -4214,10 +4289,25 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             #[cfg(feature = "nnue")]
             searcher.nnue_push_move(game, ply, m);
 
+            // Install this node's context for the child search, matching the
+            // main loop. Previously ProbCut searched its child with whatever
+            // context an earlier sibling left, corrupting continuation/
+            // correction history in the ProbCut subtree.
+            let pc_is_capture = game.is_en_passant(&m)
+                || game
+                    .board
+                    .get_piece(m.to.x, m.to.y)
+                    .is_some_and(|p| !p.piece_type().is_neutral_type());
+            let pc_ctx = searcher.push_move_context(ply, &m, in_check, pc_is_capture);
+            searcher.reduction_stack[ply] = 0;
+            searcher.stat_score_stack[ply] =
+                searcher.history[m.piece.piece_type() as usize][hash_move_dest(&m)];
+
             let undo = game.make_move(&m);
 
             if fast_legal.is_err() && game.is_move_illegal() {
                 game.undo_move(&m, undo);
+                searcher.pop_move_context(ply, pc_ctx);
                 continue;
             }
 
@@ -4249,6 +4339,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             }
 
             game.undo_move(&m, undo);
+            searcher.pop_move_context(ply, pc_ctx);
 
             if searcher.hot.stopped {
                 return 0;
@@ -4449,6 +4540,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         #[cfg(feature = "nnue")]
         searcher.nnue_push_move(game, ply, m);
 
+        // Pawn history is keyed on the position where the move is chosen (the
+        // parent). Capture it before make_move so the LMR/HLP reductions read
+        // the same slot the cutoff updates write, instead of the child's hash.
+        let parent_pawn_hash = game.pawn_hash;
+
         let mut undo = game.make_move(&m);
 
         // Check if move is illegal (leaves our king in check)
@@ -4602,6 +4698,13 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             }
         }
 
+        // Record the stat score of the move we are about to search so the child
+        // reads it (as stat_score_stack[ply]) for evaluation smoothing. Set for
+        // every move, not just on a beta cutoff, so it reflects the actual
+        // parent move rather than a stale value from a prior sibling subtree.
+        searcher.stat_score_stack[ply] =
+            searcher.history[p_type as usize][hash_move_dest(&m)];
+
         let score;
         if legal_moves == 1 {
             // Child type depends on current node type:
@@ -4614,7 +4717,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 NodeType::Cut
             };
 
-            // Full window search for first legal move
+            // Full window search for first legal move. Clear the reduction
+            // slot the child reads: unlike the LMR branch (which sets it), the
+            // first move is unreduced, and a depth-0 child that drops straight
+            // to qsearch never consumes/clears it, so it could otherwise be
+            // left stale from an earlier node at this ply.
+            searcher.reduction_stack[ply] = 0;
             let new_depth = ((depth as i32) - 1 + extension).max(0) as usize;
             score = -negamax(&mut NegamaxContext {
                 searcher,
@@ -4646,7 +4754,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
                 // History-adjusted LMR
                 let hist_idx = hash_move_dest(&m);
-                let ph_idx = (game.pawn_hash & PAWN_HISTORY_MASK) as usize;
+                let ph_idx = (parent_pawn_hash & PAWN_HISTORY_MASK) as usize;
                 let hist_score = searcher.history[p_type as usize][hist_idx];
                 let pawn_score = searcher.pawn_hist(ph_idx, p_type as usize, hist_idx);
                 reduction -= (hist_score + pawn_score) / 4096;
@@ -4692,7 +4800,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 && !is_loss(best_score)
             {
                 let idx = hash_move_dest(&m);
-                let ph_idx = (game.pawn_hash & PAWN_HISTORY_MASK) as usize;
+                let ph_idx = (parent_pawn_hash & PAWN_HISTORY_MASK) as usize;
                 let value = searcher.history[p_type as usize][idx]
                     + searcher.pawn_hist(ph_idx, p_type as usize, idx);
 
@@ -4704,10 +4812,14 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     // and history is really bad, prune this move entirely.
                     if new_depth <= 0 && value < hlp_history_leaf() {
                         game.undo_move(&m, undo);
-                        // Restore searcher state before continuing
+                        // Restore the full node context (all five fields) before
+                        // continuing — the earlier version left in_check_history
+                        // and capture_history_stack stale.
                         searcher.prev_move_stack[ply] = prev_entry_backup;
                         searcher.move_history[ply] = move_history_backup;
                         searcher.moved_piece_history[ply] = piece_history_backup;
+                        searcher.in_check_history[ply] = in_check_backup;
+                        searcher.capture_history_stack[ply] = capture_backup;
                         continue;
                     }
                 }
@@ -4879,10 +4991,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 searcher.cutoff_cnt[ply] = searcher.cutoff_cnt[ply].saturating_add(1);
             }
 
-            // Record StatScore for this node to influence child evaluation
-            let hist_idx = hash_move_dest(&m);
-            searcher.stat_score_stack[ply] =
-                searcher.history[m.piece.piece_type() as usize][hist_idx];
+            // StatScore for this node is now set before each child search above,
+            // so children see the actual parent move rather than only a cutoff.
 
             if !is_capture {
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
@@ -5532,13 +5642,11 @@ fn quiescence(
 
         legal_moves += 1;
 
-        // Maintain the per-node move link so deeper qsearch nodes read the right
-        // previous move: prev_sq (the recapture-exception square) and the
-        // correction-history previous-move index both key off these at ply - 1.
-        let prev_entry_backup = searcher.prev_move_stack[ply];
-        let move_history_backup = searcher.move_history[ply].take();
-        searcher.prev_move_stack[ply] = (hash_move_from(m), hash_move_dest(m));
-        searcher.move_history[ply] = Some(*m);
+        // Install the full node context so deeper qsearch nodes read the right
+        // previous move (prev_sq / correction previous-move index) and the
+        // continuation-history offsets see this node's piece/in-check/capture
+        // flags rather than stale values from an earlier sibling.
+        let qs_ctx = searcher.push_move_context(ply, m, in_check, is_capture);
 
         let score = -quiescence(
             searcher,
@@ -5552,8 +5660,7 @@ fn quiescence(
 
         game.undo_move(m, undo);
 
-        searcher.prev_move_stack[ply] = prev_entry_backup;
-        searcher.move_history[ply] = move_history_backup;
+        searcher.pop_move_context(ply, qs_ctx);
 
         if searcher.hot.stopped {
             std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
