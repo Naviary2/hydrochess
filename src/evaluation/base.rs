@@ -644,7 +644,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
 
                         // Main piece loop
                         for (cx, cy, tile) in game.board.tiles.iter() {
-                            if crate::simd::both_zero(tile.occ_white, tile.occ_black) {
+                            if tile.occ_all == 0 {
                                 continue;
                             }
 
@@ -659,18 +659,16 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 let idx = bits.trailing_zeros() as usize;
                                 bits &= bits - 1;
                                 let packed = tile.piece[idx];
-                                if packed == 0 {
-                                    continue;
-                                }
                                 let piece = crate::board::Piece::from_packed(packed);
                                 let pt = piece.piece_type();
                                 let piece_val = get_piece_value_base(pt);
                                 let is_white = piece.color() == PlayerColor::White;
+                                let is_neutral = pt.is_neutral_type();
                                 let x = cx * 8 + (idx % 8) as i64;
                                 let y = cy * 8 + (idx / 8) as i64;
 
                                 // Attack and defender units for king tropism.
-                                if matches!(
+                                if !is_neutral && matches!(
                                     pt,
                                     PieceType::Amazon
                                         | PieceType::Chancellor
@@ -762,7 +760,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 }
 
                                 // 3. Piece counts for scaling (Non-pawn, non-royal)
-                                if pt != PieceType::Pawn && !pt.is_royal() {
+                                if !is_neutral && pt != PieceType::Pawn && !pt.is_royal() {
                                     if is_white {
                                         white_non_pawn_non_royal += 1;
                                     } else {
@@ -771,7 +769,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 }
 
                                 // 4. Cloud Stats (Non-pawn)
-                                if pt != PieceType::Pawn {
+                                if !is_neutral && pt != PieceType::Pawn {
                                     let cw = get_centrality_weight(pt);
                                     if cw > 0 {
                                         let dx = x - ref_x;
@@ -1037,7 +1035,7 @@ pub fn evaluate_inner_traced<T: EvaluationTracer>(game: &GameState, tracer: &mut
                                 }
 
                                 // 7. Threat points for urgency
-                                if !pt.is_royal() && pt != PieceType::Pawn {
+                                if !is_neutral && !pt.is_royal() && pt != PieceType::Pawn {
                                     const QUEEN_THREAT: i32 = 40;
                                     const ROOK_THREAT: i32 = 15;
                                     const BISHOP_THREAT: i32 = 10;
@@ -3626,6 +3624,55 @@ mod tests {
         let score_far = evaluate_inner(&game);
 
         assert!(score_far != score_near);
+    }
+
+    #[test]
+    fn test_neutral_only_void_tile_contributes_king_shelter() {
+        // Put the Void in the adjacent tile, rather than the king's tile. Its
+        // packed representation is zero, so this exercises both neutral-only
+        // tile traversal and occupied-packed-zero decoding.
+        let mut open = GameState::new();
+        open.setup_position_from_icn("w (8;q|1;q) K7,0|k30,30");
+        let open_trace = debug_evaluate(&open);
+        let open_shelter = open_trace
+            .rows
+            .iter()
+            .find(|(term, _, _)| term == "King: Shelter")
+            .map(|(_, white, _)| *white)
+            .expect("king shelter trace row");
+
+        let mut walled = GameState::new();
+        walled.setup_position_from_icn("w (8;q|1;q) K7,0|k30,30|VO8,0");
+        let walled_trace = debug_evaluate(&walled);
+        let walled_shelter = walled_trace
+            .rows
+            .iter()
+            .find(|(term, _, _)| term == "King: Shelter")
+            .map(|(_, white, _)| *white)
+            .expect("king shelter trace row");
+
+        assert!(
+            walled_shelter > open_shelter,
+            "a neutral Void wall must provide white king shelter: open={open_shelter}, walled={walled_shelter}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_tile_obstacle_has_no_colored_activity() {
+        // The obstacle shares a tile with the white rook so it reaches the
+        // main loop, but it is deliberately outside both kings' local/ray
+        // geometry. It must not add black threat points or non-pawn material.
+        let mut plain = GameState::new();
+        plain.setup_position_from_icn("w (100;q|1;q) R0,0|K20,8|r20,0|k-20,-20");
+
+        let mut with_obstacle = GameState::new();
+        with_obstacle.setup_position_from_icn("w (100;q|1;q) R0,0|OB7,2|K20,8|r20,0|k-20,-20");
+
+        assert_eq!(
+            evaluate_inner(&with_obstacle),
+            evaluate_inner(&plain),
+            "an unrelated neutral obstacle must not be evaluated as black activity"
+        );
     }
 
     #[test]
