@@ -339,14 +339,19 @@ impl StagedMoveGen {
             return false;
         }
 
-        // 3. Target Occupancy Check (Generic)
+        // 3. Target Occupancy Check (Generic). Fetch the target tile once and
+        // read both the packed piece (for identity) and the occupancy bit. A
+        // neutral Void packs to 0 yet occupies, so pawn pushes below must test
+        // occupancy, not packed==0 — but taking occ_all from this same fetch
+        // avoids a second tile lookup.
         let (tx, ty) = tile_coords(m.to.x, m.to.y);
-        let target_packed = if tx == cx && ty == cy {
-            tile.piece[local_index(m.to.x, m.to.y)]
+        let to_idx = local_index(m.to.x, m.to.y);
+        let (target_packed, target_occupied) = if tx == cx && ty == cy {
+            (tile.piece[to_idx], (tile.occ_all >> to_idx) & 1 != 0)
         } else {
             match game.board.tiles.get_tile(tx, ty) {
-                Some(t) => t.piece[local_index(m.to.x, m.to.y)],
-                None => 0,
+                Some(t) => (t.piece[to_idx], (t.occ_all >> to_idx) & 1 != 0),
+                None => (0, false),
             }
         };
 
@@ -369,26 +374,29 @@ impl StagedMoveGen {
                 };
 
                 if dx == 0 {
-                    // Push
+                    // Push. Emptiness is judged by occupancy (Void occupies but
+                    // packs to 0); the target bit was read with the tile above.
                     if dy == dir {
-                        target_packed == 0
+                        !target_occupied
                     } else if dy == 2 * dir {
                         // 2 steps
-                        if target_packed != 0 {
+                        if target_occupied {
                             return false;
                         }
-                        // Check intermediate
+                        // Intermediate square: one direct occ_all read (reuse
+                        // the from-tile when the mid square is in it).
                         let mid_y = m.from.y + dir;
+                        let mid_idx = local_index(m.from.x, mid_y);
                         let (mx, my) = tile_coords(m.from.x, mid_y);
-                        let mid_packed = if mx == cx && my == cy {
-                            tile.piece[local_index(m.from.x, mid_y)]
+                        let mid_occupied = if mx == cx && my == cy {
+                            (tile.occ_all >> mid_idx) & 1 != 0
                         } else {
                             match game.board.tiles.get_tile(mx, my) {
-                                Some(t) => t.piece[local_index(m.from.x, mid_y)],
-                                None => 0,
+                                Some(t) => (t.occ_all >> mid_idx) & 1 != 0,
+                                None => false,
                             }
                         };
-                        mid_packed == 0
+                        !mid_occupied
                     } else {
                         false
                     }
@@ -1124,6 +1132,32 @@ mod tests {
             }
         }
         assert!(found, "castling move was dropped when it was the TT move");
+    }
+
+    #[test]
+    fn pseudo_legal_rejects_pawn_moves_onto_or_through_void() {
+        // A neutral Void packs to byte 0 but occupies its square. A packed-only
+        // emptiness test would let a (stale TT/killer) pawn push land on or pass
+        // through it; occupancy-based checks must reject that.
+        let game = game_from_icn("w 0/100 1 (8;q|1;q) K1,1|P4,4|k8,8|VO4,5");
+        assert!(game.board.is_occupied(4, 5), "void should occupy its square");
+
+        let pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
+        let push = Move::new(Coordinate::new(4, 4), Coordinate::new(4, 5), pawn);
+        let double = Move::new(Coordinate::new(4, 4), Coordinate::new(4, 6), pawn);
+        assert!(
+            !StagedMoveGen::is_pseudo_legal(&game, &push),
+            "pawn must not push onto a void"
+        );
+        assert!(
+            !StagedMoveGen::is_pseudo_legal(&game, &double),
+            "pawn must not push through a void"
+        );
+
+        // Control: with the square clear both pushes are pseudo-legal.
+        let clear = game_from_icn("w 0/100 1 (8;q|1;q) K1,1|P4,4|k8,8");
+        assert!(StagedMoveGen::is_pseudo_legal(&clear, &push));
+        assert!(StagedMoveGen::is_pseudo_legal(&clear, &double));
     }
 
     #[test]

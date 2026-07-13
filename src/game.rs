@@ -2996,14 +2996,21 @@ impl GameState {
             }
         }
 
-        let king_pos = if self.turn == PlayerColor::White {
-            self.white_royals.first().copied()
+        let royals = if self.turn == PlayerColor::White {
+            &self.white_royals
         } else {
-            self.black_royals.first().copied()
+            &self.black_royals
         };
 
-        let Some(king) = king_pos else {
-            // No king - can't be pinned
+        // Multi-royal: the single-royal pin test below reasons about one royal
+        // only, so a move clear of that royal's rays can still expose another.
+        // Force the full verifier.
+        if royals.len() > 1 {
+            return Err(());
+        }
+
+        let Some(&king) = royals.first() else {
+            // No royal - nothing can be left in check.
             return Ok(true);
         };
 
@@ -5277,6 +5284,37 @@ mod tests {
         game.recompute_piece_counts();
 
         assert!(!game.white_non_pawn_material);
+    }
+
+    #[test]
+    fn test_is_legal_fast_defers_for_multiple_royals() {
+        // With two royals, a move clear of the first royal's rays could still
+        // expose the second, so is_legal_fast must defer to the full verifier.
+        let mut multi = GameState::new();
+        multi.setup_position_from_icn("w (8;q|1;q) K1,1|K3,3|R5,4|k8,8");
+        multi.recompute_piece_counts();
+        assert!(multi.white_royals.len() >= 2, "expected two white royals");
+
+        let rook = Piece::new(PieceType::Rook, PlayerColor::White);
+        let m = Move {
+            from: Coordinate::new(5, 4),
+            to: Coordinate::new(6, 4),
+            piece: rook,
+            promotion: None,
+            rook_coord: None,
+        };
+        // (5,4) is off every ray from the first royal (1,1).
+        assert_eq!(
+            multi.is_legal_fast(&m, false),
+            Err(()),
+            "multi-royal must defer to the full legality check"
+        );
+
+        // Control: a single royal with identical geometry stays on the fast path.
+        let mut single = GameState::new();
+        single.setup_position_from_icn("w (8;q|1;q) K1,1|R5,4|k8,8");
+        single.recompute_piece_counts();
+        assert_eq!(single.is_legal_fast(&m, false), Ok(true));
     }
 
     #[test]
