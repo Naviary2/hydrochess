@@ -56,6 +56,19 @@ pub struct NegamaxContext<'a> {
     pub excluded_move: Option<Move>,
 }
 
+/// Snapshot of the per-ply node-context fields, returned by
+/// `Searcher::push_move_context`/`push_null_context` and restored by
+/// `pop_move_context`. `Copy` so the main loop can hold one backup across the
+/// singular-extension undo/re-make dance without moving it.
+#[derive(Clone, Copy)]
+struct MoveContextBackup {
+    prev_move: (usize, usize),
+    move_hist: Option<Move>,
+    piece: u8,
+    in_check: bool,
+    capture: bool,
+}
+
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 fn now_ms() -> f64 {
     Date::now()
@@ -116,7 +129,7 @@ pub const MATE_VALUE: i32 = 900_000;
 pub const MATE_SCORE: i32 = 800_000;
 pub const THINK_TIME_MS: u128 = 3000; // 3 seconds per move (default, may be overridden by caller)
 
-pub const MAX_SITE_SKILL: u32 = 3; // Current max skill level on the site
+pub const MAX_SITE_SKILL: u32 = 8; // Current max skill level on the site
 pub const MAX_PV_COUNT: usize = 4; // MultiPV lines to use when limiting strength
 
 #[inline(always)]
@@ -730,6 +743,72 @@ pub struct ThreadResult {
     pub nodes: u64,
     /// Thread index (for debugging)
     pub thread_id: usize,
+}
+
+/// Pick the winning thread's result index by weighted voting — a faithful port
+/// of Stockfish `get_best_thread` (stockfish-classic/src/thread.cpp).
+///
+/// Each move accrues `(score - minScore + 14) * completedDepth` votes. Then:
+/// - if the current best is decisive (proven win or loss), the higher score
+///   wins — shortest mate when winning, longest resistance / escape when losing;
+/// - otherwise switch to a proven win, or to a non-losing thread with more votes,
+///   but never to a proven loss.
+///
+/// The move key includes the promotion type so distinct promotions to the same
+/// square don't share votes (a two-square castling move is already distinct via
+/// its destination coordinate).
+#[cfg(feature = "multithreading")]
+fn select_best_thread(all_results: &[ThreadResult]) -> usize {
+    let min_score = all_results.iter().map(|r| r.score).min().unwrap_or(0);
+
+    let move_key = |m: &Move| {
+        (
+            m.from.x,
+            m.from.y,
+            m.to.x,
+            m.to.y,
+            m.promotion.map_or(0u8, |pt| pt as u8),
+        )
+    };
+
+    let mut votes: rustc_hash::FxHashMap<(i64, i64, i64, i64, u8), i64> =
+        rustc_hash::FxHashMap::default();
+    for r in all_results {
+        let vote_value = (r.score - min_score + 14) as i64 * r.completed_depth as i64;
+        *votes.entry(move_key(&r.best_move)).or_insert(0) += vote_value;
+    }
+
+    let thread_voting_value =
+        |r: &ThreadResult| -> i64 { (r.score - min_score + 14) as i64 * r.completed_depth as i64 };
+
+    let mut best_idx = 0;
+    for (i, r) in all_results.iter().enumerate() {
+        let best = &all_results[best_idx];
+
+        let best_vote = votes.get(&move_key(&best.best_move)).copied().unwrap_or(0);
+        let new_vote = votes.get(&move_key(&r.best_move)).copied().unwrap_or(0);
+
+        let best_in_proven_win = is_win(best.score);
+        let new_in_proven_win = is_win(r.score);
+        let best_in_proven_loss = best.score != -INFINITY && is_loss(best.score);
+
+        // Prefer threads with a non-truncated PV on exact vote ties.
+        let better_voting_with_pv = thread_voting_value(r) * (if r.pv_length > 2 { 1 } else { 0 })
+            > thread_voting_value(best) * (if best.pv_length > 2 { 1 } else { 0 });
+
+        if best_in_proven_win || best_in_proven_loss {
+            if r.score > best.score {
+                best_idx = i;
+            }
+        } else if new_in_proven_win
+            || (!is_loss(r.score)
+                && (new_vote > best_vote || (new_vote == best_vote && better_voting_with_pv)))
+        {
+            best_idx = i;
+        }
+    }
+
+    best_idx
 }
 
 thread_local! {
@@ -1397,6 +1476,66 @@ impl Searcher {
 
         // Reset TT move history
         self.tt_move_history = 0;
+    }
+
+    /// Install the per-ply node context that child searches and the
+    /// continuation-history offsets read at `ply`: the move played, the piece
+    /// that moved, whether this node was in check, and whether the move was a
+    /// capture. Returns a backup to restore with [`Self::pop_move_context`]
+    /// once the child returns. Centralizes what several recursion sites used to
+    /// install inconsistently (main loop, ProbCut, null move, qsearch).
+    #[inline]
+    fn push_move_context(
+        &mut self,
+        ply: usize,
+        m: &Move,
+        in_check: bool,
+        is_capture: bool,
+    ) -> MoveContextBackup {
+        let backup = MoveContextBackup {
+            prev_move: self.prev_move_stack[ply],
+            move_hist: self.move_history[ply],
+            piece: self.moved_piece_history[ply],
+            in_check: self.in_check_history[ply],
+            capture: self.capture_history_stack[ply],
+        };
+        self.prev_move_stack[ply] = (hash_move_from(m), hash_move_dest(m));
+        self.move_history[ply] = Some(*m);
+        self.moved_piece_history[ply] = m.piece.piece_type() as u8;
+        self.in_check_history[ply] = in_check;
+        self.capture_history_stack[ply] = is_capture;
+        backup
+    }
+
+    /// Install a null-move context. `move_history[ply] = None` disables the
+    /// continuation-history lookups keyed on this ply (a null move has no
+    /// piece/from/to), and the other fields are reset to neutral values.
+    #[inline]
+    fn push_null_context(&mut self, ply: usize) -> MoveContextBackup {
+        let backup = MoveContextBackup {
+            prev_move: self.prev_move_stack[ply],
+            move_hist: self.move_history[ply],
+            piece: self.moved_piece_history[ply],
+            in_check: self.in_check_history[ply],
+            capture: self.capture_history_stack[ply],
+        };
+        self.prev_move_stack[ply] = (0, 0);
+        self.move_history[ply] = None;
+        self.moved_piece_history[ply] = 0;
+        self.in_check_history[ply] = false;
+        self.capture_history_stack[ply] = false;
+        backup
+    }
+
+    /// Restore the per-ply node context saved by [`Self::push_move_context`] /
+    /// [`Self::push_null_context`].
+    #[inline]
+    fn pop_move_context(&mut self, ply: usize, backup: MoveContextBackup) {
+        self.prev_move_stack[ply] = backup.prev_move;
+        self.move_history[ply] = backup.move_hist;
+        self.moved_piece_history[ply] = backup.piece;
+        self.in_check_history[ply] = backup.in_check;
+        self.capture_history_stack[ply] = backup.capture;
     }
 
     /// Gravity-style history update: scales updates based on current value and clamps to [-MAX_HISTORY, MAX_HISTORY].
@@ -2416,6 +2555,7 @@ pub fn get_best_move(
     )
 }
 
+
 #[cfg(feature = "multithreading")]
 pub fn get_best_move_parallel(
     game: &mut GameState,
@@ -2425,16 +2565,19 @@ pub fn get_best_move_parallel(
     silent: bool,
     is_soft_limit: bool,
 ) -> Option<(Move, i32, SearchStats)> {
-    use rustc_hash::FxHashMap;
     use std::sync::{Arc, Mutex};
 
     // Clear global stop flag
     GLOBAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
 
-    // Pool size (initThreadPool on wasm, RAYON_NUM_THREADS native) decides the thread count.
-    // Like Stockfish, gameplay MT gains come from best-thread VOTING at fixed time — not
-    // faster time-to-depth — so all pool threads participate.
+    // Lazy SMP runs only where a thread pool was explicitly provisioned
+    // (initThreadPool on wasm decides the count). Native builds always search
+    // single-threaded; parallelism there belongs to the caller (e.g. one
+    // engine per game), which must not share the global stop/TT coordination.
+    #[cfg(target_arch = "wasm32")]
     let num_threads = rayon::current_num_threads().max(1);
+    #[cfg(not(target_arch = "wasm32"))]
+    let num_threads = 1;
 
     USE_SHARED_TT.store(num_threads > 1, std::sync::atomic::Ordering::Relaxed);
 
@@ -2540,83 +2683,8 @@ pub fn get_best_move_parallel(
         return None;
     }
 
-    // ========================================================================
-    // Thread Voting Algorithm
-    // ========================================================================
-
-    // Step 1: Find minimum score among all threads
-    let min_score = all_results.iter().map(|r| r.score).min().unwrap_or(0);
-
-    // Step 2: Build vote map - each move gets weighted votes from threads
-    // Vote weight = (score - minScore + 14) * completedDepth
-    // The +14 ensures even the worst-scoring thread contributes positively
-    let mut votes: FxHashMap<(i64, i64, i64, i64), i64> = FxHashMap::default();
-
-    for r in &all_results {
-        let move_key = (
-            r.best_move.from.x,
-            r.best_move.from.y,
-            r.best_move.to.x,
-            r.best_move.to.y,
-        );
-        let vote_value = (r.score - min_score + 14) as i64 * r.completed_depth as i64;
-        *votes.entry(move_key).or_insert(0) += vote_value;
-    }
-
-    // Step 3: Select best thread
-    let mut best_idx = 0;
-
-    // Helper to compute voting value for a thread
-    let thread_voting_value =
-        |r: &ThreadResult| -> i64 { (r.score - min_score + 14) as i64 * r.completed_depth as i64 };
-
-    for (i, r) in all_results.iter().enumerate() {
-        let best = &all_results[best_idx];
-
-        let best_move_key = (
-            best.best_move.from.x,
-            best.best_move.from.y,
-            best.best_move.to.x,
-            best.best_move.to.y,
-        );
-        let new_move_key = (
-            r.best_move.from.x,
-            r.best_move.from.y,
-            r.best_move.to.x,
-            r.best_move.to.y,
-        );
-
-        let best_vote = votes.get(&best_move_key).copied().unwrap_or(0);
-        let new_vote = votes.get(&new_move_key).copied().unwrap_or(0);
-
-        let best_in_proven_win = is_win(best.score);
-        let new_in_proven_win = is_win(r.score);
-        let best_in_proven_loss = best.score != -INFINITY && is_loss(best.score);
-        let new_in_proven_loss = r.score != -INFINITY && is_loss(r.score);
-
-        // Prefer threads with longer PVs (more trustworthy)
-        let better_voting_with_pv = thread_voting_value(r) * (if r.pv_length > 2 { 1 } else { 0 })
-            > thread_voting_value(best) * (if best.pv_length > 2 { 1 } else { 0 });
-
-        if best_in_proven_win {
-            // Already in a winning position: pick the fastest mate
-            if r.score > best.score {
-                best_idx = i;
-            }
-        } else if best_in_proven_loss {
-            // In a losing position: pick the longest resistance
-            if new_in_proven_loss && r.score < best.score {
-                best_idx = i;
-            }
-        } else if new_in_proven_win
-            || new_in_proven_loss
-            || (!is_loss(r.score)
-                && (new_vote > best_vote || (new_vote == best_vote && better_voting_with_pv)))
-        {
-            best_idx = i;
-        }
-    }
-
+    // Select the winning thread by Stockfish-style weighted voting.
+    let best_idx = select_best_thread(&all_results);
     let best_result = &all_results[best_idx];
 
     // Aggregate total nodes from all threads for accurate NPS reporting
@@ -4098,8 +4166,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             if nmp_margin >= beta && game.has_non_pawn_material(game.turn) {
                 let saved_ep = game.en_passant;
                 let saved_plies_from_null = game.plies_from_null;
-                let move_history_backup = searcher.move_history[ply].take();
-                let piece_history_backup = searcher.moved_piece_history[ply];
+                // Install a null context so the child sees "no previous move"
+                // (disabling continuation-history lookups keyed on this ply)
+                // instead of a stale real move from an earlier sibling.
+                let ctx_backup = searcher.push_null_context(ply);
+                searcher.reduction_stack[ply] = 0;
 
                 game.make_null_move();
 
@@ -4126,8 +4197,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 game.en_passant = saved_ep;
                 game.plies_from_null = saved_plies_from_null;
 
-                searcher.move_history[ply] = move_history_backup;
-                searcher.moved_piece_history[ply] = piece_history_backup;
+                searcher.pop_move_context(ply, ctx_backup);
 
                 if searcher.hot.stopped {
                     return 0;
@@ -4209,10 +4279,25 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             #[cfg(feature = "nnue")]
             searcher.nnue_push_move(game, ply, m);
 
+            // Install this node's context for the child search, matching the
+            // main loop. Previously ProbCut searched its child with whatever
+            // context an earlier sibling left, corrupting continuation/
+            // correction history in the ProbCut subtree.
+            let pc_is_capture = game.is_en_passant(&m)
+                || game
+                    .board
+                    .get_piece(m.to.x, m.to.y)
+                    .is_some_and(|p| !p.piece_type().is_neutral_type());
+            let pc_ctx = searcher.push_move_context(ply, &m, in_check, pc_is_capture);
+            searcher.reduction_stack[ply] = 0;
+            searcher.stat_score_stack[ply] =
+                searcher.history[m.piece.piece_type() as usize][hash_move_dest(&m)];
+
             let undo = game.make_move(&m);
 
             if fast_legal.is_err() && game.is_move_illegal() {
                 game.undo_move(&m, undo);
+                searcher.pop_move_context(ply, pc_ctx);
                 continue;
             }
 
@@ -4244,6 +4329,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             }
 
             game.undo_move(&m, undo);
+            searcher.pop_move_context(ply, pc_ctx);
 
             if searcher.hot.stopped {
                 return 0;
@@ -4372,8 +4458,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                         let see_margin = (see_capture_linear() * depth as i32
                             + capt_hist / see_capture_hist_div())
                         .max(0);
-                        let see_value = static_exchange_eval(game, &m);
-                        if see_value < -see_margin {
+                        if !see_ge(game, &m, -see_margin) {
                             continue;
                         }
                     }
@@ -4408,8 +4493,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 // SEE pruning for quiets: skip moves with bad SEE
                 // Threshold: -25 * adj_lmr_depth²
                 let see_threshold = -see_quiet_quad() * adj_lmr_depth * adj_lmr_depth;
-                let see_value = static_exchange_eval(game, &m);
-                if see_value < see_threshold {
+                if !see_ge(game, &m, see_threshold) {
                     continue;
                 }
             }
@@ -4445,6 +4529,11 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
         // clobbers nnue_stack[ply+1], we re-push after the singular verification.
         #[cfg(feature = "nnue")]
         searcher.nnue_push_move(game, ply, m);
+
+        // Pawn history is keyed on the position where the move is chosen (the
+        // parent). Capture it before make_move so the LMR/HLP reductions read
+        // the same slot the cutoff updates write, instead of the child's hash.
+        let parent_pawn_hash = game.pawn_hash;
 
         let mut undo = game.make_move(&m);
 
@@ -4599,6 +4688,13 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
             }
         }
 
+        // Record the stat score of the move we are about to search so the child
+        // reads it (as stat_score_stack[ply]) for evaluation smoothing. Set for
+        // every move, not just on a beta cutoff, so it reflects the actual
+        // parent move rather than a stale value from a prior sibling subtree.
+        searcher.stat_score_stack[ply] =
+            searcher.history[p_type as usize][hash_move_dest(&m)];
+
         let score;
         if legal_moves == 1 {
             // Child type depends on current node type:
@@ -4611,7 +4707,12 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 NodeType::Cut
             };
 
-            // Full window search for first legal move
+            // Full window search for first legal move. Clear the reduction
+            // slot the child reads: unlike the LMR branch (which sets it), the
+            // first move is unreduced, and a depth-0 child that drops straight
+            // to qsearch never consumes/clears it, so it could otherwise be
+            // left stale from an earlier node at this ply.
+            searcher.reduction_stack[ply] = 0;
             let new_depth = ((depth as i32) - 1 + extension).max(0) as usize;
             score = -negamax(&mut NegamaxContext {
                 searcher,
@@ -4643,7 +4744,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
 
                 // History-adjusted LMR
                 let hist_idx = hash_move_dest(&m);
-                let ph_idx = (game.pawn_hash & PAWN_HISTORY_MASK) as usize;
+                let ph_idx = (parent_pawn_hash & PAWN_HISTORY_MASK) as usize;
                 let hist_score = searcher.history[p_type as usize][hist_idx];
                 let pawn_score = searcher.pawn_hist(ph_idx, p_type as usize, hist_idx);
                 reduction -= (hist_score + pawn_score) / 4096;
@@ -4689,7 +4790,7 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 && !is_loss(best_score)
             {
                 let idx = hash_move_dest(&m);
-                let ph_idx = (game.pawn_hash & PAWN_HISTORY_MASK) as usize;
+                let ph_idx = (parent_pawn_hash & PAWN_HISTORY_MASK) as usize;
                 let value = searcher.history[p_type as usize][idx]
                     + searcher.pawn_hist(ph_idx, p_type as usize, idx);
 
@@ -4701,10 +4802,14 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                     // and history is really bad, prune this move entirely.
                     if new_depth <= 0 && value < hlp_history_leaf() {
                         game.undo_move(&m, undo);
-                        // Restore searcher state before continuing
+                        // Restore the full node context (all five fields) before
+                        // continuing — the earlier version left in_check_history
+                        // and capture_history_stack stale.
                         searcher.prev_move_stack[ply] = prev_entry_backup;
                         searcher.move_history[ply] = move_history_backup;
                         searcher.moved_piece_history[ply] = piece_history_backup;
+                        searcher.in_check_history[ply] = in_check_backup;
+                        searcher.capture_history_stack[ply] = capture_backup;
                         continue;
                     }
                 }
@@ -4876,10 +4981,8 @@ fn negamax(ctx: &mut NegamaxContext) -> i32 {
                 searcher.cutoff_cnt[ply] = searcher.cutoff_cnt[ply].saturating_add(1);
             }
 
-            // Record StatScore for this node to influence child evaluation
-            let hist_idx = hash_move_dest(&m);
-            searcher.stat_score_stack[ply] =
-                searcher.history[m.piece.piece_type() as usize][hist_idx];
+            // StatScore for this node is now set before each child search above,
+            // so children see the actual parent move rather than only a cutoff.
 
             if !is_capture {
                 // History bonus for quiet cutoff move, with maluses for previously searched quiets
@@ -5529,13 +5632,11 @@ fn quiescence(
 
         legal_moves += 1;
 
-        // Maintain the per-node move link so deeper qsearch nodes read the right
-        // previous move: prev_sq (the recapture-exception square) and the
-        // correction-history previous-move index both key off these at ply - 1.
-        let prev_entry_backup = searcher.prev_move_stack[ply];
-        let move_history_backup = searcher.move_history[ply].take();
-        searcher.prev_move_stack[ply] = (hash_move_from(m), hash_move_dest(m));
-        searcher.move_history[ply] = Some(*m);
+        // Install the full node context so deeper qsearch nodes read the right
+        // previous move (prev_sq / correction previous-move index) and the
+        // continuation-history offsets see this node's piece/in-check/capture
+        // flags rather than stale values from an earlier sibling.
+        let qs_ctx = searcher.push_move_context(ply, m, in_check, is_capture);
 
         let score = -quiescence(
             searcher,
@@ -5549,8 +5650,7 @@ fn quiescence(
 
         game.undo_move(m, undo);
 
-        searcher.prev_move_stack[ply] = prev_entry_backup;
-        searcher.move_history[ply] = move_history_backup;
+        searcher.pop_move_context(ply, qs_ctx);
 
         if searcher.hot.stopped {
             std::mem::swap(&mut tactical_moves, &mut searcher.move_buffers[ply]);
@@ -5944,6 +6044,97 @@ mod tests {
     }
 
     // ======================== get_best_move Tests ========================
+
+    #[cfg(feature = "multithreading")]
+    fn thread_result(
+        from: (i64, i64),
+        to: (i64, i64),
+        promo: Option<PieceType>,
+        score: i32,
+        depth: usize,
+    ) -> ThreadResult {
+        ThreadResult {
+            best_move: Move {
+                from: Coordinate::new(from.0, from.1),
+                to: Coordinate::new(to.0, to.1),
+                piece: Piece::new(PieceType::Pawn, PlayerColor::White),
+                promotion: promo,
+                rook_coord: None,
+            },
+            score,
+            completed_depth: depth,
+            pv_length: 5,
+            nodes: 0,
+            thread_id: 0,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "multithreading")]
+    fn select_best_thread_matches_stockfish_voting() {
+        let win = MATE_VALUE - 20; // proven win
+        let loss = -MATE_VALUE + 20; // proven loss
+        let long_loss = -MATE_VALUE + 60; // loss, but longer resistance
+
+        // (a) A losing best must yield to a normal (or winning) thread.
+        assert_eq!(
+            select_best_thread(&[
+                thread_result((1, 1), (1, 2), None, loss, 10),
+                thread_result((2, 2), (2, 3), None, 50, 10),
+            ]),
+            1,
+            "a normal thread must override a losing best"
+        );
+
+        // (b) A normal best must never be replaced by a proven loss.
+        assert_eq!(
+            select_best_thread(&[
+                thread_result((1, 1), (1, 2), None, 50, 10),
+                thread_result((2, 2), (2, 3), None, loss, 10),
+            ]),
+            0,
+            "a proven loss must not override a normal best"
+        );
+
+        // (c) Between two losses, pick the longest resistance (higher score).
+        assert_eq!(
+            select_best_thread(&[
+                thread_result((1, 1), (1, 2), None, loss, 10),
+                thread_result((2, 2), (2, 3), None, long_loss, 10),
+            ]),
+            1,
+            "should pick the longest resistance, not the faster loss"
+        );
+
+        // Winning best: pick the fastest mate (higher score).
+        assert_eq!(
+            select_best_thread(&[
+                thread_result((1, 1), (1, 2), None, win, 10),
+                thread_result((2, 2), (2, 3), None, win + 5, 10),
+            ]),
+            1,
+            "should pick the fastest mate"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "multithreading")]
+    fn select_best_thread_distinguishes_promotions() {
+        // Two threads promote to Q vs N on the same square. If promotion were
+        // ignored they would share a vote key and their combined weight (280)
+        // would beat the a1a2 thread (240). Keyed by promotion, each has 140,
+        // so the higher-voted a1a2 move wins.
+        let results = [
+            thread_result((5, 7), (5, 8), Some(PieceType::Queen), 50, 10),
+            thread_result((5, 7), (5, 8), Some(PieceType::Knight), 50, 10),
+            thread_result((1, 1), (1, 2), None, 60, 10),
+        ];
+        assert_eq!(
+            select_best_thread(&results),
+            2,
+            "distinct promotions must not pool their votes"
+        );
+    }
 
     #[test]
     fn test_get_best_move_simple_position() {

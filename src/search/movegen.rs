@@ -132,6 +132,7 @@ impl StagedMoveGen {
         game: &GameState,
     ) -> Self {
         let is_in_check = Self::is_in_check(game);
+        let tt_move = tt_move.map(|m| Self::reconstruct_castling_partner(game, m));
         let tt_valid = tt_move.is_some() && Self::is_pseudo_legal(game, &tt_move.unwrap());
 
         // Set initial stage based on TT move availability
@@ -171,6 +172,7 @@ impl StagedMoveGen {
         debug_assert!(!Self::is_in_check(game), "ProbCut not used when in check");
 
         // TT move valid only if it's a capture and pseudo-legal
+        let tt_move = tt_move.map(|m| Self::reconstruct_castling_partner(game, m));
         let tt_valid = tt_move.is_some()
             && Self::is_capture(game, &tt_move.unwrap())
             && Self::is_pseudo_legal(game, &tt_move.unwrap());
@@ -269,6 +271,38 @@ impl StagedMoveGen {
         Self::moves_match(m, &self.excluded_move)
     }
 
+    /// TT/killer moves are decoded without their castling rook partner, so a
+    /// castling move (a royal stepping two squares) arrives with
+    /// `rook_coord: None` and fails pseudo-legality. Rebuild the partner from
+    /// the current position using the same nearest-eligible-partner rule move
+    /// generation uses, so the castling move validates and is tried rather than
+    /// being silently dropped (a generated castling move otherwise matches the
+    /// invalid TT move on from/to and gets skipped as "already tried").
+    fn reconstruct_castling_partner(game: &GameState, mut m: Move) -> Move {
+        if m.rook_coord.is_some() || !m.piece.piece_type().is_royal() {
+            return m;
+        }
+        let dx = m.to.x - m.from.x;
+        if dx.abs() != 2 {
+            return m;
+        }
+        let dir = if dx > 0 { 1i64 } else { -1i64 };
+        if let Some(row) = game.spatial_indices.rows.get(&m.from.y) {
+            if let Some((partner_x, packed)) = row.find_nearest(m.to.x, dir) {
+                let partner = crate::board::Piece::from_packed(packed);
+                let partner_coord = crate::board::Coordinate::new(partner_x, m.from.y);
+                if partner.color() == m.piece.color()
+                    && partner.piece_type() != PieceType::Pawn
+                    && !partner.piece_type().is_royal()
+                    && game.special_rights.contains(&partner_coord)
+                {
+                    m.rook_coord = Some(partner_coord);
+                }
+            }
+        }
+        m
+    }
+
     #[inline]
     fn is_tt_move(&self, m: &Move) -> bool {
         Self::moves_match(m, &self.tt_move)
@@ -305,14 +339,19 @@ impl StagedMoveGen {
             return false;
         }
 
-        // 3. Target Occupancy Check (Generic)
+        // 3. Target Occupancy Check (Generic). Fetch the target tile once and
+        // read both the packed piece (for identity) and the occupancy bit. A
+        // neutral Void packs to 0 yet occupies, so pawn pushes below must test
+        // occupancy, not packed==0 — but taking occ_all from this same fetch
+        // avoids a second tile lookup.
         let (tx, ty) = tile_coords(m.to.x, m.to.y);
-        let target_packed = if tx == cx && ty == cy {
-            tile.piece[local_index(m.to.x, m.to.y)]
+        let to_idx = local_index(m.to.x, m.to.y);
+        let (target_packed, target_occupied) = if tx == cx && ty == cy {
+            (tile.piece[to_idx], (tile.occ_all >> to_idx) & 1 != 0)
         } else {
             match game.board.tiles.get_tile(tx, ty) {
-                Some(t) => t.piece[local_index(m.to.x, m.to.y)],
-                None => 0,
+                Some(t) => (t.piece[to_idx], (t.occ_all >> to_idx) & 1 != 0),
+                None => (0, false),
             }
         };
 
@@ -335,26 +374,29 @@ impl StagedMoveGen {
                 };
 
                 if dx == 0 {
-                    // Push
+                    // Push. Emptiness is judged by occupancy (Void occupies but
+                    // packs to 0); the target bit was read with the tile above.
                     if dy == dir {
-                        target_packed == 0
+                        !target_occupied
                     } else if dy == 2 * dir {
                         // 2 steps
-                        if target_packed != 0 {
+                        if target_occupied {
                             return false;
                         }
-                        // Check intermediate
+                        // Intermediate square: one direct occ_all read (reuse
+                        // the from-tile when the mid square is in it).
                         let mid_y = m.from.y + dir;
+                        let mid_idx = local_index(m.from.x, mid_y);
                         let (mx, my) = tile_coords(m.from.x, mid_y);
-                        let mid_packed = if mx == cx && my == cy {
-                            tile.piece[local_index(m.from.x, mid_y)]
+                        let mid_occupied = if mx == cx && my == cy {
+                            (tile.occ_all >> mid_idx) & 1 != 0
                         } else {
                             match game.board.tiles.get_tile(mx, my) {
-                                Some(t) => t.piece[local_index(m.from.x, mid_y)],
-                                None => 0,
+                                Some(t) => (t.occ_all >> mid_idx) & 1 != 0,
+                                None => false,
                             }
                         };
-                        mid_packed == 0
+                        !mid_occupied
                     } else {
                         false
                     }
@@ -1056,6 +1098,66 @@ mod tests {
             &no_enemy_royal,
             &queen
         ));
+    }
+
+    #[test]
+    fn tt_castling_move_survives_missing_rook_coord() {
+        // King e1 and rook h1 both retain rights; kingside castling is legal.
+        let game = game_from_icn("w 0/100 1 (8;q|1;q) K5,1+|R8,1+|k5,8");
+
+        let castle = game
+            .get_legal_moves()
+            .into_iter()
+            .find(|m| m.piece.piece_type() == PieceType::King && (m.to.x - m.from.x).abs() == 2)
+            .expect("kingside castling should be legal");
+        assert!(castle.rook_coord.is_some(), "generated castling has a partner");
+
+        // Simulate the TT/killer round-trip, which drops the rook partner.
+        let tt_decoded = Move {
+            rook_coord: None,
+            ..castle
+        };
+
+        let searcher = Searcher::new(1000);
+        let mut picker = StagedMoveGen::new(Some(tt_decoded), 0, 2, &searcher, &game);
+
+        let mut found = false;
+        while let Some(m) = picker.next(&game, &searcher) {
+            if m.from == castle.from && m.to == castle.to {
+                found = true;
+                assert!(
+                    m.rook_coord.is_some(),
+                    "emitted castling move lost its rook partner"
+                );
+            }
+        }
+        assert!(found, "castling move was dropped when it was the TT move");
+    }
+
+    #[test]
+    fn pseudo_legal_rejects_pawn_moves_onto_or_through_void() {
+        // A neutral Void packs to byte 0 but occupies its square. A packed-only
+        // emptiness test would let a (stale TT/killer) pawn push land on or pass
+        // through it; occupancy-based checks must reject that.
+        let game = game_from_icn("w 0/100 1 (8;q|1;q) K1,1|P4,4|k8,8|VO4,5");
+        assert!(game.board.is_occupied(4, 5), "void should occupy its square");
+
+        let pawn = Piece::new(PieceType::Pawn, PlayerColor::White);
+        let push = Move::new(Coordinate::new(4, 4), Coordinate::new(4, 5), pawn);
+        let double = Move::new(Coordinate::new(4, 4), Coordinate::new(4, 6), pawn);
+        assert!(
+            !StagedMoveGen::is_pseudo_legal(&game, &push),
+            "pawn must not push onto a void"
+        );
+        assert!(
+            !StagedMoveGen::is_pseudo_legal(&game, &double),
+            "pawn must not push through a void"
+        );
+
+        // Control: with the square clear both pushes are pseudo-legal.
+        let clear = game_from_icn("w 0/100 1 (8;q|1;q) K1,1|P4,4|k8,8");
+        assert!(StagedMoveGen::is_pseudo_legal(&clear, &push));
+        assert!(StagedMoveGen::is_pseudo_legal(&clear, &double));
     }
 
     #[test]
