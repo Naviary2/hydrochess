@@ -69,7 +69,8 @@ jobs:
           VERSION: ${{ steps.decide.outputs.version }}
         run: |
           cd pkg
-          zip -r "../hydrochess-wasm-v${VERSION}.zip" .
+          # Exclude local dev markers (dotfiles) that aren't build output.
+          zip -r "../hydrochess-wasm-v${VERSION}.zip" . -x ".*"
 
       - name: Commit, tag, and publish release
         if: steps.decide.outputs.release == 'true'
