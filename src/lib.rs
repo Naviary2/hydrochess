@@ -255,6 +255,13 @@ pub fn set_hash_size(mb: u32) {
     crate::search::set_tt_size_mb(mb as usize);
 }
 
+/// Returns the engine's version — read from the `version` field
+/// in Cargo.toml at compile time via Cargo's `CARGO_PKG_VERSION`.
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 // Lazy SMP via wasm-bindgen-rayon (shared memory thread pool)
 #[cfg(all(target_arch = "wasm32", feature = "multithreading"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
