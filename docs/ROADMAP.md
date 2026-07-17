@@ -13,7 +13,6 @@ The single biggest opportunity for strength gain is fine-tuning the engine's par
 ### The Plan
 1.  **Optimization of SPSA Tuner**:
     - We have an SPSA tuner (`src/bin/spsa.rs`) that runs match-based self-play from the CLI, but it needs large-scale testing time to converge cleanly on stronger parameter sets.
-    - *Goal*: Optimize the tuner or distribute the workload.
 2.  **Hand-tuning via SPRT**:
     - **Alternative**: Contributors can hand-tune the most relevant parameters (e.g., piece values, evaluation weights, LMR reductions) and verify them using the SPRT test suite.
     - This allows for quick gains without too much effort.
@@ -31,7 +30,7 @@ The single biggest opportunity for strength gain is fine-tuning the engine's par
 Beyond just tuning numbers, the evaluation function itself needs better metrics to understand Infinite Chess positions.
 
 ### The Problem
-The current evaluation is a simple adaptation of standard chess rules with a few infinite-specific tweaks. It lacks "smart" metrics for an infinite board, such as better understanding of piece safety, long-range attacks, or unique pawn structures in unbounded space.
+The current evaluation is an adaptation of standard chess rules with a few infinite-specific tweaks. It lacks "smart" metrics for an infinite board, such as better understanding of piece safety, long-range attacks, or unique structures in unbounded space.
 
 ### The Plan
 - Implement smarter evaluation terms in `src/evaluation/base.rs`.
@@ -40,23 +39,6 @@ The current evaluation is a simple adaptation of standard chess rules with a few
 
 ### Relevant Files
 - `src/evaluation/base.rs`
-
----
-
-## Priority 3: Multithreading Optimization
-
-We have a Lazy SMP implementation, but it's not faster or stronger than single-threaded execution due to overhead.
-
-### The Problem
-The infrastructure exists (`src/search/shared_tt.rs`, `get_best_move_parallel`), but it needs optimization to actually scale.
-
-### The Plan
-1.  **Optimize Shared State**: Improve Transposition Table access patterns for threads.
-2.  **Refine Threading Logic**: Better work distribution in `get_best_move_parallel`.
-
-### Relevant Files
-- `src/search/shared_tt.rs`
-- `src/search.rs`
 
 ---
 
